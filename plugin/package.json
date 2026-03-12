@@ -1,0 +1,14 @@
+{
+  "name": "@agent-cockpit/plugin",
+  "version": "0.1.0",
+  "description": "OpenCode Agent Cockpit - event forwarder plugin",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/index.ts --outfile dist/index.js --format esm",
+    "dev": "bun build src/index.ts --outfile dist/index.js --format esm --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
