@@ -58,7 +58,7 @@ export function PartProjectionPanel({ sessionId }: Props) {
           withPosition: true,
           embeddingMode: "dashscope",
           keywordMode: "off",
-          embeddingModel: "text-embedding-v4",
+          embeddingModel: "text-embedding-v3",
         },
         15000,
       )
@@ -85,7 +85,7 @@ export function PartProjectionPanel({ sessionId }: Props) {
               withPosition: true,
               embeddingMode: "mock",
               keywordMode: "off",
-              embeddingModel: "text-embedding-v4",
+              embeddingModel: "text-embedding-v3",
             },
             100000,
           )

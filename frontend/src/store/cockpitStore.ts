@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import type { Session, Message, ToolStats, ToolCallRecord, TodoItem, SkillRecord, Metrics, Snapshot } from "../types"
+import type { Session, Message, ToolStats, ToolCallRecord, TodoItem, SkillRecord, Metrics, Snapshot, OverviewMessageNode } from "../types"
 import { api } from "../services/api"
 
 // Debounced tool-stats refresh: coalesces rapid tool events into one fetch
@@ -16,6 +16,7 @@ interface CockpitState {
   connected: boolean
   sessions: Record<string, Session>
   overviewTick: number
+  overviewIncrementalEvent: { directory: string; nodes: OverviewMessageNode[]; at: number } | null
   messages: Record<string, Message[]>     // sessionId → messages
   toolStats: ToolStats[]
   toolCalls: ToolCallRecord[]
@@ -51,6 +52,7 @@ export const useCockpitStore = create<CockpitState>((set, get) => ({
   connected: false,
   sessions: {},
   overviewTick: 0,
+  overviewIncrementalEvent: null,
   messages: {},
   toolStats: [],
   toolCalls: [],
@@ -150,6 +152,15 @@ export const useCockpitStore = create<CockpitState>((set, get) => ({
       case "message.updated":
         // 只在 message 级事件触发 Overview 增量更新，避免高频 part 事件造成抖动
         set((s) => ({ overviewTick: s.overviewTick + 1 }))
+        break
+      case "overview.incremental":
+        set({
+          overviewIncrementalEvent: {
+            directory: (d.directory as string) ?? "",
+            nodes: (d.addedMessageNodes as OverviewMessageNode[]) ?? [],
+            at: Date.now(),
+          },
+        })
         break
       case "message.part.updated":
         // part 级更新可能非常频繁，这里不触发 overviewTick

@@ -28,6 +28,38 @@ def message_layout_text(message):
     return "\n\n".join(chunks).strip()
 
 
+def message_visual_type(message):
+    """
+    Overview 小点颜色分类用的消息类型：
+    - 优先从 parts.type 统计主类型
+    - 无法判断时回退到 role（user/assistant）
+    """
+    parts = message.get("parts") or []
+    counts = {}
+    for p in parts:
+        ptype = (p.get("type") or "").strip().lower()
+        if not ptype:
+            continue
+        counts[ptype] = counts.get(ptype, 0) + 1
+    if counts:
+        priority = {
+            "reasoning": 6,
+            "compaction": 5,
+            "tool": 4,
+            "text": 3,
+            "step-start": 2,
+            "step-finish": 1,
+        }
+        ranked = sorted(
+            counts.items(),
+            key=lambda kv: (kv[1], priority.get(kv[0], 0)),
+            reverse=True,
+        )
+        return ranked[0][0]
+    role = (message.get("role") or "").strip().lower()
+    return role or "unknown"
+
+
 def pairwise_sqdist(vectors):
     n = len(vectors)
     d2 = [[0.0] * n for _ in range(n)]

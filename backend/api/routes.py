@@ -11,6 +11,7 @@ from services.projection_service import (
 )
 from services.overview_layout import (
     message_layout_text as _message_layout_text,
+    message_visual_type as _message_visual_type,
     reduce_vectors_2d as _reduce_vectors_2d,
     agent_group_status as _agent_group_status,
     first_user_message_text as _first_user_message_text,
@@ -59,7 +60,7 @@ def _embed_by_mode(texts, embedding_mode: str, embedding_model: str):
         debug["mode"] = "hf"
         return vectors, debug
 
-    model = embedding_model or "text-embedding-v4"
+    model = embedding_model or "text-embedding-v3"
     embedder = DashScopeEmbedder(model=model)
     key_err = embedder.ensure_ready()
     if key_err:
@@ -67,6 +68,142 @@ def _embed_by_mode(texts, embedding_mode: str, embedding_model: str):
     vectors, debug = embedder.embed_texts(texts)
     debug["mode"] = "dashscope"
     return vectors, debug
+
+
+def compute_overview_incremental(
+    directory: str,
+    embedding_mode: str | None = None,
+    embedding_model: str | None = None,
+    message_radius: float | None = None,
+):
+    """
+    供 API 与事件流复用的增量布局计算。
+    返回 (resp_dict, http_status_code)。
+    """
+    directory = (directory or "").strip()
+    if not directory:
+        return {"error": "directory is required", "addedMessageNodes": [], "debug": {}}, 400
+
+    state = _overview_states().get(directory)
+    if not state:
+        return {
+            "error": "incremental state not found, call /overview/projection/init first",
+            "addedMessageNodes": [],
+            "debug": {"directory": directory, "needInit": True},
+        }, 409
+
+    mode = (embedding_mode or state.get("embeddingMode", "dashscope") or "dashscope").strip().lower()
+    model = (embedding_model or state.get("embeddingModel", "") or "").strip()
+    if not model:
+        model = "BAAI/bge-m3" if mode == "hf" else "text-embedding-v3"
+    radius = float(message_radius if message_radius is not None else state.get("messageRadius", 0.28))
+    radius = max(0.05, min(0.95, radius))
+
+    sessions = [s for s in _store().all_sessions() if (s.get("directory") or "") == directory]
+    known_ids = state.get("knownMessageIds") or set()
+    if not isinstance(known_ids, set):
+        known_ids = set(known_ids)
+    landmarks = state.get("landmarks") or []
+    center_by_agent = state.get("agentCenters") or {}
+
+    pending = []
+    dropped = 0
+    for s in sessions:
+        sid = s["id"]
+        agent = (s.get("agent") or "unknown").strip() or "unknown"
+        for m in _store().get_messages(sid):
+            mid = m.get("id") or ""
+            if not mid or mid in known_ids:
+                continue
+            layout_text = _message_layout_text(m)
+            if not layout_text:
+                dropped += 1
+                continue
+            msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()[:12]
+            pending.append({
+                "nodeId": f"msg-{msg_node_id}",
+                "agent": agent,
+                "sessionId": sid,
+                "messageId": mid,
+                "role": m.get("role"),
+                "type": _message_visual_type(m),
+                "timestamp": m.get("timestamp"),
+                "embeddingInput": layout_text,
+            })
+
+    if not pending:
+        state["knownMessageIds"] = known_ids
+        return {
+            "directory": directory,
+            "addedMessageNodes": [],
+            "debug": {
+                "directory": directory,
+                "addedCount": 0,
+                "droppedCount": dropped,
+                "knownMessageCount": len(known_ids),
+            },
+        }, 200
+
+    texts = [n["embeddingInput"] for n in pending]
+    try:
+        vectors, _ = _embed_by_mode(
+            texts=texts,
+            embedding_mode=mode,
+            embedding_model=model,
+        )
+    except Exception as exc:
+        return {"error": f"Embedding failed: {exc}", "addedMessageNodes": [], "debug": {"directory": directory}}, 502
+
+    for i, node in enumerate(pending):
+        vec = vectors[i] if i < len(vectors) else []
+        node["embedding"] = vec
+        cx, cy = center_by_agent.get(node["agent"], (0.0, 0.0))
+        x, y = _place_point_by_landmarks(
+            msg_vec=vec,
+            landmarks=landmarks,
+            agent_center=(cx, cy),
+            message_radius=radius,
+        )
+        node["x"] = x
+        node["y"] = y
+        known_ids.add(node["messageId"])
+
+    state["knownMessageIds"] = known_ids
+    state["messageRadius"] = radius
+    old_message_nodes = state.get("messageNodes") or []
+    if not isinstance(old_message_nodes, list):
+        old_message_nodes = []
+    state["messageNodes"] = [*old_message_nodes, *pending]
+    state["cacheReady"] = True
+    _overview_states()[directory] = state
+
+    current_app.logger.info(
+        "[overview.incremental] %s",
+        json.dumps(
+            {
+                "directory": directory,
+                "addedCount": len(pending),
+                "knownMessageCount": len(known_ids),
+                "landmarkCount": len(landmarks),
+                "embeddingMode": mode,
+                "embeddingModel": model,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    return {
+        "directory": directory,
+        "addedMessageNodes": pending,
+        "debug": {
+            "directory": directory,
+            "addedCount": len(pending),
+            "droppedCount": dropped,
+            "knownMessageCount": len(known_ids),
+            "landmarkCount": len(landmarks),
+            "layoutMethod": "landmark_weighted_projection_v1",
+            "landmarkSource": "agent init fallback (todo -> first_user_message -> session_title)",
+        },
+    }, 200
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -118,7 +255,7 @@ def get_overview_projection_init():
     embedding_mode = (request.args.get("embeddingMode", "dashscope") or "dashscope").strip().lower()
     embedding_model = (request.args.get("embeddingModel", "") or "").strip()
     if not embedding_model:
-        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v4"
+        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v3"
     reduction_algo = (request.args.get("reductionAlgo", "mds") or "mds").strip().lower()
     message_radius = float(request.args.get("messageRadius", "0.28") or "0.28")
     message_radius = max(0.05, min(0.95, message_radius))
@@ -139,6 +276,60 @@ def get_overview_projection_init():
     )
 
     sessions = [s for s in _store().all_sessions() if (s.get("directory") or "") == directory]
+    state = _overview_states().get(directory) or {}
+    known_ids = state.get("knownMessageIds") or set()
+    if not isinstance(known_ids, set):
+        known_ids = set(known_ids)
+    # 轻量缓存命中判定：message 集合未变化时，直接返回后端已保存坐标，避免重复 embedding/布局计算。
+    current_ids = set()
+    for s in sessions:
+        sid = s.get("id")
+        if not sid:
+            continue
+        for m in _store().get_messages(sid):
+            mid = m.get("id") or ""
+            if not mid:
+                continue
+            layout_text = _message_layout_text(m)
+            if layout_text:
+                current_ids.add(mid)
+    if (
+        state.get("cacheReady")
+        and known_ids == current_ids
+        and isinstance(state.get("agentNodes"), list)
+        and isinstance(state.get("messageNodes"), list)
+        and isinstance(state.get("agentEdges"), list)
+    ):
+        current_app.logger.info(
+            "[overview.init] cache-hit=%s",
+            json.dumps(
+                {
+                    "directory": directory,
+                    "agentCount": len(state.get("agentNodes") or []),
+                    "pointCount": len(state.get("messageNodes") or []),
+                    "knownMessageCount": len(known_ids),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        cached_resp = {
+            "directory": directory,
+            "agentNodes": state.get("agentNodes") or [],
+            "messageNodes": state.get("messageNodes") or [],
+            "agentEdges": state.get("agentEdges") or [],
+            "nodes": state.get("messageNodes") or [],
+            "debug": {
+                "directory": directory,
+                "cacheHit": True,
+                "knownMessageCount": len(known_ids),
+                "withEmbedding": with_embedding,
+                "withPosition": with_position,
+                "embeddingMode": embedding_mode,
+                "embeddingModel": embedding_model,
+            },
+        }
+        return jsonify(cached_resp)
+
     by_agent = {}
     for s in sessions:
         agent = (s.get("agent") or "unknown").strip() or "unknown"
@@ -211,6 +402,7 @@ def get_overview_projection_init():
                     "sessionId": sid,
                     "messageId": mid,
                     "role": m.get("role"),
+                    "type": _message_visual_type(m),
                     "timestamp": m.get("timestamp"),
                     "embeddingInput": layout_text,
                 })
@@ -405,6 +597,10 @@ def get_overview_projection_init():
             "landmarks": landmarks,
             "agentCenters": {n.get("agent"): (n.get("x", 0.0), n.get("y", 0.0)) for n in resp["agentNodes"]},
             "knownMessageIds": {n.get("messageId") for n in resp["messageNodes"] if n.get("messageId")},
+            "agentNodes": resp["agentNodes"],
+            "messageNodes": resp["messageNodes"],
+            "agentEdges": resp["agentEdges"],
+            "cacheReady": True,
         }
         resp["debug"]["incremental"] = {
             "enabled": True,
@@ -426,124 +622,13 @@ def get_overview_projection_incremental():
     - 新点位置使用 Landmark 加权投影（基于 user/todo 等初始化锚点）
     """
     directory = (request.args.get("directory") or "").strip()
-    if not directory:
-        return jsonify({"error": "directory is required", "addedMessageNodes": [], "debug": {}}), 400
-
-    state = _overview_states().get(directory)
-    if not state:
-        return jsonify({
-            "error": "incremental state not found, call /overview/projection/init first",
-            "addedMessageNodes": [],
-            "debug": {"directory": directory, "needInit": True},
-        }), 409
-
-    embedding_mode = (request.args.get("embeddingMode", state.get("embeddingMode", "dashscope")) or "dashscope").strip().lower()
-    embedding_model = (request.args.get("embeddingModel", state.get("embeddingModel", "")) or "").strip()
-    if not embedding_model:
-        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v4"
-    message_radius = float(request.args.get("messageRadius", str(state.get("messageRadius", 0.28))) or "0.28")
-    message_radius = max(0.05, min(0.95, message_radius))
-
-    sessions = [s for s in _store().all_sessions() if (s.get("directory") or "") == directory]
-    known_ids = state.get("knownMessageIds") or set()
-    if not isinstance(known_ids, set):
-        known_ids = set(known_ids)
-    landmarks = state.get("landmarks") or []
-    center_by_agent = state.get("agentCenters") or {}
-
-    pending = []
-    dropped = 0
-    for s in sessions:
-        sid = s["id"]
-        agent = (s.get("agent") or "unknown").strip() or "unknown"
-        for m in _store().get_messages(sid):
-            mid = m.get("id") or ""
-            if not mid or mid in known_ids:
-                continue
-            layout_text = _message_layout_text(m)
-            if not layout_text:
-                dropped += 1
-                known_ids.add(mid)
-                continue
-            msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()[:12]
-            pending.append({
-                "nodeId": f"msg-{msg_node_id}",
-                "agent": agent,
-                "sessionId": sid,
-                "messageId": mid,
-                "role": m.get("role"),
-                "timestamp": m.get("timestamp"),
-                "embeddingInput": layout_text,
-            })
-
-    if not pending:
-        state["knownMessageIds"] = known_ids
-        return jsonify({
-            "directory": directory,
-            "addedMessageNodes": [],
-            "debug": {
-                "directory": directory,
-                "addedCount": 0,
-                "droppedCount": dropped,
-                "knownMessageCount": len(known_ids),
-            },
-        })
-
-    texts = [n["embeddingInput"] for n in pending]
-    try:
-        vectors, _ = _embed_by_mode(
-            texts=texts,
-            embedding_mode=embedding_mode,
-            embedding_model=embedding_model,
-        )
-    except Exception as exc:
-        return jsonify({"error": f"Embedding failed: {exc}", "addedMessageNodes": [], "debug": {"directory": directory}}), 502
-
-    for i, node in enumerate(pending):
-        vec = vectors[i] if i < len(vectors) else []
-        node["embedding"] = vec
-        cx, cy = center_by_agent.get(node["agent"], (0.0, 0.0))
-        x, y = _place_point_by_landmarks(
-            msg_vec=vec,
-            landmarks=landmarks,
-            agent_center=(cx, cy),
-            message_radius=message_radius,
-        )
-        node["x"] = x
-        node["y"] = y
-        known_ids.add(node["messageId"])
-
-    state["knownMessageIds"] = known_ids
-    state["messageRadius"] = message_radius
-    _overview_states()[directory] = state
-
-    current_app.logger.info(
-        "[overview.incremental] %s",
-        json.dumps(
-            {
-                "directory": directory,
-                "addedCount": len(pending),
-                "knownMessageCount": len(known_ids),
-                "landmarkCount": len(landmarks),
-                "embeddingMode": embedding_mode,
-                "embeddingModel": embedding_model,
-            },
-            ensure_ascii=False,
-        ),
+    payload, status = compute_overview_incremental(
+        directory=directory,
+        embedding_mode=request.args.get("embeddingMode"),
+        embedding_model=request.args.get("embeddingModel"),
+        message_radius=float(request.args.get("messageRadius", "0.28") or "0.28"),
     )
-    return jsonify({
-        "directory": directory,
-        "addedMessageNodes": pending,
-        "debug": {
-            "directory": directory,
-            "addedCount": len(pending),
-            "droppedCount": dropped,
-            "knownMessageCount": len(known_ids),
-            "landmarkCount": len(landmarks),
-            "layoutMethod": "landmark_weighted_projection_v1",
-            "landmarkSource": "agent init fallback (todo -> first_user_message -> session_title)",
-        },
-    })
+    return jsonify(payload), status
 
 
 @api_bp.get("/sessions/<session_id>/messages")
@@ -563,7 +648,7 @@ def get_session_part_projection(session_id: str):
     查询参数：
     - keywordMode: off | basic
     - withEmbedding: true | false（默认 true）
-    - embeddingModel: DashScope embedding 模型名（默认 text-embedding-v4）
+    - embeddingModel: DashScope embedding 模型名（默认 text-embedding-v3）
     """
     keyword_mode = (request.args.get("keywordMode", "off") or "off").strip().lower()
     with_embedding = (request.args.get("withEmbedding", "true") or "true").strip().lower() != "false"
@@ -571,7 +656,7 @@ def get_session_part_projection(session_id: str):
     embedding_mode = (request.args.get("embeddingMode", "dashscope") or "dashscope").strip().lower()
     embedding_model = (request.args.get("embeddingModel", "") or "").strip()
     if not embedding_model:
-        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v4"
+        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v3"
 
     messages = _store().get_messages(session_id)
     nodes, extraction_debug = build_part_nodes_from_messages(

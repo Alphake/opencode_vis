@@ -196,12 +196,12 @@ def _vector_norm(vec: List[float]) -> float:
 
 class DashScopeEmbedder:
     """
-    DashScope `text-embedding-v4` 的封装适配器。
+    DashScope embedding 的封装适配器。
 
     API Key 从环境变量 `DASHSCOPE_API_KEY` 读取。
     """
 
-    def __init__(self, model: str = "text-embedding-v4") -> None:
+    def __init__(self, model: str = "text-embedding-v3") -> None:
         self.model = model
         self.api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
         if self.api_key:
@@ -234,7 +234,7 @@ class DashScopeEmbedder:
             },
         )
         embeddings: List[List[float]] = []
-        # 百炼 text-embedding-v4 的单次输入上限为 10，这里统一做自动分批。
+        # DashScope embedding 单次输入上限按保守值 10 进行自动分批。
         batch_size = 10
         last_status_code: Optional[int] = None
         for start in range(0, len(texts), batch_size):

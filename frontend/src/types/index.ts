@@ -158,6 +158,7 @@ export interface OverviewMessageNode {
   sessionId: string
   messageId: string
   role?: string
+  type?: string
   timestamp?: number
   embeddingInput: string
   x?: number
