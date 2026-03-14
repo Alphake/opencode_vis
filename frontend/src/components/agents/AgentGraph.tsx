@@ -114,8 +114,10 @@ interface Props {
   selectedId?: string
 }
 
+/** 左侧图：展示全部 session（来自 store.sessions）。Overview 按 directory 展示 agent 节点，点击后选中 session，在此高亮。 */
 export function AgentGraph({ onSelectSession, selectedId }: Props) {
   const sessions = useCockpitStore((s) => s.sessions)
+
   const { nodes: freshNodes, edges: freshEdges } = useMemo(
     () => buildGraph(sessions),
     [sessions]

@@ -1,0 +1,512 @@
+openapi: 3.0.3
+info:
+  title: Agent Cockpit API
+  description: |
+    - REST 接口前缀 `/api`。
+    - SSE 连接 `GET /api/events/stream`，首条消息为 `__snapshot__`，其 `data` 结构见 `Snapshot` schema。
+  version: 0.1.0
+
+servers:
+  - url: http://localhost:5000/api
+    description: 本地后端
+
+paths:
+  /health:
+    get:
+      summary: 存活检查
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  sessions: { type: integer }
+
+  /sessions:
+    get:
+      summary: 全量 sessions
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Session" }
+
+  /sessions/{session_id}:
+    get:
+      summary: 单条 session
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "404":
+          description: not found
+
+  /sessions/{session_id}/messages:
+    get:
+      summary: 该 session 的消息列表
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Message" }
+
+  /sessions/{session_id}/projection/parts:
+    get:
+      summary: 单 session 的 part 级投影（含 embedding、坐标）
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: keywordMode
+          in: query
+          schema: { type: string, enum: [off, basic] }
+        - name: withEmbedding
+          in: query
+          schema: { type: boolean, default: true }
+        - name: withPosition
+          in: query
+          schema: { type: boolean, default: true }
+        - name: embeddingMode
+          in: query
+          schema: { type: string, enum: [dashscope, hf, mock] }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartProjectionResponse" }
+
+  /overview/projection/init:
+    get:
+      summary: Overview 初始化投影（一条message一个点，后端返回x/y）
+      parameters:
+        - name: directory
+          in: query
+          required: true
+          schema: { type: string }
+        - name: withEmbedding
+          in: query
+          schema: { type: boolean, default: true }
+        - name: withPosition
+          in: query
+          schema: { type: boolean, default: true }
+        - name: embeddingMode
+          in: query
+          schema: { type: string, enum: [dashscope, hf, mock] }
+        - name: embeddingModel
+          in: query
+          schema: { type: string, default: text-embedding-v4 }
+        - name: reductionAlgo
+          in: query
+          schema: { type: string, enum: [mds, tsne], default: mds }
+        - name: messageRadius
+          in: query
+          schema: { type: number, default: 0.28 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  directory: { type: string }
+                  agentNodes:
+                    type: array
+                    items: { $ref: "#/components/schemas/OverviewAgentNode" }
+                  messageNodes:
+                    type: array
+                    items: { $ref: "#/components/schemas/OverviewMessageNode" }
+                  agentEdges:
+                    type: array
+                    items: { $ref: "#/components/schemas/OverviewAgentEdge" }
+                  nodes:
+                    type: array
+                    items: { $ref: "#/components/schemas/OverviewProjectionNode" }
+                  debug: { type: object }
+                  error: { type: string }
+
+  /overview/projection/incremental:
+    get:
+      summary: Overview 增量投影（仅返回新增 message 点）
+      parameters:
+        - name: directory
+          in: query
+          required: true
+          schema: { type: string }
+        - name: embeddingMode
+          in: query
+          schema: { type: string, enum: [dashscope, hf, mock] }
+        - name: embeddingModel
+          in: query
+          schema: { type: string, default: BAAI/bge-m3 }
+        - name: messageRadius
+          in: query
+          schema: { type: number, default: 0.28 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  directory: { type: string }
+                  addedMessageNodes:
+                    type: array
+                    items: { $ref: "#/components/schemas/OverviewMessageNode" }
+                  debug: { type: object }
+                  error: { type: string }
+
+  /agents/hierarchy:
+    get:
+      summary: 根 session 树
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Session" }
+
+  /agents/status:
+    get:
+      summary: 各 session 的 id/agent/status/parentId
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    agent: { type: string }
+                    status: { type: string }
+                    parentId: { type: string, nullable: true }
+
+  /tools/stats:
+    get:
+      summary: 工具统计列表
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ToolStat" }
+
+  /tools/calls:
+    get:
+      summary: 工具调用列表
+      parameters:
+        - name: sessionId
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ToolCallRecord" }
+
+  /todos:
+    get:
+      summary: 全量 todos（按 sessionId）
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items: { $ref: "#/components/schemas/TodoItem" }
+
+  /todos/{session_id}:
+    get:
+      summary: 某 session 的 todos
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TodoItem" }
+
+  /skills:
+    get:
+      summary: 技能列表
+      parameters:
+        - name: sessionId
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SkillRecord" }
+
+  /metrics:
+    get:
+      summary: 聚合指标
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Metrics" }
+
+  /events/stream:
+    get:
+      summary: SSE 流，首条为 __snapshot__
+      description: |
+        Content-Type: text/event-stream。
+        第一条消息 data 为 JSON：{ "type": "__snapshot__", "data": <Snapshot> }。
+        后续为增量事件。
+      responses:
+        "200":
+          description: SSE stream
+
+  /docs/openapi.yaml:
+    get:
+      summary: OpenAPI YAML 文件
+      responses:
+        "200":
+          description: OpenAPI spec content
+
+  /docs:
+    get:
+      summary: Swagger UI 页面
+      responses:
+        "200":
+          description: HTML docs page
+
+components:
+  schemas:
+    Session:
+      type: object
+      required: [id, agent, status, title, directory, createdAt, updatedAt, tokens, cost, children]
+      properties:
+        id: { type: string }
+        agent: { type: string, description: "general / build / explore / plan / unknown" }
+        parentId: { type: string, nullable: true }
+        status: { type: string, enum: [idle, busy, error] }
+        modelId: { type: string, nullable: true }
+        providerId: { type: string, nullable: true }
+        systemPrompt: { type: string, nullable: true }
+        title: { type: string }
+        directory: { type: string }
+        createdAt: { type: number, format: int64 }
+        updatedAt: { type: number, format: int64 }
+        tokens:
+          type: object
+          properties:
+            input: { type: number }
+            output: { type: number }
+            cacheRead: { type: number }
+        cost: { type: number }
+        children: { type: array, items: { type: string } }
+
+    Snapshot:
+      description: "SSE __snapshot__.data，即 loadSnapshot(msg.data) 的入参"
+      type: object
+      properties:
+        sessions:
+          type: array
+          items: { $ref: "#/components/schemas/Session" }
+        toolStats:
+          type: array
+          items: { $ref: "#/components/schemas/ToolStat" }
+        todos:
+          type: object
+          additionalProperties:
+            type: array
+            items: { $ref: "#/components/schemas/TodoItem" }
+        skills:
+          type: array
+          items: { $ref: "#/components/schemas/SkillRecord" }
+        metrics: { $ref: "#/components/schemas/Metrics" }
+
+    Message:
+      type: object
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        role: { type: string }
+        agent: { type: string, nullable: true }
+        timestamp: { type: number }
+        parts: { type: array, items: { $ref: "#/components/schemas/MessagePart" } }
+        tokens: { type: object }
+        cost: { type: number }
+        isCompaction: { type: boolean }
+
+    MessagePart:
+      type: object
+      properties:
+        type: { type: string }
+        content: { type: string, nullable: true }
+        toolName: { type: string, nullable: true }
+        callId: { type: string, nullable: true }
+        toolStatus: { type: string, nullable: true }
+        toolInput: {}
+        toolOutput: { type: string, nullable: true }
+
+    PartProjectionResponse:
+      type: object
+      properties:
+        sessionId: { type: string }
+        nodes:
+          type: array
+          items: { $ref: "#/components/schemas/PartProjectionNode" }
+        debug: { type: object }
+
+    PartProjectionNode:
+      type: object
+      properties:
+        nodeId: { type: string }
+        sessionId: { type: string }
+        messageId: { type: string }
+        agent: { type: string }
+        role: { type: string }
+        timestamp: { type: number }
+        type: { type: string }
+        status: { type: string }
+        payload: { type: object }
+        embeddingInput: { type: string }
+        keywords: { type: array, items: { type: string } }
+        features: { type: object }
+        embedding: { type: array, items: { type: number }, nullable: true }
+        x: { type: number, nullable: true }
+        y: { type: number, nullable: true }
+
+    OverviewProjectionNode:
+      type: object
+      properties:
+        nodeId: { type: string }
+        agent: { type: string }
+        sessionId: { type: string }
+        sessionCount: { type: integer }
+        messageCount: { type: integer }
+        anchorMessageId: { type: string, nullable: true }
+        anchorText: { type: string }
+        embeddingInput: { type: string }
+        embedding:
+          type: array
+          items: { type: number }
+          nullable: true
+        x: { type: number, nullable: true }
+        y: { type: number, nullable: true }
+
+    OverviewAgentNode:
+      type: object
+      properties:
+        nodeId: { type: string }
+        agent: { type: string }
+        status: { type: string, enum: [idle, busy, error] }
+        sessionId: { type: string }
+        sessionCount: { type: integer }
+        embeddingInput: { type: string }
+        initSource: { type: string, enum: [todo, first_user_message, session_title, fallback] }
+        x: { type: number, nullable: true }
+        y: { type: number, nullable: true }
+
+    OverviewMessageNode:
+      type: object
+      properties:
+        nodeId: { type: string }
+        agent: { type: string }
+        sessionId: { type: string }
+        messageId: { type: string }
+        role: { type: string, nullable: true }
+        timestamp: { type: number, nullable: true }
+        embeddingInput: { type: string }
+        x: { type: number, nullable: true }
+        y: { type: number, nullable: true }
+
+    OverviewAgentEdge:
+      type: object
+      properties:
+        sourceAgent: { type: string }
+        targetAgent: { type: string }
+        count: { type: integer }
+
+    ToolStat:
+      type: object
+      properties:
+        toolName: { type: string }
+        totalCalls: { type: integer }
+        successCount: { type: integer }
+        errorCount: { type: integer }
+        avgDurationMs: { type: number }
+        successRate: { type: number }
+        recentCalls: { type: array }
+
+    ToolCallRecord:
+      type: object
+      properties:
+        callId: { type: string }
+        sessionId: { type: string }
+        tool: { type: string }
+        args: { type: object }
+        startedAt: { type: number }
+        endedAt: { type: number, nullable: true }
+        durationMs: { type: number, nullable: true }
+        status: { type: string }
+        title: { type: string }
+        outputSnippet: { type: string }
+        isMcp: { type: boolean }
+        isSkill: { type: boolean }
+
+    TodoItem:
+      type: object
+      properties:
+        content: { type: string }
+        status: { type: string }
+        priority: { type: string }
+
+    SkillRecord:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        sessionId: { type: string }
+        loadedAt: { type: number }
+        source: { type: string }
+
+    Metrics:
+      type: object
+      properties:
+        totalSessions: { type: integer }
+        activeSessions: { type: integer }
+        totalMessages: { type: integer }
+        totalToolCalls: { type: integer }
+        totalTokens:
+          type: object
+          properties:
+            input: { type: number }
+            output: { type: number }
+        totalCost: { type: number }

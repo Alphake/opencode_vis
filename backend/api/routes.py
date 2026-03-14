@@ -1,10 +1,72 @@
 from flask import Blueprint, jsonify, request, current_app
+import hashlib
+import json
+from services.projection_service import (
+    DashScopeEmbedder,
+    HuggingFaceEmbedder,
+    attach_simple_positions,
+    build_mock_embeddings,
+    build_part_nodes_from_messages,
+    log_projection_debug,
+)
+from services.overview_layout import (
+    message_layout_text as _message_layout_text,
+    reduce_vectors_2d as _reduce_vectors_2d,
+    agent_group_status as _agent_group_status,
+    first_user_message_text as _first_user_message_text,
+    first_todo_text as _first_todo_text,
+    place_point_by_landmarks as _place_point_by_landmarks,
+)
 
 api_bp = Blueprint("api", __name__)
 
 
 def _store():
     return current_app.config["STORE"]
+
+
+def _overview_states():
+    states = current_app.config.get("OVERVIEW_STATES")
+    if states is None:
+        states = {}
+        current_app.config["OVERVIEW_STATES"] = states
+    return states
+
+
+def _embed_by_mode(texts, embedding_mode: str, embedding_model: str):
+    """
+    统一 embedding 入口：
+    - dashscope：阿里百炼
+    - hf：本地 HuggingFace（免费开源）
+    - mock：hash 向量（联调兜底）
+    """
+    mode = (embedding_mode or "dashscope").strip().lower()
+    if mode == "mock":
+        vectors = build_mock_embeddings(texts)
+        return vectors, {
+            "mode": "mock",
+            "model": "mock-hash-v1",
+            "vectorDim": len(vectors[0]) if vectors else 0,
+            "vectorCount": len(vectors),
+        }
+    if mode == "hf":
+        model = embedding_model or "BAAI/bge-m3"
+        embedder = HuggingFaceEmbedder(model=model)
+        err = embedder.ensure_ready()
+        if err:
+            raise RuntimeError(err)
+        vectors, debug = embedder.embed_texts(texts)
+        debug["mode"] = "hf"
+        return vectors, debug
+
+    model = embedding_model or "text-embedding-v4"
+    embedder = DashScopeEmbedder(model=model)
+    key_err = embedder.ensure_ready()
+    if key_err:
+        raise RuntimeError(key_err)
+    vectors, debug = embedder.embed_texts(texts)
+    debug["mode"] = "dashscope"
+    return vectors, debug
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -35,9 +97,594 @@ def get_session(session_id: str):
     return jsonify(s.to_dict())
 
 
+@api_bp.get("/overview/projection/init")
+def get_overview_projection_init():
+    """
+    Overview 初始化投影（双层）：
+    - 输入：directory
+    - agentNodes: 一个 agent 一个大点（初始化锚点）
+    - messageNodes: 一条 message 一个小点
+    - 仅使用 text / reasoning / compaction 三类 part 的 content 拼接作为 embeddingInput
+    - tool / step-start / step-finish 不参与布局
+    - content 为 null/空串则跳过
+    - 可选 embedding（dashscope/mock）并在后端返回 x/y
+    """
+    directory = (request.args.get("directory") or "").strip()
+    if not directory:
+        return jsonify({"error": "directory is required", "nodes": [], "debug": {}}), 400
+
+    with_embedding = (request.args.get("withEmbedding", "true") or "true").strip().lower() != "false"
+    with_position = (request.args.get("withPosition", "true") or "true").strip().lower() != "false"
+    embedding_mode = (request.args.get("embeddingMode", "dashscope") or "dashscope").strip().lower()
+    embedding_model = (request.args.get("embeddingModel", "") or "").strip()
+    if not embedding_model:
+        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v4"
+    reduction_algo = (request.args.get("reductionAlgo", "mds") or "mds").strip().lower()
+    message_radius = float(request.args.get("messageRadius", "0.28") or "0.28")
+    message_radius = max(0.05, min(0.95, message_radius))
+    current_app.logger.info(
+        "[overview.init] input=%s",
+        json.dumps(
+            {
+                "directory": directory,
+                "withEmbedding": with_embedding,
+                "withPosition": with_position,
+                "embeddingMode": embedding_mode,
+                "embeddingModel": embedding_model,
+                "reductionAlgo": reduction_algo,
+                "messageRadius": message_radius,
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    sessions = [s for s in _store().all_sessions() if (s.get("directory") or "") == directory]
+    by_agent = {}
+    for s in sessions:
+        agent = (s.get("agent") or "unknown").strip() or "unknown"
+        by_agent.setdefault(agent, []).append(s)
+    sessions_by_id = {s["id"]: s for s in sessions}
+    edge_counts = {}
+    for s in sessions:
+        pid = s.get("parentId")
+        if not pid or pid not in sessions_by_id:
+            continue
+        parent = sessions_by_id[pid]
+        src = (parent.get("agent") or "unknown").strip() or "unknown"
+        tgt = (s.get("agent") or "unknown").strip() or "unknown"
+        if not src or not tgt:
+            continue
+        key = (src, tgt)
+        edge_counts[key] = edge_counts.get(key, 0) + 1
+
+    agent_nodes = []
+    message_nodes = []
+    dropped_messages = 0
+    for agent, sess_list in by_agent.items():
+        # 代表 session：最新一条
+        rep = sorted(sess_list, key=lambda s: s.get("createdAt") or 0, reverse=True)[0]
+        status = _agent_group_status(sess_list)
+
+        # 初始化文本 fallback：todo -> 第一条 user message -> session.title -> fallback
+        todo_text, _ = _first_todo_text(sess_list, _store())
+        user_text, user_mid = _first_user_message_text(sess_list, _store())
+        title_text = (rep.get("title") or "").strip()
+        init_source = "fallback"
+        init_text = f"agent {agent}"
+        if todo_text:
+            init_source = "todo"
+            init_text = todo_text
+        elif user_text:
+            init_source = "first_user_message"
+            init_text = user_text
+        elif title_text:
+            init_source = "session_title"
+            init_text = title_text
+
+        agent_node_id = hashlib.md5(f"{directory}|agent|{agent}".encode("utf-8")).hexdigest()[:12]
+        agent_nodes.append({
+            "nodeId": f"ag-{agent_node_id}",
+            "agent": agent,
+            "status": status,
+            "sessionId": rep["id"],
+            "sessionCount": len(sess_list),
+            "embeddingInput": init_text,
+            "anchorMessageId": user_mid,
+            "initSource": init_source,
+            "messageCount": 0,
+            "anchorText": init_text,
+        })
+
+        # message 小点：只取可布局内容
+        for s in sess_list:
+            sid = s["id"]
+            for m in _store().get_messages(sid):
+                layout_text = _message_layout_text(m)
+                if not layout_text:
+                    dropped_messages += 1
+                    continue
+                mid = m.get("id") or ""
+                msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()[:12]
+                message_nodes.append({
+                    "nodeId": f"msg-{msg_node_id}",
+                    "agent": agent,
+                    "sessionId": sid,
+                    "messageId": mid,
+                    "role": m.get("role"),
+                    "timestamp": m.get("timestamp"),
+                    "embeddingInput": layout_text,
+                })
+
+    resp = {
+        "directory": directory,
+        "agentNodes": agent_nodes,
+        "messageNodes": message_nodes,
+        "agentEdges": [
+            {"sourceAgent": src, "targetAgent": tgt, "count": cnt}
+            for (src, tgt), cnt in edge_counts.items()
+        ],
+        # 兼容旧前端：继续输出 nodes=messageNodes
+        "nodes": message_nodes,
+        "debug": {
+            "directory": directory,
+            "agentCount": len(agent_nodes),
+            "pointCount": len(message_nodes),
+            "sessionCount": len(sessions),
+            "droppedMessageCount": dropped_messages,
+            "withEmbedding": with_embedding,
+            "withPosition": with_position,
+            "embeddingMode": embedding_mode,
+            "embeddingModel": embedding_model,
+            "reductionAlgo": reduction_algo,
+            "messageRadius": message_radius,
+            "edgeCount": len(edge_counts),
+            "initFallbackOrder": ["todo", "first_user_message", "session_title", "fallback"],
+            "partTypesForLayout": ["text", "reasoning", "compaction"],
+        },
+    }
+    current_app.logger.info(
+        "[overview.init] grouped=%s",
+        json.dumps(
+            {
+                "directory": directory,
+                "sessionCount": len(sessions),
+                "agentCount": len(agent_nodes),
+                "pointCount": len(message_nodes),
+                "droppedMessageCount": dropped_messages,
+                "messageRadius": message_radius,
+                "partTypesForLayout": ["text", "reasoning", "compaction"],
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    if with_embedding and (agent_nodes or message_nodes):
+        agent_texts = [n["embeddingInput"] for n in agent_nodes]
+        message_texts = [n["embeddingInput"] for n in message_nodes]
+        texts = agent_texts + message_texts
+        try:
+            vectors, embedding_debug = _embed_by_mode(
+                texts=texts,
+                embedding_mode=embedding_mode,
+                embedding_model=embedding_model,
+            )
+            # 写回 embedding：先 agent，再 message
+            for i, vec in enumerate(vectors[:len(agent_nodes)]):
+                resp["agentNodes"][i]["embedding"] = vec
+            for i, vec in enumerate(vectors[len(agent_nodes):]):
+                resp["messageNodes"][i]["embedding"] = vec
+            resp["nodes"] = resp["messageNodes"]
+            resp["debug"]["embedding"] = embedding_debug
+            current_app.logger.info(
+                "[overview.init] embedding=%s",
+                json.dumps(
+                    {
+                        "directory": directory,
+                        "mode": embedding_debug.get("mode"),
+                        "model": embedding_debug.get("model"),
+                        "vectorDim": embedding_debug.get("vectorDim"),
+                        "vectorCount": embedding_debug.get("vectorCount"),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception as exc:
+            return jsonify({"error": f"Embedding failed: {exc}", **resp}), 502
+
+    if with_position:
+        # 1) 先给 agent 大点布局
+        agent_with_vec = [n for n in resp["agentNodes"] if isinstance(n.get("embedding"), list) and len(n.get("embedding")) >= 2]
+        if len(agent_with_vec) > 1:
+            agent_vecs = [[float(v) for v in n["embedding"]] for n in agent_with_vec]
+            centers = _reduce_vectors_2d(agent_vecs, reduction_algo=reduction_algo)
+            for i, n in enumerate(agent_with_vec):
+                n["x"], n["y"] = centers[i][0], centers[i][1]
+        elif len(agent_with_vec) == 1:
+            agent_with_vec[0]["x"], agent_with_vec[0]["y"] = 0.0, 0.0
+
+        # 无 embedding 的 agent 放中间带轻微分散
+        no_vec_agents = [n for n in resp["agentNodes"] if "x" not in n or "y" not in n]
+        for idx, n in enumerate(no_vec_agents):
+            n["x"] = -0.2 + 0.4 * (idx / max(1, len(no_vec_agents) - 1)) if len(no_vec_agents) > 1 else 0.0
+            n["y"] = 0.0
+
+        # 建立 agent -> center 映射
+        center_by_agent = {n["agent"]: (n.get("x", 0.0), n.get("y", 0.0)) for n in resp["agentNodes"]}
+
+        # 2) message 小点：先全局降维，再限制在各自 agent 中心附近半径内
+        msg_with_vec = [n for n in resp["messageNodes"] if isinstance(n.get("embedding"), list) and len(n.get("embedding")) >= 2]
+        if len(msg_with_vec) > 1:
+            msg_vecs = [[float(v) for v in n["embedding"]] for n in msg_with_vec]
+            msg_points = _reduce_vectors_2d(msg_vecs, reduction_algo=reduction_algo)
+            for i, n in enumerate(msg_with_vec):
+                n["_gx"], n["_gy"] = msg_points[i][0], msg_points[i][1]
+        elif len(msg_with_vec) == 1:
+            msg_with_vec[0]["_gx"], msg_with_vec[0]["_gy"] = 0.0, 0.0
+
+        # 按 agent 局部归一化并约束到半径
+        by_agent_msgs = {}
+        for n in resp["messageNodes"]:
+            by_agent_msgs.setdefault(n["agent"], []).append(n)
+        for agent, arr in by_agent_msgs.items():
+            cx, cy = center_by_agent.get(agent, (0.0, 0.0))
+            coords = [(float(n.get("_gx", 0.0)), float(n.get("_gy", 0.0))) for n in arr]
+            if len(coords) <= 1:
+                arr[0]["x"], arr[0]["y"] = cx, cy
+                continue
+            xs = [p[0] for p in coords]
+            ys = [p[1] for p in coords]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            span_x = (max_x - min_x) or 1.0
+            span_y = (max_y - min_y) or 1.0
+            for n in arr:
+                lx = ((float(n.get("_gx", 0.0)) - min_x) / span_x) * 2.0 - 1.0
+                ly = ((float(n.get("_gy", 0.0)) - min_y) / span_y) * 2.0 - 1.0
+                n["x"] = cx + lx * message_radius
+                n["y"] = cy + ly * message_radius
+                n.pop("_gx", None)
+                n.pop("_gy", None)
+
+        resp["nodes"] = resp["messageNodes"]
+        resp["debug"]["position"] = {
+            "provider": f"backend.overview_init_{reduction_algo}_v1",
+            "space": "normalized[-1,1]",
+            "messageRadius": message_radius,
+        }
+        current_app.logger.info(
+            "[overview.init] positions=%s",
+            json.dumps(
+                {
+                    "directory": directory,
+                    "provider": f"backend.overview_init_{reduction_algo}_v1",
+                    "reductionAlgo": reduction_algo,
+                    "agentNodes": [
+                        {
+                            "agent": n.get("agent"),
+                            "status": n.get("status"),
+                            "sessionId": n.get("sessionId"),
+                            "x": n.get("x"),
+                            "y": n.get("y"),
+                            "initSource": n.get("initSource"),
+                        }
+                        for n in resp["agentNodes"]
+                    ],
+                    "messageNodesSample": [
+                        {
+                            "agent": n.get("agent"),
+                            "sessionId": n.get("sessionId"),
+                            "messageId": n.get("messageId"),
+                            "x": n.get("x"),
+                            "y": n.get("y"),
+                        }
+                        for n in resp["messageNodes"][:100]
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    # 建立增量布局状态（Landmark 模式）：初始化后冻结旧点，仅新增点追加
+    try:
+        landmarks = [
+            {
+                "agent": n.get("agent"),
+                "sessionId": n.get("sessionId"),
+                "embedding": n.get("embedding"),
+                "x": n.get("x", 0.0),
+                "y": n.get("y", 0.0),
+            }
+            for n in resp["agentNodes"]
+            if isinstance(n.get("embedding"), list) and len(n.get("embedding")) >= 2
+        ]
+        _overview_states()[directory] = {
+            "directory": directory,
+            "embeddingMode": embedding_mode,
+            "embeddingModel": embedding_model,
+            "messageRadius": message_radius,
+            "landmarks": landmarks,
+            "agentCenters": {n.get("agent"): (n.get("x", 0.0), n.get("y", 0.0)) for n in resp["agentNodes"]},
+            "knownMessageIds": {n.get("messageId") for n in resp["messageNodes"] if n.get("messageId")},
+        }
+        resp["debug"]["incremental"] = {
+            "enabled": True,
+            "landmarkCount": len(landmarks),
+            "knownMessageCount": len(_overview_states()[directory]["knownMessageIds"]),
+        }
+    except Exception as exc:
+        current_app.logger.warning("[overview.init] incremental state build failed: %s", exc)
+
+    return jsonify(resp)
+
+
+@api_bp.get("/overview/projection/incremental")
+def get_overview_projection_incremental():
+    """
+    Overview 增量投影：
+    - 依赖 /overview/projection/init 先建立状态
+    - 只返回新增 message 点（旧点不动）
+    - 新点位置使用 Landmark 加权投影（基于 user/todo 等初始化锚点）
+    """
+    directory = (request.args.get("directory") or "").strip()
+    if not directory:
+        return jsonify({"error": "directory is required", "addedMessageNodes": [], "debug": {}}), 400
+
+    state = _overview_states().get(directory)
+    if not state:
+        return jsonify({
+            "error": "incremental state not found, call /overview/projection/init first",
+            "addedMessageNodes": [],
+            "debug": {"directory": directory, "needInit": True},
+        }), 409
+
+    embedding_mode = (request.args.get("embeddingMode", state.get("embeddingMode", "dashscope")) or "dashscope").strip().lower()
+    embedding_model = (request.args.get("embeddingModel", state.get("embeddingModel", "")) or "").strip()
+    if not embedding_model:
+        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v4"
+    message_radius = float(request.args.get("messageRadius", str(state.get("messageRadius", 0.28))) or "0.28")
+    message_radius = max(0.05, min(0.95, message_radius))
+
+    sessions = [s for s in _store().all_sessions() if (s.get("directory") or "") == directory]
+    known_ids = state.get("knownMessageIds") or set()
+    if not isinstance(known_ids, set):
+        known_ids = set(known_ids)
+    landmarks = state.get("landmarks") or []
+    center_by_agent = state.get("agentCenters") or {}
+
+    pending = []
+    dropped = 0
+    for s in sessions:
+        sid = s["id"]
+        agent = (s.get("agent") or "unknown").strip() or "unknown"
+        for m in _store().get_messages(sid):
+            mid = m.get("id") or ""
+            if not mid or mid in known_ids:
+                continue
+            layout_text = _message_layout_text(m)
+            if not layout_text:
+                dropped += 1
+                known_ids.add(mid)
+                continue
+            msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()[:12]
+            pending.append({
+                "nodeId": f"msg-{msg_node_id}",
+                "agent": agent,
+                "sessionId": sid,
+                "messageId": mid,
+                "role": m.get("role"),
+                "timestamp": m.get("timestamp"),
+                "embeddingInput": layout_text,
+            })
+
+    if not pending:
+        state["knownMessageIds"] = known_ids
+        return jsonify({
+            "directory": directory,
+            "addedMessageNodes": [],
+            "debug": {
+                "directory": directory,
+                "addedCount": 0,
+                "droppedCount": dropped,
+                "knownMessageCount": len(known_ids),
+            },
+        })
+
+    texts = [n["embeddingInput"] for n in pending]
+    try:
+        vectors, _ = _embed_by_mode(
+            texts=texts,
+            embedding_mode=embedding_mode,
+            embedding_model=embedding_model,
+        )
+    except Exception as exc:
+        return jsonify({"error": f"Embedding failed: {exc}", "addedMessageNodes": [], "debug": {"directory": directory}}), 502
+
+    for i, node in enumerate(pending):
+        vec = vectors[i] if i < len(vectors) else []
+        node["embedding"] = vec
+        cx, cy = center_by_agent.get(node["agent"], (0.0, 0.0))
+        x, y = _place_point_by_landmarks(
+            msg_vec=vec,
+            landmarks=landmarks,
+            agent_center=(cx, cy),
+            message_radius=message_radius,
+        )
+        node["x"] = x
+        node["y"] = y
+        known_ids.add(node["messageId"])
+
+    state["knownMessageIds"] = known_ids
+    state["messageRadius"] = message_radius
+    _overview_states()[directory] = state
+
+    current_app.logger.info(
+        "[overview.incremental] %s",
+        json.dumps(
+            {
+                "directory": directory,
+                "addedCount": len(pending),
+                "knownMessageCount": len(known_ids),
+                "landmarkCount": len(landmarks),
+                "embeddingMode": embedding_mode,
+                "embeddingModel": embedding_model,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    return jsonify({
+        "directory": directory,
+        "addedMessageNodes": pending,
+        "debug": {
+            "directory": directory,
+            "addedCount": len(pending),
+            "droppedCount": dropped,
+            "knownMessageCount": len(known_ids),
+            "landmarkCount": len(landmarks),
+            "layoutMethod": "landmark_weighted_projection_v1",
+            "landmarkSource": "agent init fallback (todo -> first_user_message -> session_title)",
+        },
+    })
+
+
 @api_bp.get("/sessions/<session_id>/messages")
 def get_session_messages(session_id: str):
     return jsonify(_store().get_messages(session_id))
+
+
+@api_bp.get("/sessions/<session_id>/projection/parts")
+def get_session_part_projection(session_id: str):
+    log_projection_debug(
+        stage="fn.route_projection.input",
+        payload={"sessionId": session_id, "queryString": request.query_string.decode("utf-8", errors="ignore")},
+    )
+    """
+    为选中 session 构建 part 级投影输入。
+
+    查询参数：
+    - keywordMode: off | basic
+    - withEmbedding: true | false（默认 true）
+    - embeddingModel: DashScope embedding 模型名（默认 text-embedding-v4）
+    """
+    keyword_mode = (request.args.get("keywordMode", "off") or "off").strip().lower()
+    with_embedding = (request.args.get("withEmbedding", "true") or "true").strip().lower() != "false"
+    with_position = (request.args.get("withPosition", "true") or "true").strip().lower() != "false"
+    embedding_mode = (request.args.get("embeddingMode", "dashscope") or "dashscope").strip().lower()
+    embedding_model = (request.args.get("embeddingModel", "") or "").strip()
+    if not embedding_model:
+        embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v4"
+
+    messages = _store().get_messages(session_id)
+    nodes, extraction_debug = build_part_nodes_from_messages(
+        session_id=session_id,
+        messages=messages,
+        keyword_mode=keyword_mode,
+    )
+    message_fields_dump = [
+        {
+            "id": m.get("id"),
+            "sessionId": m.get("sessionId"),
+            "role": m.get("role"),
+            "agent": m.get("agent"),
+            "timestamp": m.get("timestamp"),
+            "tokens": m.get("tokens"),
+            "cost": m.get("cost"),
+            "isCompaction": m.get("isCompaction"),
+            "partCount": len(m.get("parts") or []),
+            "parts": m.get("parts") or [],
+        }
+        for m in messages
+    ]
+
+    resp = {
+        "sessionId": session_id,
+        "nodes": [n.to_dict() for n in nodes],
+        "debug": {
+            "extraction": extraction_debug,
+        },
+    }
+    if with_position:
+        resp["nodes"] = attach_simple_positions(resp["nodes"])
+        resp["debug"]["position"] = {
+            "provider": "backend.simple_band_v1",
+            "note": "用于日志追踪与可观测，不替代前端主布局算法",
+        }
+        log_projection_debug(
+            stage="position",
+            payload={
+                "sessionId": session_id,
+                "nodeCount": len(resp["nodes"]),
+                "positionProvider": "backend.simple_band_v1",
+                "positions": [
+                    {"nodeId": n.get("nodeId"), "x": n.get("x"), "y": n.get("y"), "type": n.get("type")}
+                    for n in resp["nodes"][:300]
+                ],
+            },
+        )
+    log_projection_debug(
+        stage="extract",
+        payload={
+            "sessionId": session_id,
+            "query": {
+                "keywordMode": keyword_mode,
+                "withEmbedding": with_embedding,
+                "withPosition": with_position,
+                "embeddingMode": embedding_mode,
+                "embeddingModel": embedding_model,
+            },
+            "messageFields": message_fields_dump,
+            "nodes": resp["nodes"],
+        },
+    )
+    if not with_embedding:
+        log_projection_debug(
+            stage="fn.route_projection.output",
+            payload={"sessionId": session_id, "withEmbedding": False, "nodeCount": len(resp["nodes"])},
+        )
+        return jsonify(resp)
+
+    texts = [n.embedding_input for n in nodes]
+    try:
+        vectors, embedding_debug = _embed_by_mode(
+            texts=texts,
+            embedding_mode=embedding_mode,
+            embedding_model=embedding_model,
+        )
+    except Exception as exc:
+        log_projection_debug(
+            stage="error",
+            payload={"sessionId": session_id, "step": "embed_texts", "error": str(exc), "embeddingMode": embedding_mode},
+        )
+        return jsonify({"error": f"Embedding failed: {exc}", **resp}), 502
+
+    for i, vec in enumerate(vectors):
+        resp["nodes"][i]["embedding"] = vec
+
+    resp["debug"]["embedding"] = embedding_debug
+    log_projection_debug(
+        stage="embedding",
+        payload={
+            "sessionId": session_id,
+            "embeddingDebug": embedding_debug,
+            "nodes": [
+                {
+                    "nodeId": n.get("nodeId"),
+                    "messageId": n.get("messageId"),
+                    "type": n.get("type"),
+                    "status": n.get("status"),
+                    "embeddingInput": n.get("embeddingInput"),
+                    # 如后续后端也计算坐标，这里会自动记录位置
+                    "position": {"x": n.get("x"), "y": n.get("y")},
+                    "embedding": n.get("embedding"),
+                }
+                for n in resp["nodes"]
+            ],
+        },
+    )
+    log_projection_debug(
+        stage="fn.route_projection.output",
+        payload={"sessionId": session_id, "withEmbedding": True, "nodeCount": len(resp["nodes"])},
+    )
+    return jsonify(resp)
 
 
 # ── Agents / Hierarchy ────────────────────────────────────────────────────────

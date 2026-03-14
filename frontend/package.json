@@ -9,18 +9,19 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@reactflow/core": "^11.11.4",
+    "axios": "^1.7.7",
+    "clsx": "^2.1.1",
+    "d3": "^7.9.0",
+    "lucide-react": "^0.460.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
     "react-router-dom": "^6.27.0",
-    "@reactflow/core": "^11.11.4",
     "reactflow": "^11.11.4",
     "recharts": "^2.13.3",
-    "axios": "^1.7.7",
-    "zustand": "^5.0.1",
-    "clsx": "^2.1.1",
     "tailwind-merge": "^2.5.4",
-    "lucide-react": "^0.460.0",
-    "react-markdown": "^9.0.1"
+    "zustand": "^5.0.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

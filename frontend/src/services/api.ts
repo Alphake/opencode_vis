@@ -1,13 +1,76 @@
 import axios from "axios"
-import type { Session, Message, ToolStats, ToolCallRecord, TodoItem, SkillRecord, Metrics } from "../types"
+import type {
+  Session,
+  Message,
+  ToolStats,
+  ToolCallRecord,
+  TodoItem,
+  SkillRecord,
+  Metrics,
+  PartProjectionResponse,
+  OverviewProjectionResponse,
+  OverviewIncrementalResponse,
+} from "../types"
 
 const http = axios.create({ baseURL: "/api" })
 
 export const api = {
+  overview: {
+    projectionInit: (
+      directory: string,
+      params?: {
+        withEmbedding?: boolean
+        withPosition?: boolean
+        embeddingMode?: "dashscope" | "hf" | "mock"
+        embeddingModel?: string
+        reductionAlgo?: "mds" | "tsne"
+        messageRadius?: number
+      },
+      timeoutMs?: number,
+    ) =>
+      http
+        .get<OverviewProjectionResponse>("/overview/projection/init", {
+          params: { directory, ...(params ?? {}) },
+          timeout: timeoutMs,
+        })
+        .then((r) => r.data),
+    projectionIncremental: (
+      directory: string,
+      params?: {
+        embeddingMode?: "dashscope" | "hf" | "mock"
+        embeddingModel?: string
+        messageRadius?: number
+      },
+      timeoutMs?: number,
+    ) =>
+      http
+        .get<OverviewIncrementalResponse>("/overview/projection/incremental", {
+          params: { directory, ...(params ?? {}) },
+          timeout: timeoutMs,
+        })
+        .then((r) => r.data),
+  },
   sessions: {
     list: () => http.get<Session[]>("/sessions").then((r) => r.data),
     get: (id: string) => http.get<Session>(`/sessions/${id}`).then((r) => r.data),
     messages: (id: string) => http.get<Message[]>(`/sessions/${id}/messages`).then((r) => r.data),
+    partsProjection: (
+      id: string,
+      params?: {
+        keywordMode?: "off" | "basic"
+        withEmbedding?: boolean
+        withPosition?: boolean
+        embeddingMode?: "dashscope" | "hf" | "mock"
+        embeddingModel?: string
+      },
+      timeoutMs?: number,
+    ) =>
+      http
+        .get<PartProjectionResponse>(`/sessions/${id}/projection/parts`, {
+          params,
+          timeout: timeoutMs,
+        })
+        .then((r) => r.data),
   },
   agents: {
     hierarchy: () => http.get<Session[]>("/agents/hierarchy").then((r) => r.data),

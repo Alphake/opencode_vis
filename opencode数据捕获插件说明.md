@@ -17,10 +17,28 @@
 OpenCode 进程
   └─ Plugin（Hook 回调）
        └─ HTTP POST /api/events/batch（批量推送）
-            └─ Flask Backend（event_router 解析 → SQLite 
-                 ├─ SSE /api/events/stream → React 
-                 └─ REST API → React 前端
+            └─ Flask Backend（event_router 解析 → store）
+                 ├─ SSE /api/events/stream → React（snapshot + 增量事件）
+                 └─ REST API（/api/sessions 等）→ React 前端
 ```
+
+- **Plugin** 只负责把事件类型（如 `session.created`、`message.updated`、`message.part.updated` 等）及 `properties` 批量 POST 到后端，不存状态。
+- **Backend** 的 `dispatch(store, event)` 根据事件类型更新内存/持久化 store；所有“能拿到的信息”都来自这批事件。
+- **Session 必含字段**：后端存入 session 时包含 **`agent`**（general / build / explore / plan / unknown）和 **`directory`**（项目目录）。Overview 依赖这两项：从 sessions 取全部 directory，再按 directory 展示该目录下「出现过的 agent」。
+
+- **Overview 面板**：只展示「有 session 的 agent」，但数据仍是 session。流程：前端用 **store.sessions**（SSE snapshot）→ 解析出全部 directory → 用户选一个 directory → 该 directory 下按 `session.agent` 去重得到 agent 列表，**一个 agent 一个节点**，写死布局（当前为一行圆点）；点击 agent 节点时选中该 directory+agent 下的一个 session（当前写死：`createdAt` 最新的一条），供 Agent tab 使用。后端无需新接口，snapshot 已有 sessions。
+
+#### 前端 Agent 页：消息怎么来、左侧怎么展示、Tab 怎么分
+
+1. **消息是怎么捕获的**
+   - Plugin 把 `message.updated`、`message.part.updated` 等 POST 到 `POST /api/events/batch`，后端 `dispatch(store, event)` 写入 **store**。前端 snapshot 里只有 **sessions / toolStats / todos / skills / metrics**，不包含消息正文。
+
+2. **左侧面板（Agent 图）**
+   - **AgentGraph** 数据源是 **store.sessions**（全量），用于选中一个 session 后在右侧看 Agent / Task / Msg。
+
+3. **Tab 与上下文**
+   - **Overview**：按 directory 展示该目录下的 agent 节点，点击后选中对应 session（见上）。
+   - **Agent / Task / Msg**：都是对**当前选中的 session** 的视图，消息通过 **GET /api/sessions/:id/messages** 按需拉取。
 
 ---
 

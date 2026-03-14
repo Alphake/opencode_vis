@@ -6,10 +6,15 @@ import datetime
 from pathlib import Path
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
+from dotenv import load_dotenv
 
 from store.persistent_store import PersistentStore
 from handlers.event_router import dispatch
 from api.routes import api_bp
+
+# Load local backend environment variables from backend/.env.
+# This keeps secrets out of source code and makes deployment configurable.
+load_dotenv(Path(__file__).parent / ".env")
 
 app = Flask(__name__)
 CORS(app, origins="*")
@@ -24,6 +29,7 @@ _log_dir.mkdir(exist_ok=True)
 _log_raw = _log_dir / "events_raw.jsonl"        # every event exactly as received
 _log_parsed = _log_dir / "events_parsed.jsonl"  # what dispatch() returned
 _log_lock = threading.Lock()
+_docs_dir = Path(__file__).parent.parent / "docs"
 
 
 def _log(path: Path, record: dict) -> None:
@@ -155,7 +161,66 @@ def get_log_parsed():
     return jsonify([json.loads(l) for l in lines[-n:]])
 
 
+@app.get("/api/docs/openapi.yaml")
+def openapi_yaml():
+    """Serve OpenAPI spec for local Swagger/Redoc."""
+    spec = _docs_dir / "openapi.yaml"
+    if not spec.exists():
+        return jsonify({"error": "openapi.yaml not found"}), 404
+    return Response(spec.read_text(encoding="utf-8"), mimetype="application/yaml")
+
+
+@app.get("/api/docs")
+def api_docs():
+    """Serve a simple Swagger UI page at /api/docs."""
+    html = """
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Cockpit API Docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: "/api/docs/openapi.yaml",
+        dom_id: "#swagger-ui",
+        presets: [SwaggerUIBundle.presets.apis],
+      });
+    </script>
+  </body>
+</html>
+""".strip()
+    return Response(html, mimetype="text/html")
+
+
+def _preload_hf_embedding_model():
+    """
+    启动时预加载默认 HF 模型（BAAI/bge-m3），避免首次 embeddingMode=hf 请求卡在加载。
+    失败仅打日志，不影响服务启动。
+    """
+    preload = os.environ.get("COCKPIT_PRELOAD_HF", "true").strip().lower() in ("1", "true", "yes")
+    if not preload:
+        return
+    try:
+        from services.projection_service import HuggingFaceEmbedder
+        embedder = HuggingFaceEmbedder(model="BAAI/bge-m3")
+        err = embedder.ensure_ready()
+        if err:
+            print(f"[AgentCockpit] HF preload skip: {err}")
+            return
+        embedder._get_model()
+        print("[AgentCockpit] HF embedding model preloaded (BAAI/bge-m3)")
+    except Exception as e:
+        print(f"[AgentCockpit] HF preload failed (ignored): {e}")
+
+
 if __name__ == "__main__":
+    _preload_hf_embedding_model()
     port = int(os.environ.get("COCKPIT_PORT", 5000))
     print(f"[AgentCockpit] Backend running on http://127.0.0.1:{port}")
     print(f"[AgentCockpit] Logs → {_log_dir.resolve()}")

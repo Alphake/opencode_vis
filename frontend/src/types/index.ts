@@ -93,9 +93,97 @@ export interface Metrics {
 
 export interface Snapshot {
   sessions: Session[]
-  hierarchy: Session[]
+  hierarchy?: Session[]
   toolStats: ToolStats[]
   todos: Record<string, TodoItem[]>
   skills: SkillRecord[]
   metrics: Metrics
+}
+
+export interface PartProjectionNode {
+  nodeId: string
+  sessionId: string
+  messageId: string
+  agent: string
+  role: string
+  timestamp: number
+  type: string
+  status: string
+  payload: Record<string, unknown>
+  embeddingInput: string
+  keywords: string[]
+  features: Record<string, unknown>
+  embedding?: number[]
+  x?: number
+  y?: number
+}
+
+export interface PartProjectionResponse {
+  sessionId: string
+  nodes: PartProjectionNode[]
+  debug: Record<string, unknown>
+  error?: string
+}
+
+export interface OverviewProjectionNode {
+  nodeId: string
+  agent: string
+  sessionId: string
+  messageId?: string
+  sessionCount: number
+  messageCount: number
+  anchorMessageId?: string
+  anchorText: string
+  embeddingInput: string
+  embedding?: number[]
+  x?: number
+  y?: number
+}
+
+export interface OverviewAgentNode {
+  nodeId: string
+  agent: string
+  status: AgentStatus
+  sessionId: string
+  sessionCount: number
+  x?: number
+  y?: number
+  embeddingInput: string
+  initSource: "todo" | "first_user_message" | "session_title" | "fallback"
+}
+
+export interface OverviewMessageNode {
+  nodeId: string
+  agent: string
+  sessionId: string
+  messageId: string
+  role?: string
+  timestamp?: number
+  embeddingInput: string
+  x?: number
+  y?: number
+}
+
+export interface OverviewAgentEdge {
+  sourceAgent: string
+  targetAgent: string
+  count: number
+}
+
+export interface OverviewProjectionResponse {
+  directory: string
+  /** 兼容旧结构（message 点） */
+  nodes?: OverviewProjectionNode[]
+  agentNodes?: OverviewAgentNode[]
+  messageNodes?: OverviewMessageNode[]
+  agentEdges?: OverviewAgentEdge[]
+  debug: Record<string, unknown>
+  error?: string
+}
+
+export interface OverviewIncrementalResponse {
+  directory: string
+  addedMessageNodes: OverviewMessageNode[]
+  debug: Record<string, unknown>
+  error?: string
 }

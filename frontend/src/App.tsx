@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { AgentGraph } from "./components/agents/AgentGraph"
 import { AgentDetail } from "./components/agents/AgentDetail"
+import { OverviewPanel } from "./components/agents/OverviewPanel"
 import { TaskPage } from "./pages/TaskPage"
 import { ChatWindow } from "./components/messages/ChatWindow"
 import { AgentHandoffs } from "./components/messages/AgentHandoffs"
@@ -8,10 +9,11 @@ import { useCockpitStore } from "./store/cockpitStore"
 import { connectSocket } from "./services/socket"
 import { api } from "./services/api"
 
-type Tab = "agent" | "task" | "msg"
+type Tab = "overview" | "agent" | "task" | "msg"
 type MsgView = "chat" | "handoffs"
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
   { id: "agent", label: "Agent" },
   { id: "task", label: "Task" },
   { id: "msg", label: "Msg" },
@@ -19,7 +21,7 @@ const TABS: { id: Tab; label: string }[] = [
 
 export function App() {
   const [selectedId, setSelectedId] = useState<string | undefined>()
-  const [tab, setTab] = useState<Tab>("agent")
+  const [tab, setTab] = useState<Tab>("overview")
   const [msgView, setMsgView] = useState<MsgView>("chat")
   const { connected, metrics } = useCockpitStore()
 
@@ -110,6 +112,11 @@ export function App() {
 
           {/* Tab content */}
           <div className="flex-1 min-h-0 overflow-hidden">
+            {tab === "overview" && (
+              <div className="h-full overflow-y-auto p-4">
+                <OverviewPanel onSelectSession={setSelectedId} selectedId={selectedId} />
+              </div>
+            )}
             {tab === "agent" && (
               <div className="h-full overflow-y-auto p-4">
                 <AgentDetail sessionId={selectedId ?? ""} />

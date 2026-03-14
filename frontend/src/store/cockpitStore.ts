@@ -15,6 +15,7 @@ function scheduleStatsRefresh(setFn: (stats: ToolStats[]) => void) {
 interface CockpitState {
   connected: boolean
   sessions: Record<string, Session>
+  overviewTick: number
   messages: Record<string, Message[]>     // sessionId → messages
   toolStats: ToolStats[]
   toolCalls: ToolCallRecord[]
@@ -49,6 +50,7 @@ const defaultMetrics: Metrics = {
 export const useCockpitStore = create<CockpitState>((set, get) => ({
   connected: false,
   sessions: {},
+  overviewTick: 0,
   messages: {},
   toolStats: [],
   toolCalls: [],
@@ -146,7 +148,11 @@ export const useCockpitStore = create<CockpitState>((set, get) => ({
         break
       }
       case "message.updated":
-        // Full message updates come via REST on demand
+        // 只在 message 级事件触发 Overview 增量更新，避免高频 part 事件造成抖动
+        set((s) => ({ overviewTick: s.overviewTick + 1 }))
+        break
+      case "message.part.updated":
+        // part 级更新可能非常频繁，这里不触发 overviewTick
         break
       case "todo.updated":
         state.setTodos(d.sessionId as string, d.todos as TodoItem[])
