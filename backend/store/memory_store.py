@@ -19,19 +19,26 @@ class MemoryStore:
         self.tool_calls_by_session: Dict[str, List[str]] = {}  # session_id → [call_id]
         self.todos: Dict[str, List[TodoItem]] = {}             # session_id → [TodoItem]
         self.skills: List[SkillRecord] = []
+        self._msg_token_snapshot: Dict[str, tuple] = {}        # msg_id → (in, out, cache, cost)
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
     def upsert_session(self, session: SessionRecord) -> None:
         with self._lock:
             existing = self.sessions.get(session.id)
-            if existing and session.parent_id is None:
-                session.parent_id = existing.parent_id
             if existing:
+                if session.parent_id is None:
+                    session.parent_id = existing.parent_id
                 session.children = existing.children
                 session.system_prompt = session.system_prompt or existing.system_prompt
+                session.model_id = session.model_id or existing.model_id
+                session.provider_id = session.provider_id or existing.provider_id
+                session.token_input = max(session.token_input, existing.token_input)
+                session.token_output = max(session.token_output, existing.token_output)
+                session.token_cache_read = max(session.token_cache_read, existing.token_cache_read)
+                session.cost = max(session.cost, existing.cost)
+                session.error_history = existing.error_history + session.error_history
             self.sessions[session.id] = session
-            # Register as child of parent
             if session.parent_id and session.parent_id in self.sessions:
                 parent = self.sessions[session.parent_id]
                 if session.id not in parent.children:
@@ -60,15 +67,81 @@ class MemoryStore:
                 s.token_cache_read += token_cache
                 s.cost += cost
 
+    def sync_message_tokens(
+        self, msg_id: str, session_id: str,
+        token_input: int, token_output: int, token_cache: int, cost: float
+    ) -> None:
+        """Deduplicated token accumulation: only adds the delta vs. last snapshot for this message."""
+        with self._lock:
+            prev = self._msg_token_snapshot.get(msg_id, (0, 0, 0, 0.0))
+            d_in = max(0, token_input - prev[0])
+            d_out = max(0, token_output - prev[1])
+            d_cache = max(0, token_cache - prev[2])
+            d_cost = max(0.0, cost - prev[3])
+            self._msg_token_snapshot[msg_id] = (token_input, token_output, token_cache, cost)
+            if d_in or d_out or d_cache or d_cost:
+                s = self.sessions.get(session_id)
+                if s:
+                    s.token_input += d_in
+                    s.token_output += d_out
+                    s.token_cache_read += d_cache
+                    s.cost += d_cost
+
+    def add_session_error(self, session_id: str, error_entry: dict) -> Optional[SessionRecord]:
+        with self._lock:
+            s = self.sessions.get(session_id)
+            if s:
+                s.error_history.append(error_entry)
+            return s
+
     def set_system_prompt(self, session_id: str, prompt: str) -> None:
         with self._lock:
             s = self.sessions.get(session_id)
             if s:
                 s.system_prompt = prompt
 
+    def session_to_dict(self, session_id: str) -> Optional[Dict]:
+        """Session dict including toolErrorCount (for SSE / API responses)."""
+        with self._lock:
+            s = self.sessions.get(session_id)
+            if not s:
+                return None
+            d = s.to_dict()
+            enriched = self._tool_calls_for_session_enriched(session_id)
+            d["toolErrorCount"] = sum(1 for c in enriched if c.get("status") == "error")
+            return d
+
+    def _tool_calls_for_session_enriched(self, session_id: str) -> List[Dict]:
+        """Return tool calls for session, with 'running' ones enriched from message parts (so historical errors show)."""
+        ids = self.tool_calls_by_session.get(session_id, [])
+        records = [self.tool_calls[i] for i in ids if i in self.tool_calls]
+        msg_list = self.get_messages(session_id)
+        part_status: Dict[str, dict] = {}
+        for m in msg_list:
+            for p in m.get("parts") or []:
+                if p.get("type") == "tool" and p.get("callId"):
+                    st = p.get("toolStatus")
+                    if st in ("completed", "error"):
+                        part_status[p["callId"]] = {"status": st, "output": (p.get("toolOutput") or "")[:500]}
+        out = []
+        for r in records:
+            d = r.to_dict()
+            if d.get("status") == "running" and r.call_id in part_status:
+                ps = part_status[r.call_id]
+                d["status"] = ps["status"]
+                d["outputSnippet"] = ps.get("output", "")
+            out.append(d)
+        return out
+
     def all_sessions(self) -> List[Dict]:
         with self._lock:
-            return [s.to_dict() for s in self.sessions.values()]
+            result = []
+            for s in self.sessions.values():
+                d = s.to_dict()
+                enriched = self._tool_calls_for_session_enriched(s.id)
+                d["toolErrorCount"] = sum(1 for c in enriched if c.get("status") == "error")
+                result.append(d)
+            return result
 
     def get_hierarchy(self) -> List[Dict]:
         """Return root sessions (no parentId) with nested children info."""
@@ -187,11 +260,8 @@ class MemoryStore:
     def get_tool_calls(self, session_id: Optional[str] = None) -> List[Dict]:
         with self._lock:
             if session_id:
-                ids = self.tool_calls_by_session.get(session_id, [])
-                records = [self.tool_calls[i] for i in ids if i in self.tool_calls]
-            else:
-                records = list(self.tool_calls.values())
-            return [r.to_dict() for r in records]
+                return self._tool_calls_for_session_enriched(session_id)
+            return [r.to_dict() for r in self.tool_calls.values()]
 
     # ── Todos ─────────────────────────────────────────────────────────────────
 

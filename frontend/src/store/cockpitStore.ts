@@ -153,15 +153,31 @@ export const useCockpitStore = create<CockpitState>((set, get) => ({
         // 只在 message 级事件触发 Overview 增量更新，避免高频 part 事件造成抖动
         set((s) => ({ overviewTick: s.overviewTick + 1 }))
         break
-      case "overview.incremental":
+      case "overview.incremental": {
+        const nodes = (d.addedMessageNodes as OverviewMessageNode[]) ?? []
+        const directory = (d.directory as string) ?? ""
+        console.info("[overview.incremental] received", {
+          directory,
+          addedCount: nodes.length,
+          nodes: nodes.map((n) => ({
+            nodeId: n.nodeId,
+            messageId: n.messageId,
+            sessionId: n.sessionId,
+            agent: n.agent,
+            type: n.type,
+            x: n.x,
+            y: n.y,
+          })),
+        })
         set({
           overviewIncrementalEvent: {
-            directory: (d.directory as string) ?? "",
-            nodes: (d.addedMessageNodes as OverviewMessageNode[]) ?? [],
+            directory,
+            nodes,
             at: Date.now(),
           },
         })
         break
+      }
       case "message.part.updated":
         // part 级更新可能非常频繁，这里不触发 overviewTick
         break

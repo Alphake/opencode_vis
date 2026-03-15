@@ -4,21 +4,7 @@ import { api } from "../../services/api"
 import { contourDensity } from "d3-contour"
 import type { OverviewAgentNode, OverviewMessageNode, OverviewAgentEdge } from "../../types"
 
-/** 已知 agent 的展示颜色，其余用 unknown；agent 类型完全从 session.agent 读取，不写死列表 */
-const AGENT_COLOR: Record<string, string> = {
-  build: "#3B82F6",
-  plan: "#06B6D4",
-  general: "#8B5CF6",
-  explore: "#6B7280",
-  unknown: "#9CA3AF",
-}
-
-const STATUS_HALO: Record<string, string> = {
-  idle: "#10B981",
-  busy: "#F59E0B",
-  error: "#EF4444",
-}
-
+/** Message 类型调色盘（固定，不随 agent 变化） */
 const MESSAGE_TYPE_COLOR: Record<string, string> = {
   text: "#3B82F6",
   reasoning: "#8B5CF6",
@@ -30,6 +16,25 @@ const MESSAGE_TYPE_COLOR: Record<string, string> = {
   assistant: "#EC4899",
   unknown: "#9CA3AF",
 }
+
+/** Agent 颜色：与 MESSAGE_TYPE_COLOR 完全不重合，避免和图例混淆 */
+const AGENT_COLOR: Record<string, string> = {
+  build: "#0D9488",
+  plan: "#B45309",
+  general: "#1D4ED8",
+  explore: "#6D28D9",
+  unknown: "#64748B",
+}
+
+const STATUS_HALO: Record<string, string> = {
+  idle: "#64748B",
+  busy: "#F59E0B",
+  retrying: "#F59E0B",
+  pending: "#6366F1",
+  error: "#EF4444",
+}
+
+const MESSAGE_LEGEND_ORDER = ["text", "reasoning", "tool", "user", "assistant", "compaction"] as const
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
 
@@ -60,6 +65,8 @@ function blendColorToWhite(baseHex: string, toWhiteRatio: number): string {
 interface Props {
   onSelectSession: (id: string) => void
   selectedId?: string
+  /** 与左侧 workspace 联动：由 App 传入当前选中的 directory，Overview 只展示该目录 */
+  directory?: string
 }
 
 /** 一个 agent 节点：在当前 directory 下该 agent 对应至少一个 session */
@@ -69,16 +76,6 @@ const OVERVIEW_INIT_CACHE = new Map<
   string,
   { agentNodes: AgentNode[]; messageNodes: MessageNode[]; agentEdges: OverviewAgentEdge[] }
 >()
-const MESSAGE_LEGEND_ORDER = [
-  "text",
-  "reasoning",
-  "compaction",
-  "tool",
-  "step-start",
-  "step-finish",
-  "user",
-  "assistant",
-] as const
 
 /**
  * OverviewPanel：按 directory 展示「该 directory 下出现过的 agent」。
@@ -88,7 +85,7 @@ const MESSAGE_LEGEND_ORDER = [
  * - 节点是 agent（一个 agent 一个节点），x/y 由后端 embedding + 降维算法返回。
  * - 点击节点后用后端返回的 sessionId 跳转 Agent tab。
  */
-export function OverviewPanel({ onSelectSession, selectedId }: Props) {
+export function OverviewPanel({ onSelectSession, selectedId, directory: directoryFromParent }: Props) {
   const connected = useCockpitStore((s) => s.connected)
   const sessions = useCockpitStore((s) => s.sessions)
   const overviewIncrementalEvent = useCockpitStore((s) => s.overviewIncrementalEvent)
@@ -100,6 +97,8 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
   const [selectedPoint, setSelectedPoint] = useState<
     { kind: "agent"; node: AgentNode } | { kind: "message"; node: MessageNode } | null
   >(null)
+  const [embeddingDetailExpanded, setEmbeddingDetailExpanded] = useState(false)
+  useEffect(() => { setEmbeddingDetailExpanded(false) }, [selectedPoint])
   const [nowMs, setNowMs] = useState(() => Date.now())
   const initializedRef = useRef(false)
   const messageNodeMapRef = useRef<Map<string, MessageNode>>(new Map())
@@ -113,13 +112,31 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
 
   const [selectedDirectory, setSelectedDirectory] = useState<string>("")
 
-  const effectiveDirectory = selectedDirectory || (directories.length > 0 ? directories[0] : "")
+  const effectiveDirectory = directoryFromParent ?? (selectedDirectory || (directories.length > 0 ? directories[0] : ""))
   const [lastIncrementalAdded, setLastIncrementalAdded] = useState(0)
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
+  const prevSessionCountRef = useRef<number>(0)
+
+  const sessionCountInDirectory = useMemo(
+    () => (effectiveDirectory ? sessionList.filter((s) => (s.directory || "").replace(/\\/g, "/") === effectiveDirectory.replace(/\\/g, "/")).length : 0),
+    [sessionList, effectiveDirectory],
+  )
 
   useEffect(() => {
     const t = setInterval(() => setNowMs(Date.now()), 15000)
     return () => clearInterval(t)
   }, [])
+
+  // 当前 directory 下 session 数变多（新 session 出现）时清前端缓存并重拉 init，避免一直用旧图
+  useEffect(() => {
+    if (!effectiveDirectory || sessionCountInDirectory === 0) return
+    const prev = prevSessionCountRef.current
+    prevSessionCountRef.current = sessionCountInDirectory
+    if (prev > 0 && sessionCountInDirectory > prev) {
+      OVERVIEW_INIT_CACHE.delete(effectiveDirectory)
+      setRefreshTrigger((t) => t + 1)
+    }
+  }, [effectiveDirectory, sessionCountInDirectory])
 
   // 初始化：仍使用现有全量布局算法，但仅在切 directory 时执行
   useEffect(() => {
@@ -132,7 +149,9 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
       messageNodeMapRef.current = new Map()
       return
     }
-    const cached = OVERVIEW_INIT_CACHE.get(effectiveDirectory)
+    const skipCache = refreshTrigger > 0
+    if (skipCache) OVERVIEW_INIT_CACHE.delete(effectiveDirectory)
+    const cached = skipCache ? undefined : OVERVIEW_INIT_CACHE.get(effectiveDirectory)
     if (cached) {
       setAgentNodes(cached.agentNodes)
       setMessageNodes(cached.messageNodes)
@@ -157,7 +176,8 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
             embeddingMode: mode,
             embeddingModel: mode === "dashscope" ? "text-embedding-v3" : undefined,
             reductionAlgo: "mds",
-            messageRadius: 0.28,
+            messageRadius: 0.35,
+            clearCache: skipCache,
           },
           mode === "dashscope" ? 120000 : 150000,
         )
@@ -184,6 +204,7 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
             })
             messageNodeMapRef.current = new Map(msgs.map((m) => [m.nodeId, m]))
             initializedRef.current = true
+            if (skipCache) setRefreshTrigger(0)
           }
         })
         .catch((e) => {
@@ -200,7 +221,7 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
     return () => {
       cancelled = true
     }
-  }, [effectiveDirectory])
+  }, [effectiveDirectory, refreshTrigger])
 
   // 增量：后端在 message.updated 后通过 SSE 主动推送新点，这里只消费推送并追加到本地。
   useEffect(() => {
@@ -216,6 +237,19 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
     }
     setLastIncrementalAdded(appended.length)
     if (appended.length > 0) {
+      console.info("[overview.incremental] appended to panel", {
+        directory: effectiveDirectory,
+        appendedCount: appended.length,
+        nodes: appended.map((n) => ({
+          nodeId: n.nodeId,
+          messageId: n.messageId,
+          sessionId: n.sessionId,
+          agent: n.agent,
+          type: n.type,
+          x: n.x,
+          y: n.y,
+        })),
+      })
       setMessageNodes((prev) => [...prev, ...appended])
       const cached = OVERVIEW_INIT_CACHE.get(effectiveDirectory)
       if (cached) {
@@ -324,6 +358,7 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
     return m
   }, [projectedAgents])
 
+  // 前端用 d3-contour 的 contourDensity 做高斯核密度估计（KDE），按 agent 分组画等高线
   const densityContours = useMemo(() => {
     if (projectedMessages.length < 3) return [] as Array<{ agent: string; path: string; color: string }>
     const groups = new Map<string, Array<{ x: number; y: number }>>()
@@ -335,12 +370,13 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
     const out: Array<{ agent: string; path: string; color: string }> = []
     for (const [agent, pts] of groups.entries()) {
       if (pts.length < 3) continue
+      // 高斯核 KDE：bandwidth 越大密度越平滑，thresholds 越多最外层等高线越包得住孤立点
       const density = contourDensity<{ x: number; y: number }>()
         .x((d) => d.x)
         .y((d) => d.y)
         .size([width, height])
-        .bandwidth(22)
-        .thresholds(6)
+        .bandwidth(28)
+        .thresholds(7)
       const cs = density(pts)
       for (const c of cs) {
         const path = (c.coordinates || [])
@@ -377,47 +413,8 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
   }
 
   return (
-    <div className="h-full w-full flex flex-col gap-3">
-      <div className="flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
-        <span className="uppercase tracking-widest text-gray-400">Overview</span>
-        <span className="text-gray-400">按 directory 展示该目录下出现过的 agent</span>
-        <span className="text-gray-400">
-          实时点数: <span className="font-mono text-gray-600">{messageNodes.length}</span>
-        </span>
-        <span className="text-gray-400">
-          Agent数: <span className="font-mono text-gray-600">{agentNodes.length}</span>
-        </span>
-        <span className="text-gray-400">
-          最近增量: <span className="font-mono text-gray-600">{lastIncrementalAdded}</span>
-        </span>
-        <label className="flex items-center gap-2">
-          <span>Directory:</span>
-          <select
-            value={effectiveDirectory}
-            onChange={(e) => setSelectedDirectory(e.target.value)}
-            className="text-xs border border-gray-200 rounded px-2 py-1 bg-white min-w-[200px]"
-          >
-            {directories.map((d) => (
-              <option key={d} value={d}>
-                {d.length > 48 ? d.slice(0, 45) + "…" : d}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <div className="flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
-        {MESSAGE_LEGEND_ORDER.map((type) => (
-          <span key={type} className="inline-flex items-center gap-1">
-            <span
-              className="inline-block w-2.5 h-2.5 rounded-full border border-gray-200"
-              style={{ backgroundColor: MESSAGE_TYPE_COLOR[type] }}
-            />
-            <span>{type}</span>
-          </span>
-        ))}
-      </div>
-
-      <div className="flex-1 border border-gray-100 rounded bg-white overflow-hidden flex items-center justify-center">
+    <div className="h-full w-full flex flex-col gap-2">
+      <div className="flex-1 border border-gray-100 rounded-lg bg-white overflow-hidden flex items-center justify-center">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
           {loadingProjection ? (
             <text x={width / 2} y={height / 2} textAnchor="middle" fontSize={12} fill="#9CA3AF">
@@ -429,6 +426,19 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
             </text>
           ) : (
             <>
+              {/* 箭头标记：父 agent → subagent 连线末端 */}
+              <defs>
+                <marker
+                  id="overview-edge-arrow"
+                  markerWidth={8}
+                  markerHeight={6}
+                  refX={7}
+                  refY={3}
+                  orient="auto"
+                >
+                  <path d="M0,0 L8,3 L0,6 Z" fill="#60A5FA" opacity={0.8} />
+                </marker>
+              </defs>
               {/* KDE 等高线层 */}
               {densityContours.map((c, idx) => (
                 <path
@@ -442,14 +452,23 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
                 />
               ))}
 
-              {/* agent 父子连线层 */}
+              {/* agent 父子连线层：父 agent → subagent，末端带箭头 */}
               {agentEdges.map((e, idx) => {
                 const s = centerByAgent.get(e.sourceAgent)
                 const t = centerByAgent.get(e.targetAgent)
                 if (!s || !t) return null
                 return (
                   <g key={`${e.sourceAgent}-${e.targetAgent}-${idx}`}>
-                    <line x1={s.x} y1={s.y} x2={t.x} y2={t.y} stroke="#60A5FA" strokeWidth={1.5} opacity={0.6} />
+                    <line
+                      x1={s.x}
+                      y1={s.y}
+                      x2={t.x}
+                      y2={t.y}
+                      stroke="#60A5FA"
+                      strokeWidth={1.5}
+                      opacity={0.6}
+                      markerEnd="url(#overview-edge-arrow)"
+                    />
                     <text x={(s.x + t.x) / 2} y={(s.y + t.y) / 2 - 4} fontSize={9} fill="#93C5FD" textAnchor="middle">
                       {e.count}
                     </text>
@@ -457,7 +476,7 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
                 )
               })}
 
-              {/* message 小点层（先画） */}
+              {/* message 小点层：按类型用 MESSAGE_TYPE_COLOR */}
               {projectedMessages.map((n) => {
                 const messageType = (n.type || n.role || "unknown").toString().toLowerCase()
                 const baseColor = MESSAGE_TYPE_COLOR[messageType] ?? MESSAGE_TYPE_COLOR.unknown
@@ -465,8 +484,10 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
                 const r = selected ? 4 : 2.6
                 const ageMin = n.timestamp ? Math.max(0, (nowMs - n.timestamp) / 60000) : 120
                 const ageRatio = clamp(ageMin / 90, 0, 1)
-                const fill = blendColorToWhite(baseColor, 0.1 + ageRatio * 0.78)
-                const opacity = clamp(0.95 - ageRatio * 0.2, 0.62, 0.95)
+                // 变淡有度：最多只混入 40% 白色，保证最旧的点仍能看清
+                const toWhiteRatio = Math.min(0.4, 0.08 + ageRatio * 0.32)
+                const fill = blendColorToWhite(baseColor, toWhiteRatio)
+                const opacity = clamp(0.92 - ageRatio * 0.15, 0.72, 0.95)
                 return (
                   <g
                     key={n.nodeId}
@@ -486,7 +507,7 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
                       style={{ transition: "all 700ms ease" }}
                     />
                     <title>
-                      {n.agent} · message point · {messageType}
+                      {n.agent} · message · {messageType}
                       {"\n"}
                       session: {n.sessionId}
                       {"\n"}
@@ -498,12 +519,15 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
                 )
               })}
 
-              {/* agent 大点层（后画，明显） */}
+              {/* agent 大点层：外圈光环更大，名字在节点下方 */}
               {projectedAgents.map((n) => {
                 const fill = AGENT_COLOR[n.agent] ?? AGENT_COLOR.unknown
                 const liveStatus = liveStatusByAgent.get(n.agent) ?? n.status
                 const halo = STATUS_HALO[liveStatus] ?? "#9CA3AF"
                 const selected = n.sessionId === selectedSessionIdForHighlight
+                const haloR = 44
+                const innerR = 26
+                const labelDy = innerR + 14
                 return (
                   <g
                     key={n.nodeId}
@@ -514,14 +538,14 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
                     }}
                     style={{ cursor: "pointer" }}
                   >
-                    <circle r={30} fill="none" stroke={halo} strokeWidth={2} opacity={0.3} style={{ transition: "all 280ms ease" }} />
-                    <circle r={22} fill={fill} stroke={selected ? "#111827" : "#E5E7EB"} strokeWidth={selected ? 2.5 : 1.5} style={{ transition: "all 280ms ease" }} />
+                    <circle r={haloR} fill="none" stroke={halo} strokeWidth={2} opacity={0.35} style={{ transition: "all 280ms ease" }} />
+                    <circle r={innerR} fill={fill} stroke={selected ? "#111827" : "#E5E7EB"} strokeWidth={selected ? 2.5 : 1.5} style={{ transition: "all 280ms ease" }} />
                     <text
                       textAnchor="middle"
-                      dominantBaseline="middle"
-                      fontSize={11}
-                      fontWeight={700}
-                      fill="#fff"
+                      y={labelDy}
+                      fontSize={10}
+                      fontWeight={600}
+                      fill={fill}
                       style={{ pointerEvents: "none" }}
                     >
                       {n.agent}
@@ -550,12 +574,44 @@ export function OverviewPanel({ onSelectSession, selectedId }: Props) {
               ? `${selectedPoint.node.agent} · ${(liveStatusByAgent.get(selectedPoint.node.agent) ?? selectedPoint.node.status)} · ${selectedPoint.node.sessionId}`
               : `${selectedPoint.node.agent} · ${selectedPoint.node.sessionId} · ${selectedPoint.node.messageId}`}
           </div>
-          <pre className="whitespace-pre-wrap break-words max-h-40 overflow-y-auto bg-white border border-blue-100 rounded p-2 text-[11px]">
+          <pre className={`whitespace-pre-wrap break-words overflow-y-auto bg-white border border-blue-100 rounded p-2 text-[11px] ${!embeddingDetailExpanded ? "max-h-40" : ""}`}>
             {selectedPoint.node.embeddingInput}
           </pre>
+          {(selectedPoint.node.embeddingInput?.length ?? 0) > 200 && (
+            <button
+              type="button"
+              onClick={() => setEmbeddingDetailExpanded((e) => !e)}
+              className="mt-1 text-[10px] text-blue-500 hover:underline"
+            >
+              {embeddingDetailExpanded ? "收起" : "展开全部"}
+            </button>
+          )}
         </div>
       )}
       {projectionError && <div className="text-[10px] text-amber-600">投影初始化失败: {projectionError}</div>}
+
+      {/* Legend: message 类型调色盘 */}
+      <div className="flex items-center gap-3 text-[10px] text-gray-400 flex-wrap px-1 py-1">
+        {MESSAGE_LEGEND_ORDER.map((type) => (
+          <span key={type} className="inline-flex items-center gap-1">
+            <span
+              className="inline-block w-2 h-2 rounded-full"
+              style={{ backgroundColor: MESSAGE_TYPE_COLOR[type] }}
+            />
+            <span>{type}</span>
+          </span>
+        ))}
+        <button
+          type="button"
+          onClick={() => setRefreshTrigger((t) => t + 1)}
+          disabled={loadingProjection || !effectiveDirectory}
+          className="ml-auto text-gray-400 hover:text-blue-500 disabled:opacity-50 font-mono"
+          title="清缓存并重新计算投影"
+        >
+          刷新
+        </button>
+        <span className="font-mono text-gray-300">{messageNodes.length} pts · {agentNodes.length} agents</span>
+      </div>
     </div>
   )
 }

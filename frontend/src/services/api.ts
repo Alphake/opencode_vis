@@ -25,6 +25,7 @@ export const api = {
         embeddingModel?: string
         reductionAlgo?: "mds" | "tsne"
         messageRadius?: number
+        clearCache?: boolean
       },
       timeoutMs?: number,
     ) =>
@@ -54,6 +55,8 @@ export const api = {
     list: () => http.get<Session[]>("/sessions").then((r) => r.data),
     get: (id: string) => http.get<Session>(`/sessions/${id}`).then((r) => r.data),
     messages: (id: string) => http.get<Message[]>(`/sessions/${id}/messages`).then((r) => r.data),
+    sendMessage: (id: string, content: string) =>
+      http.post(`/sessions/${id}/user-message`, { content }).then((r) => r.data),
     partsProjection: (
       id: string,
       params?: {

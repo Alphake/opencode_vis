@@ -244,7 +244,18 @@ def receive_events():
                 directory = (getattr(sess, "directory", "") or "").strip()
                 if directory:
                     inc_payload, inc_status = compute_overview_incremental(directory=directory)
-                    if inc_status == 200 and (inc_payload.get("addedMessageNodes") or []):
+                    added = inc_payload.get("addedMessageNodes") or []
+                    if inc_status == 200 and added:
+                        _runtime_logger.info(
+                            "[overview.incremental.push] directory=%s addedCount=%s",
+                            directory, len(added),
+                        )
+                        for n in added:
+                            _runtime_logger.info(
+                                "[overview.incremental.push] nodeId=%s messageId=%s sessionId=%s agent=%s type=%s x=%.4f y=%.4f",
+                                n.get("nodeId"), n.get("messageId"), n.get("sessionId"),
+                                n.get("agent"), n.get("type"), float(n.get("x", 0)), float(n.get("y", 0)),
+                            )
                         _broadcast({
                             "type": "overview.incremental",
                             "data": inc_payload,

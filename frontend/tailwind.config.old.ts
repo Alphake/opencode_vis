@@ -5,22 +5,22 @@ export default {
   theme: {
     extend: {
       colors: {
-        surface: "#F8FAFC",
-        border: "#E2E8F0",
+        surface: "#F8F9FA",
+        border: "#E5E7EB",
+        status: {
+          idle: "#10B981",
+          busy: "#F59E0B",
+          error: "#EF4444",
+        },
         agent: {
-          build:   "#3B82F6",
+          build: "#3B82F6",
           general: "#8B5CF6",
           explore: "#6B7280",
-          plan:    "#06B6D4",
-        },
-        status: {
-          idle:  "#10B981",
-          busy:  "#F59E0B",
-          error: "#EF4444",
+          plan: "#06B6D4",
         },
       },
       fontFamily: {
-        sans: ["Outfit", "system-ui", "sans-serif"],
+        sans: ["Inter", "system-ui", "sans-serif"],
         mono: ["JetBrains Mono", "Fira Code", "monospace"],
       },
     },

@@ -30,7 +30,10 @@ def _parse_status(raw) -> str:
     """OpenCode sends status as either a string or {"type": "busy"}."""
     if isinstance(raw, dict):
         raw = raw.get("type", "idle")
-    status_map = {"busy": "busy", "idle": "idle", "retry": "busy", "error": "error", "completed": "idle"}
+    status_map = {
+        "busy": "busy", "idle": "idle", "retry": "retrying",
+        "error": "error", "completed": "idle", "pending": "pending",
+    }
     return status_map.get(raw, "idle")
 
 
@@ -49,7 +52,7 @@ def handle_session_created(store: MemoryStore, props: Dict) -> Dict:
         updated_at=_now_ms(),
     )
     store.upsert_session(s)
-    return {"action": "session.created", "sessionId": s.id, "session": s.to_dict()}
+    return {"action": "session.created", "sessionId": s.id, "session": store.session_to_dict(s.id)}
 
 
 def handle_session_updated(store: MemoryStore, props: Dict) -> Dict:
@@ -72,30 +75,50 @@ def handle_session_updated(store: MemoryStore, props: Dict) -> Dict:
         updated_at=_now_ms(),
     )
     store.upsert_session(s)
-    return {"action": "session.updated", "sessionId": s.id, "session": s.to_dict()}
+    return {"action": "session.updated", "sessionId": s.id, "session": store.session_to_dict(s.id)}
 
 
 def handle_session_status(store: MemoryStore, props: Dict) -> Dict:
     session_id = props.get("sessionID") or props.get("session", {}).get("id", "")
     # status can be a string OR {"type": "busy"} dict
     mapped = _parse_status(props.get("status", "idle"))
-    s = store.update_session_status(session_id, mapped)
+    store.update_session_status(session_id, mapped)
     return {"action": "session.status", "sessionId": session_id, "status": mapped,
-            "session": s.to_dict() if s else None}
+            "session": store.session_to_dict(session_id)}
 
 
 def handle_session_idle(store: MemoryStore, props: Dict) -> Dict:
     session_id = props.get("sessionID") or props.get("session", {}).get("id", "")
-    s = store.update_session_status(session_id, "idle")
+    store.update_session_status(session_id, "idle")
     return {"action": "session.idle", "sessionId": session_id,
-            "session": s.to_dict() if s else None}
+            "session": store.session_to_dict(session_id)}
 
 
 def handle_session_error(store: MemoryStore, props: Dict) -> Dict:
     session_id = props.get("sessionID") or props.get("session", {}).get("id", "")
     s = store.update_session_status(session_id, "error")
+
+    err_obj = props.get("error", {}) or {}
+    err_name = err_obj.get("name", "UnknownError") if isinstance(err_obj, dict) else str(err_obj)
+    err_msg = (_get(err_obj, "data", "message") or "").strip()
+    # 避免 message 与 name 重复，如 "ProviderModelNotFoundError: ProviderModelNotFoundError" 只保留 name
+    if err_msg and err_name:
+        if err_msg == err_name:
+            err_msg = ""
+        elif err_msg.startswith(err_name + ": ") or err_msg.startswith(err_name + ":"):
+            rest = err_msg[len(err_name) + 1:].lstrip(": ").strip()
+            if rest == err_name or not rest:
+                err_msg = ""
+            else:
+                err_msg = rest
+    store.add_session_error(session_id, {
+        "timestamp": _now_ms(),
+        "name": err_name,
+        "message": err_msg or "Session entered error state",
+    })
     return {"action": "session.error", "sessionId": session_id,
-            "session": s.to_dict() if s else None}
+            "error": {"name": err_name, "message": err_msg},
+            "session": store.session_to_dict(session_id)}
 
 
 def handle_session_deleted(store: MemoryStore, props: Dict) -> Dict:
@@ -103,11 +126,10 @@ def handle_session_deleted(store: MemoryStore, props: Dict) -> Dict:
     info = props.get("info", props)
     session_id = info.get("id", "")
     s = store.update_session_status(session_id, "idle")
-    # Also update title if available (final state)
     if s and info.get("title"):
         s.title = info["title"]
     return {"action": "session.deleted", "sessionId": session_id,
-            "session": s.to_dict() if s else None}
+            "session": store.session_to_dict(session_id)}
 
 
 # ── message handlers ──────────────────────────────────────────────────────────
@@ -140,7 +162,7 @@ def handle_message_updated(store: MemoryStore, props: Dict) -> Dict:
     store.upsert_message(msg)  # will preserve existing parts
 
     if t_input or t_output:
-        store.update_session_tokens(session_id, t_input, t_output, t_cache, cost)
+        store.sync_message_tokens(msg_id, session_id, t_input, t_output, t_cache, cost)
 
     # Update session model/provider/agent from message info (most reliable source)
     model_id = info.get("modelID")
@@ -177,6 +199,17 @@ def handle_message_part_updated(store: MemoryStore, props: Dict) -> Dict:
         part.tool_input = state.get("input")
         if state.get("status") in ("completed", "error"):
             part.tool_output = state.get("output") or state.get("error")
+            # Sync tool call status from message part (covers cases where
+            # tool.execute.after never fires, e.g. subagent task failures)
+            if part.call_id:
+                existing_call = store.tool_calls.get(part.call_id)
+                if existing_call and existing_call.status == "running":
+                    snippet = (part.tool_output or "")[:500]
+                    store.finish_tool_call(
+                        part.call_id, part.tool_status or "error",
+                        part.tool_name or existing_call.title or "",
+                        snippet, _now_ms(),
+                    )
     elif part_type == "step-finish":
         tokens = raw_part.get("tokens", {}) or {}
         part.token_input = tokens.get("input", 0)

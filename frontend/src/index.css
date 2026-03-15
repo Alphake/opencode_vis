@@ -6,11 +6,11 @@
   * { box-sizing: border-box; }
 
   body {
-    @apply bg-white text-gray-900 antialiased;
-    font-family: 'Inter', system-ui, sans-serif;
+    @apply bg-surface text-gray-900 antialiased;
+    font-family: 'Outfit', system-ui, sans-serif;
   }
 
-  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { @apply bg-gray-200 rounded-full; }
   ::-webkit-scrollbar-thumb:hover { @apply bg-gray-300; }
@@ -22,4 +22,34 @@
   @apply border-border bg-white text-gray-500 hover:bg-surface;
   width: 24px;
   height: 24px;
+}
+
+/* ── Status dot glow ──────────────────────────────── */
+
+.status-dot-busy {
+  animation: pulse-amber 2s ease-in-out infinite;
+}
+
+@keyframes pulse-amber {
+  0%, 100% { box-shadow: 0 0 2px rgba(245, 158, 11, 0.4); }
+  50%      { box-shadow: 0 0 8px rgba(245, 158, 11, 0.55),
+                         0 0 14px rgba(245, 158, 11, 0.15); }
+}
+
+/* ── Tree connector flow (busy agent) ─────────────── */
+
+.tree-line-busy {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(245, 158, 11, 0.45) 0px,
+    rgba(245, 158, 11, 0.45) 3px,
+    transparent 3px,
+    transparent 7px
+  );
+  animation: tree-flow 1s linear infinite;
+}
+
+@keyframes tree-flow {
+  0%   { background-position: 0 0; }
+  100% { background-position: 0 14px; }
 }

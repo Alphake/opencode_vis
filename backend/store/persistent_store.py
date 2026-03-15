@@ -68,7 +68,8 @@ class PersistentStore(MemoryStore):
                     token_output     INTEGER NOT NULL DEFAULT 0,
                     token_cache_read INTEGER NOT NULL DEFAULT 0,
                     cost             REAL    NOT NULL DEFAULT 0,
-                    children_json    TEXT    NOT NULL DEFAULT '[]'
+                    children_json    TEXT    NOT NULL DEFAULT '[]',
+                    error_history_json TEXT NOT NULL DEFAULT '[]'
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
@@ -122,6 +123,13 @@ class PersistentStore(MemoryStore):
     def _load_all(self) -> None:
         c = self._conn
 
+        # Migrate: add error_history_json column if missing (old DB)
+        try:
+            c.execute("SELECT error_history_json FROM sessions LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE sessions ADD COLUMN error_history_json TEXT NOT NULL DEFAULT '[]'")
+            c.commit()
+
         for row in c.execute("SELECT * FROM sessions ORDER BY created_at"):
             s = SessionRecord(
                 id=row["id"], agent=row["agent"], parent_id=row["parent_id"],
@@ -132,6 +140,7 @@ class PersistentStore(MemoryStore):
                 token_input=row["token_input"], token_output=row["token_output"],
                 token_cache_read=row["token_cache_read"], cost=row["cost"],
                 children=json.loads(row["children_json"] or "[]"),
+                error_history=json.loads(row["error_history_json"] or "[]"),
             )
             self.sessions[s.id] = s
 
@@ -194,6 +203,29 @@ class PersistentStore(MemoryStore):
                 source=row["source"] or "",
             ))
 
+        self._recalculate_session_tokens()
+
+    def _recalculate_session_tokens(self) -> None:
+        """Rebuild session tokens from stored messages to fix historical data corruption."""
+        for s in self.sessions.values():
+            s.token_input = 0
+            s.token_output = 0
+            s.cost = 0.0
+
+        for msg in self.messages.values():
+            self._msg_token_snapshot[msg.id] = (msg.token_input, msg.token_output, 0, msg.cost)
+            s = self.sessions.get(msg.session_id)
+            if s and (msg.token_input or msg.token_output or msg.cost):
+                s.token_input += msg.token_input
+                s.token_output += msg.token_output
+                s.cost += msg.cost
+
+        for s in self.sessions.values():
+            self._exec(
+                "UPDATE sessions SET token_input=?, token_output=?, cost=? WHERE id=?",
+                (s.token_input, s.token_output, s.cost, s.id),
+            )
+
     # ── override writes to also persist ──────────────────────────────────────
 
     def upsert_session(self, session: SessionRecord) -> None:
@@ -203,12 +235,13 @@ class PersistentStore(MemoryStore):
             """INSERT OR REPLACE INTO sessions
                (id, agent, parent_id, status, model_id, provider_id, system_prompt,
                 title, directory, created_at, updated_at,
-                token_input, token_output, token_cache_read, cost, children_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                token_input, token_output, token_cache_read, cost,
+                children_json, error_history_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (s.id, s.agent, s.parent_id, s.status, s.model_id, s.provider_id,
              s.system_prompt, s.title, s.directory, s.created_at, s.updated_at,
              s.token_input, s.token_output, s.token_cache_read, s.cost,
-             json.dumps(s.children)),
+             json.dumps(s.children), json.dumps(s.error_history)),
         )
         # Parent's children list may have been updated
         if s.parent_id and s.parent_id in self.sessions:
@@ -244,6 +277,24 @@ class PersistentStore(MemoryStore):
                 "UPDATE sessions SET token_input=?, token_output=?, token_cache_read=?, cost=? WHERE id=?",
                 (s.token_input, s.token_output, s.token_cache_read, s.cost, session_id),
             )
+
+    def sync_message_tokens(self, msg_id, session_id, token_input, token_output, token_cache, cost):
+        super().sync_message_tokens(msg_id, session_id, token_input, token_output, token_cache, cost)
+        s = self.sessions.get(session_id)
+        if s:
+            self._exec(
+                "UPDATE sessions SET token_input=?, token_output=?, token_cache_read=?, cost=? WHERE id=?",
+                (s.token_input, s.token_output, s.token_cache_read, s.cost, session_id),
+            )
+
+    def add_session_error(self, session_id, error_entry):
+        result = super().add_session_error(session_id, error_entry)
+        if result:
+            self._exec(
+                "UPDATE sessions SET error_history_json=? WHERE id=?",
+                (json.dumps(result.error_history), session_id),
+            )
+        return result
 
     def set_system_prompt(self, session_id: str, prompt: str) -> None:
         super().set_system_prompt(session_id, prompt)

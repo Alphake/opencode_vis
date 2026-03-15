@@ -21,6 +21,7 @@ class SessionRecord:
     token_cache_read: int = 0
     cost: float = 0.0
     children: List[str] = field(default_factory=list)
+    error_history: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -42,6 +43,7 @@ class SessionRecord:
             },
             "cost": self.cost,
             "children": self.children,
+            "errorHistory": self.error_history,
         }
 
 

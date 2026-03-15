@@ -1,6 +1,8 @@
 from flask import Blueprint, jsonify, request, current_app
 import hashlib
 import json
+import math
+import os
 from services.projection_service import (
     DashScopeEmbedder,
     HuggingFaceEmbedder,
@@ -8,6 +10,11 @@ from services.projection_service import (
     build_mock_embeddings,
     build_part_nodes_from_messages,
     log_projection_debug,
+)
+from services.keyword_extraction_service import (
+    build_full_message_text as _build_full_message_text,
+    build_full_session_text as _build_full_session_text,
+    extract_keywords_with_llm as _extract_keywords_with_llm,
 )
 from services.overview_layout import (
     message_layout_text as _message_layout_text,
@@ -32,6 +39,16 @@ def _overview_states():
         states = {}
         current_app.config["OVERVIEW_STATES"] = states
     return states
+
+
+def _normalize_directory(directory: str) -> str:
+    """
+    规范化 directory 便于比较：统一路径分隔符、去掉末尾斜杠。
+    解决 Postman/URL 传 D:\\\\projects\\\\... 与 store 里 D:/projects/... 不一致导致 sessionCount=0 的问题。
+    """
+    if not directory:
+        return ""
+    return directory.replace("\\", "/").strip().rstrip("/")
 
 
 def _embed_by_mode(texts, embedding_mode: str, embedding_model: str):
@@ -84,7 +101,8 @@ def compute_overview_incremental(
     if not directory:
         return {"error": "directory is required", "addedMessageNodes": [], "debug": {}}, 400
 
-    state = _overview_states().get(directory)
+    norm_dir = _normalize_directory(directory)
+    state = _overview_states().get(norm_dir)
     if not state:
         return {
             "error": "incremental state not found, call /overview/projection/init first",
@@ -99,7 +117,7 @@ def compute_overview_incremental(
     radius = float(message_radius if message_radius is not None else state.get("messageRadius", 0.28))
     radius = max(0.05, min(0.95, radius))
 
-    sessions = [s for s in _store().all_sessions() if (s.get("directory") or "") == directory]
+    sessions = [s for s in _store().all_sessions() if _normalize_directory(s.get("directory") or "") == norm_dir]
     known_ids = state.get("knownMessageIds") or set()
     if not isinstance(known_ids, set):
         known_ids = set(known_ids)
@@ -134,10 +152,10 @@ def compute_overview_incremental(
     if not pending:
         state["knownMessageIds"] = known_ids
         return {
-            "directory": directory,
+            "directory": norm_dir,
             "addedMessageNodes": [],
             "debug": {
-                "directory": directory,
+                "directory": norm_dir,
                 "addedCount": 0,
                 "droppedCount": dropped,
                 "knownMessageCount": len(known_ids),
@@ -175,7 +193,7 @@ def compute_overview_incremental(
         old_message_nodes = []
     state["messageNodes"] = [*old_message_nodes, *pending]
     state["cacheReady"] = True
-    _overview_states()[directory] = state
+    _overview_states()[norm_dir] = state
 
     current_app.logger.info(
         "[overview.incremental] %s",
@@ -192,16 +210,16 @@ def compute_overview_incremental(
         ),
     )
     return {
-        "directory": directory,
+        "directory": norm_dir,
         "addedMessageNodes": pending,
         "debug": {
-            "directory": directory,
+            "directory": norm_dir,
             "addedCount": len(pending),
             "droppedCount": dropped,
             "knownMessageCount": len(known_ids),
             "landmarkCount": len(landmarks),
             "layoutMethod": "landmark_weighted_projection_v1",
-            "landmarkSource": "agent init fallback (todo -> first_user_message -> session_title)",
+            "landmarkSource": "agent + existing message nodes (frozen), new messages only",
         },
     }, 200
 
@@ -250,6 +268,7 @@ def get_overview_projection_init():
     if not directory:
         return jsonify({"error": "directory is required", "nodes": [], "debug": {}}), 400
 
+    norm_dir = _normalize_directory(directory)
     with_embedding = (request.args.get("withEmbedding", "true") or "true").strip().lower() != "false"
     with_position = (request.args.get("withPosition", "true") or "true").strip().lower() != "false"
     embedding_mode = (request.args.get("embeddingMode", "dashscope") or "dashscope").strip().lower()
@@ -257,8 +276,9 @@ def get_overview_projection_init():
     if not embedding_model:
         embedding_model = "BAAI/bge-m3" if embedding_mode == "hf" else "text-embedding-v3"
     reduction_algo = (request.args.get("reductionAlgo", "mds") or "mds").strip().lower()
-    message_radius = float(request.args.get("messageRadius", "0.28") or "0.28")
+    message_radius = float(request.args.get("messageRadius", "0.35") or "0.35")
     message_radius = max(0.05, min(0.95, message_radius))
+    clear_cache = (request.args.get("clearCache") or "").strip().lower() in ("1", "true", "yes")
     current_app.logger.info(
         "[overview.init] input=%s",
         json.dumps(
@@ -270,13 +290,17 @@ def get_overview_projection_init():
                 "embeddingModel": embedding_model,
                 "reductionAlgo": reduction_algo,
                 "messageRadius": message_radius,
+                "clearCache": clear_cache,
             },
             ensure_ascii=False,
         ),
     )
 
-    sessions = [s for s in _store().all_sessions() if (s.get("directory") or "") == directory]
-    state = _overview_states().get(directory) or {}
+    if clear_cache:
+        _overview_states().pop(norm_dir, None)
+        current_app.logger.info("[overview.init] clearCache=true, cleared state for directory=%s", norm_dir)
+    sessions = [s for s in _store().all_sessions() if _normalize_directory(s.get("directory") or "") == norm_dir]
+    state = _overview_states().get(norm_dir) or {}
     known_ids = state.get("knownMessageIds") or set()
     if not isinstance(known_ids, set):
         known_ids = set(known_ids)
@@ -294,7 +318,8 @@ def get_overview_projection_init():
             if layout_text:
                 current_ids.add(mid)
     if (
-        state.get("cacheReady")
+        not clear_cache
+        and state.get("cacheReady")
         and known_ids == current_ids
         and isinstance(state.get("agentNodes"), list)
         and isinstance(state.get("messageNodes"), list)
@@ -313,13 +338,13 @@ def get_overview_projection_init():
             ),
         )
         cached_resp = {
-            "directory": directory,
+            "directory": norm_dir,
             "agentNodes": state.get("agentNodes") or [],
             "messageNodes": state.get("messageNodes") or [],
             "agentEdges": state.get("agentEdges") or [],
             "nodes": state.get("messageNodes") or [],
             "debug": {
-                "directory": directory,
+                "directory": norm_dir,
                 "cacheHit": True,
                 "knownMessageCount": len(known_ids),
                 "withEmbedding": with_embedding,
@@ -365,12 +390,13 @@ def get_overview_projection_init():
         if todo_text:
             init_source = "todo"
             init_text = todo_text
-        elif user_text:
-            init_source = "first_user_message"
-            init_text = user_text
         elif title_text:
             init_source = "session_title"
             init_text = title_text
+        elif user_text:
+            init_source = "first_user_message"
+            init_text = user_text
+        
 
         agent_node_id = hashlib.md5(f"{directory}|agent|{agent}".encode("utf-8")).hexdigest()[:12]
         agent_nodes.append({
@@ -408,7 +434,7 @@ def get_overview_projection_init():
                 })
 
     resp = {
-        "directory": directory,
+        "directory": norm_dir,
         "agentNodes": agent_nodes,
         "messageNodes": message_nodes,
         "agentEdges": [
@@ -418,7 +444,8 @@ def get_overview_projection_init():
         # 兼容旧前端：继续输出 nodes=messageNodes
         "nodes": message_nodes,
         "debug": {
-            "directory": directory,
+            "directory": norm_dir,
+            "requestedDirectory": directory,
             "agentCount": len(agent_nodes),
             "pointCount": len(message_nodes),
             "sessionCount": len(sessions),
@@ -432,8 +459,15 @@ def get_overview_projection_init():
             "edgeCount": len(edge_counts),
             "initFallbackOrder": ["todo", "first_user_message", "session_title", "fallback"],
             "partTypesForLayout": ["text", "reasoning", "compaction"],
+            "clearCache": clear_cache,
         },
     }
+    if len(sessions) == 0:
+        all_sess = _store().all_sessions()
+        resp["debug"]["storeSessionCount"] = len(all_sess)
+        resp["debug"]["availableDirectories"] = sorted(
+            set(_normalize_directory(s.get("directory") or "") for s in all_sess) - {""}
+        )
     current_app.logger.info(
         "[overview.init] grouped=%s",
         json.dumps(
@@ -492,36 +526,54 @@ def get_overview_projection_init():
             for i, n in enumerate(agent_with_vec):
                 n["x"], n["y"] = centers[i][0], centers[i][1]
         elif len(agent_with_vec) == 1:
-            agent_with_vec[0]["x"], agent_with_vec[0]["y"] = 0.0, 0.0
+            # 避免 (0,0) 和 y=0：单 agent 用 (0.2, 0.2)，保证 message/增量点不塌缩到原点
+            agent_with_vec[0]["x"], agent_with_vec[0]["y"] = 0.2, 0.2
 
-        # 无 embedding 的 agent 放中间带轻微分散
+        # 无 embedding 的 agent 放中间带轻微分散，同样避免 (0,0) 和 y=0
         no_vec_agents = [n for n in resp["agentNodes"] if "x" not in n or "y" not in n]
         for idx, n in enumerate(no_vec_agents):
-            n["x"] = -0.2 + 0.4 * (idx / max(1, len(no_vec_agents) - 1)) if len(no_vec_agents) > 1 else 0.0
-            n["y"] = 0.0
+            if len(no_vec_agents) > 1:
+                n["x"] = -0.3 + 0.6 * (idx / (len(no_vec_agents) - 1))
+                n["y"] = 0.2
+            else:
+                n["x"], n["y"] = 0.2, 0.2
 
         # 建立 agent -> center 映射
         center_by_agent = {n["agent"]: (n.get("x", 0.0), n.get("y", 0.0)) for n in resp["agentNodes"]}
 
         # 2) message 小点：先全局降维，再限制在各自 agent 中心附近半径内
         msg_with_vec = [n for n in resp["messageNodes"] if isinstance(n.get("embedding"), list) and len(n.get("embedding")) >= 2]
+        layout_trace = {
+            "msgWithVecCount": len(msg_with_vec),
+            "totalMessageCount": len(resp["messageNodes"]),
+            "agentWithVecCount": len(agent_with_vec),
+            "centerByAgent": {k: list(v) for k, v in center_by_agent.items()},
+        }
         if len(msg_with_vec) > 1:
             msg_vecs = [[float(v) for v in n["embedding"]] for n in msg_with_vec]
             msg_points = _reduce_vectors_2d(msg_vecs, reduction_algo=reduction_algo)
+            layout_trace["msgPointsSample"] = [{"_gx": round(p[0], 4), "_gy": round(p[1], 4)} for p in msg_points[:5]]
             for i, n in enumerate(msg_with_vec):
                 n["_gx"], n["_gy"] = msg_points[i][0], msg_points[i][1]
         elif len(msg_with_vec) == 1:
             msg_with_vec[0]["_gx"], msg_with_vec[0]["_gy"] = 0.0, 0.0
+            layout_trace["msgPointsSample"] = [{"_gx": 0.0, "_gy": 0.0}]
+        else:
+            layout_trace["msgPointsSample"] = []
+            layout_trace["note"] = "no message has embedding, all will use _gx=_gy=0"
 
         # 按 agent 局部归一化并约束到半径
         by_agent_msgs = {}
         for n in resp["messageNodes"]:
             by_agent_msgs.setdefault(n["agent"], []).append(n)
+        per_agent_summary = []
         for agent, arr in by_agent_msgs.items():
             cx, cy = center_by_agent.get(agent, (0.0, 0.0))
             coords = [(float(n.get("_gx", 0.0)), float(n.get("_gy", 0.0))) for n in arr]
             if len(coords) <= 1:
-                arr[0]["x"], arr[0]["y"] = cx, cy
+                arr[0]["x"] = max(-1.0, min(1.0, cx))
+                arr[0]["y"] = max(-1.0, min(1.0, cy))
+                per_agent_summary.append({"agent": agent, "msgCount": len(arr), "cx": cx, "cy": cy, "branch": "single", "finalXY": [cx, cy]})
                 continue
             xs = [p[0] for p in coords]
             ys = [p[1] for p in coords]
@@ -532,10 +584,31 @@ def get_overview_projection_init():
             for n in arr:
                 lx = ((float(n.get("_gx", 0.0)) - min_x) / span_x) * 2.0 - 1.0
                 ly = ((float(n.get("_gy", 0.0)) - min_y) / span_y) * 2.0 - 1.0
-                n["x"] = cx + lx * message_radius
-                n["y"] = cy + ly * message_radius
+                n["x"] = max(-1.0, min(1.0, cx + lx * message_radius))
+                n["y"] = max(-1.0, min(1.0, cy + ly * message_radius))
                 n.pop("_gx", None)
                 n.pop("_gy", None)
+            first_xy = [round(arr[0]["x"], 4), round(arr[0]["y"], 4)] if arr else [0, 0]
+            per_agent_summary.append({"agent": agent, "msgCount": len(arr), "cx": cx, "cy": cy, "spanX": span_x, "spanY": span_y, "branch": "multi", "firstFinalXY": first_xy})
+        layout_trace["perAgentSummary"] = per_agent_summary
+        resp["debug"]["layoutTrace"] = layout_trace
+
+        # 兜底：若仍全部落在 (0,0)：按索引在圆上散开（理论上不应触发，单 agent 已改为 0.15）
+        msg_nodes = resp["messageNodes"]
+        if msg_nodes:
+            all_zero = all(float(n.get("x", 0)) == 0.0 and float(n.get("y", 0)) == 0.0 for n in msg_nodes)
+            if all_zero:
+                r = 0.35
+                for i, n in enumerate(msg_nodes):
+                    angle = (2 * math.pi * i) / max(1, len(msg_nodes))
+                    n["x"] = r * math.cos(angle)
+                    n["y"] = r * math.sin(angle)
+                current_app.logger.info(
+                    "[overview.init] positions fallback: all message points were (0,0), spread %s points in circle r=%.2f",
+                    len(msg_nodes), r,
+                )
+            elif len(msg_nodes) == 1 and float(msg_nodes[0].get("x", 0)) == 0.0 and float(msg_nodes[0].get("y", 0)) == 0.0:
+                msg_nodes[0]["x"], msg_nodes[0]["y"] = 0.2, 0.2
 
         resp["nodes"] = resp["messageNodes"]
         resp["debug"]["position"] = {
@@ -550,6 +623,7 @@ def get_overview_projection_init():
                     "directory": directory,
                     "provider": f"backend.overview_init_{reduction_algo}_v1",
                     "reductionAlgo": reduction_algo,
+                    "layoutTrace": resp["debug"].get("layoutTrace"),
                     "agentNodes": [
                         {
                             "agent": n.get("agent"),
@@ -576,21 +650,21 @@ def get_overview_projection_init():
             ),
         )
 
-    # 建立增量布局状态（Landmark 模式）：初始化后冻结旧点，仅新增点追加
+    # 建立增量布局状态（Landmark 模式）：agent + 已有 message 均为锚点，位置不再调整；仅新 message 用 landmark 加权算位置
     try:
-        landmarks = [
-            {
-                "agent": n.get("agent"),
-                "sessionId": n.get("sessionId"),
-                "embedding": n.get("embedding"),
-                "x": n.get("x", 0.0),
-                "y": n.get("y", 0.0),
-            }
+        agent_landmarks = [
+            {"agent": n.get("agent"), "sessionId": n.get("sessionId"), "embedding": n.get("embedding"), "x": n.get("x", 0.0), "y": n.get("y", 0.0)}
             for n in resp["agentNodes"]
             if isinstance(n.get("embedding"), list) and len(n.get("embedding")) >= 2
         ]
-        _overview_states()[directory] = {
-            "directory": directory,
+        message_landmarks = [
+            {"agent": n.get("agent"), "sessionId": n.get("sessionId"), "embedding": n.get("embedding"), "x": n.get("x", 0.0), "y": n.get("y", 0.0)}
+            for n in resp["messageNodes"]
+            if isinstance(n.get("embedding"), list) and len(n.get("embedding")) >= 2 and "x" in n and "y" in n
+        ]
+        landmarks = agent_landmarks + message_landmarks
+        _overview_states()[norm_dir] = {
+            "directory": norm_dir,
             "embeddingMode": embedding_mode,
             "embeddingModel": embedding_model,
             "messageRadius": message_radius,
@@ -605,7 +679,9 @@ def get_overview_projection_init():
         resp["debug"]["incremental"] = {
             "enabled": True,
             "landmarkCount": len(landmarks),
-            "knownMessageCount": len(_overview_states()[directory]["knownMessageIds"]),
+            "agentLandmarkCount": len(agent_landmarks),
+            "messageLandmarkCount": len(message_landmarks),
+            "knownMessageCount": len(_overview_states()[norm_dir]["knownMessageIds"]),
         }
     except Exception as exc:
         current_app.logger.warning("[overview.init] incremental state build failed: %s", exc)
@@ -634,6 +710,65 @@ def get_overview_projection_incremental():
 @api_bp.get("/sessions/<session_id>/messages")
 def get_session_messages(session_id: str):
     return jsonify(_store().get_messages(session_id))
+
+
+@api_bp.post("/monitor/extract-keywords")
+def post_monitor_extract_keywords():
+    """
+    监控用关键词提取：用 LLM 从全量消息文本中提取意图与关键词（不接入现有布局）。
+
+    请求体（JSON）三选一：
+    - text: 直接传入完整文本，用于联调或单次测试；
+    - sessionId + messageId: 从 store 取该条 message，拼全量文本后提取；
+    - 仅 sessionId: 取该 session 下全部 messages 拼成整段对话后提取。
+
+    返回：{ "ok": bool, "result": { "intent_sentence", "keyword" } | null, "error": str | null, "debug": {} }
+    """
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()
+    session_id = (body.get("sessionId") or "").strip()
+    message_id = (body.get("messageId") or "").strip()
+    model = (body.get("model") or "qwen-plus-2025-07-28").strip()
+
+    if text:
+        full_text = text
+        source = "body.text"
+    elif session_id and message_id:
+        messages = _store().get_messages(session_id)
+        msg = next((m for m in messages if (m.get("id") or m.get("messageId")) == message_id), None)
+        if not msg:
+            return jsonify({
+                "ok": False,
+                "result": None,
+                "error": "message not found",
+                "debug": {"sessionId": session_id, "messageId": message_id},
+            }), 404
+        full_text = _build_full_message_text(msg)
+        source = "store.message"
+    elif session_id:
+        messages = _store().get_messages(session_id)
+        if not messages:
+            return jsonify({
+                "ok": False,
+                "result": None,
+                "error": "no messages in session",
+                "debug": {"sessionId": session_id},
+            }), 404
+        full_text = _build_full_session_text(messages)
+        source = "store.session"
+    else:
+        return jsonify({
+            "ok": False,
+            "result": None,
+            "error": "provide body.text, or body.sessionId+messageId, or body.sessionId",
+            "debug": {},
+        }), 400
+
+    out = _extract_keywords_with_llm(full_text, model=model)
+    out["debug"]["source"] = source
+    out["debug"]["input_length"] = len(full_text)
+    ok = out.get("error") is None
+    return jsonify({"ok": ok, "result": out.get("result"), "error": out.get("error"), "debug": out.get("debug", {})}), 200 if ok else 500
 
 
 @api_bp.get("/sessions/<session_id>/projection/parts")

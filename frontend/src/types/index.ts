@@ -1,5 +1,11 @@
-export type AgentStatus = "idle" | "busy" | "error"
+export type AgentStatus = "idle" | "busy" | "error" | "pending" | "retrying"
 export type AgentType = "build" | "general" | "explore" | "plan" | string
+
+export interface SessionError {
+  timestamp: number
+  name: string
+  message: string
+}
 
 export interface Session {
   id: string
@@ -16,6 +22,9 @@ export interface Session {
   tokens: { input: number; output: number; cacheRead: number }
   cost: number
   children: string[]
+  errorHistory: SessionError[]
+  /** 该 session 下工具调用错误数（后端从 messages 补全后统计） */
+  toolErrorCount?: number
 }
 
 export interface MessagePart {
