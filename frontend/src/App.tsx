@@ -202,7 +202,6 @@ function RightSummary({ connected, metrics, sessions, directory, normalizeDirect
     if (!dirNorm) return Object.values(sessions)
     return Object.values(sessions).filter(s => normalizeDirectory(s.directory ?? "") === dirNorm)
   }, [sessions, directory, normalizeDirectory])
-  const types = [...new Set(list.map(s => s.agent))]
   const tok = metrics.totalTokens.input + metrics.totalTokens.output
   const agentsWithErrors = list.filter(s => s.status === "error" || (s.errorHistory?.length ?? 0) > 0)
 
@@ -216,7 +215,7 @@ function RightSummary({ connected, metrics, sessions, directory, normalizeDirect
         {/* Error alerts：标明是谁的 error，点击跳转到该 agent 查看详情 */}
         {agentsWithErrors.length > 0 && (
           <div className="space-y-1.5">
-            <div className="text-[10px] text-gray-400 uppercase tracking-widest mb-1">Errors（点击查看该 Agent 详情）</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-widest mb-1">Errors</div>
             {agentsWithErrors.map(a => {
               const isLive = a.status === "error"
               const errCount = a.errorHistory?.length ?? 0
@@ -230,18 +229,17 @@ function RightSummary({ connected, metrics, sessions, directory, normalizeDirect
                     isLive ? "bg-red-50 border-red-200" : "bg-amber-50/50 border-amber-200/60"
                   }`}
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${isLive ? "bg-red-400" : "bg-amber-400"}`} />
-                    <span className={`text-xs font-semibold ${isLive ? "text-red-700" : "text-amber-700"}`}>Agent: {a.agent}</span>
-                    <span className="text-[10px] text-gray-400 font-mono truncate">Session: {a.id.slice(0, 12)}…</span>
-                    <span className={`ml-auto text-[10px] font-medium ${isLive ? "text-red-500" : "text-amber-500"}`}>
-                      {isLive ? "live error" : `${errCount} past`}
+                    <span className={`text-xs font-semibold truncate min-w-0 ${isLive ? "text-red-700" : "text-amber-700"}`}>
+                      {a.agent}
                     </span>
                   </div>
                   {lastErr && (
                     <div className="mt-1 text-[10px] text-red-500/80 whitespace-pre-wrap break-words">
-                      <span className="font-semibold">{lastErr.name}: </span>
-                      {lastErr.message}
+                      {lastErr.message === lastErr.name || lastErr.message.startsWith(lastErr.name + ": ")
+                        ? lastErr.message
+                        : `${lastErr.name}: ${lastErr.message}`}
                     </div>
                   )}
                 </button>
@@ -271,23 +269,6 @@ function RightSummary({ connected, metrics, sessions, directory, normalizeDirect
           ))}
         </div>
 
-        {/* Agent types */}
-        {types.length > 0 && (
-          <div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-widest mb-2">Agent Types</div>
-            <div className="flex flex-wrap gap-1.5">
-              {types.map(type => (
-                <span key={type}
-                  className="flex items-center gap-1.5 text-[11px] text-gray-600
-                             bg-gray-50 border border-gray-100 rounded-full px-2.5 py-1">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: AGENT_COLORS[type] ?? AGENT_COLORS.unknown }} />
-                  {type}
-                  <span className="text-gray-400 font-mono">×{list.filter(s => s.agent === type).length}</span>
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
       <div className="p-4 border-t border-gray-100 mt-auto">

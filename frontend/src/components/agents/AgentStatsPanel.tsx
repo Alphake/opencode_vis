@@ -94,17 +94,18 @@ function ErrorEntry({
   content: string
 }) {
   const [expanded, setExpanded] = useState(false)
-  const displayContent = dropRedundantErrorPrefix(title, content)
+  let displayContent = dropRedundantErrorPrefix(title, content)
+  if (displayContent === title || displayContent === title + ":") displayContent = ""
   const showToggle = displayContent.length > 80
   return (
     <div className="px-3 py-2 text-xs">
       <div className="flex items-center gap-2 mb-0.5">
-        <span className={`text-[10px] rounded px-1.5 py-px font-bold uppercase ${kind === "session" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+        <span className={`text-[10px] rounded px-1.5 py-px font-bold uppercase shrink-0 ${kind === "session" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
           {kind}
         </span>
-        <span className="font-mono font-semibold text-red-600">{title}</span>
-        {extra && <span className="text-[10px] text-gray-400 font-mono">{extra}</span>}
-        <span className="ml-auto text-[10px] text-gray-300 font-mono tabular-nums">{fmtTime(time)}</span>
+        <span className="font-mono font-semibold text-red-600 truncate min-w-0">{title}</span>
+        {extra && <span className="text-[10px] text-gray-400 font-mono shrink-0">{extra}</span>}
+        <span className="ml-auto text-[10px] text-gray-300 font-mono tabular-nums shrink-0">{fmtTime(time)}</span>
       </div>
       {displayContent ? (
         <>

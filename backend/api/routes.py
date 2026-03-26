@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import random
 from services.projection_service import (
     DashScopeEmbedder,
     HuggingFaceEmbedder,
@@ -137,7 +138,7 @@ def compute_overview_incremental(
             if not layout_text:
                 dropped += 1
                 continue
-            msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()[:12]
+            msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()
             pending.append({
                 "nodeId": f"msg-{msg_node_id}",
                 "agent": agent,
@@ -162,7 +163,19 @@ def compute_overview_incremental(
             },
         }, 200
 
-    texts = [n["embeddingInput"] for n in pending]
+    use_keyword_extraction = state.get("useKeywordExtraction", False)
+    if use_keyword_extraction:
+        for n in pending:
+            out = _extract_keywords_with_llm(n["embeddingInput"])
+            if out.get("result"):
+                n["intentSentence"] = out["result"].get("intent_sentence") or n["embeddingInput"]
+                n["keyword"] = out["result"].get("keyword") or ""
+            else:
+                n["intentSentence"] = n["embeddingInput"]
+                n["keyword"] = ""
+            n["keywordWeight"] = round(random.uniform(0, 1), 3)
+
+    texts = [n.get("intentSentence") or n["embeddingInput"] for n in pending] if use_keyword_extraction else [n["embeddingInput"] for n in pending]
     try:
         vectors, _ = _embed_by_mode(
             texts=texts,
@@ -279,6 +292,7 @@ def get_overview_projection_init():
     message_radius = float(request.args.get("messageRadius", "0.35") or "0.35")
     message_radius = max(0.05, min(0.95, message_radius))
     clear_cache = (request.args.get("clearCache") or "").strip().lower() in ("1", "true", "yes")
+    use_keyword_extraction = (request.args.get("useKeywordExtraction") or "false").strip().lower() in ("1", "true", "yes")
     current_app.logger.info(
         "[overview.init] input=%s",
         json.dumps(
@@ -421,7 +435,7 @@ def get_overview_projection_init():
                     dropped_messages += 1
                     continue
                 mid = m.get("id") or ""
-                msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()[:12]
+                msg_node_id = hashlib.md5(f"{directory}|msg|{sid}|{mid}".encode("utf-8")).hexdigest()
                 message_nodes.append({
                     "nodeId": f"msg-{msg_node_id}",
                     "agent": agent,
@@ -432,6 +446,18 @@ def get_overview_projection_init():
                     "timestamp": m.get("timestamp"),
                     "embeddingInput": layout_text,
                 })
+
+    # 可选：关键词抽取方案（默认关闭，传 useKeywordExtraction=true 启用）
+    if use_keyword_extraction:
+        for n in message_nodes:
+            out = _extract_keywords_with_llm(n["embeddingInput"])
+            if out.get("result"):
+                n["intentSentence"] = out["result"].get("intent_sentence") or n["embeddingInput"]
+                n["keyword"] = out["result"].get("keyword") or ""
+            else:
+                n["intentSentence"] = n["embeddingInput"]
+                n["keyword"] = ""
+            n["keywordWeight"] = round(random.uniform(0, 1), 3)
 
     resp = {
         "directory": norm_dir,
@@ -486,7 +512,7 @@ def get_overview_projection_init():
 
     if with_embedding and (agent_nodes or message_nodes):
         agent_texts = [n["embeddingInput"] for n in agent_nodes]
-        message_texts = [n["embeddingInput"] for n in message_nodes]
+        message_texts = [n.get("intentSentence") or n["embeddingInput"] for n in message_nodes] if use_keyword_extraction else [n["embeddingInput"] for n in message_nodes]
         texts = agent_texts + message_texts
         try:
             vectors, embedding_debug = _embed_by_mode(
@@ -668,6 +694,7 @@ def get_overview_projection_init():
             "embeddingMode": embedding_mode,
             "embeddingModel": embedding_model,
             "messageRadius": message_radius,
+            "useKeywordExtraction": use_keyword_extraction,
             "landmarks": landmarks,
             "agentCenters": {n.get("agent"): (n.get("x", 0.0), n.get("y", 0.0)) for n in resp["agentNodes"]},
             "knownMessageIds": {n.get("messageId") for n in resp["messageNodes"] if n.get("messageId")},

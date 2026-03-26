@@ -34,7 +34,8 @@ const STATUS_HALO: Record<string, string> = {
   error: "#EF4444",
 }
 
-const MESSAGE_LEGEND_ORDER = ["text", "reasoning", "tool", "user", "assistant", "compaction"] as const
+/** 图例：不展示 text、tool，只保留 reasoning / user / assistant / compaction */
+const MESSAGE_LEGEND_ORDER = ["reasoning", "user", "assistant", "compaction"] as const
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
 
@@ -72,9 +73,11 @@ interface Props {
 /** 一个 agent 节点：在当前 directory 下该 agent 对应至少一个 session */
 interface AgentNode extends OverviewAgentNode {}
 interface MessageNode extends OverviewMessageNode {}
+/** 缓存版本：带 keyword/keywordWeight 的协议为 v2，旧缓存不命中以强制重拉 */
+const OVERVIEW_CACHE_VERSION = 2
 const OVERVIEW_INIT_CACHE = new Map<
   string,
-  { agentNodes: AgentNode[]; messageNodes: MessageNode[]; agentEdges: OverviewAgentEdge[] }
+  { agentNodes: AgentNode[]; messageNodes: MessageNode[]; agentEdges: OverviewAgentEdge[]; _version?: number }
 >()
 
 /**
@@ -152,7 +155,7 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
     const skipCache = refreshTrigger > 0
     if (skipCache) OVERVIEW_INIT_CACHE.delete(effectiveDirectory)
     const cached = skipCache ? undefined : OVERVIEW_INIT_CACHE.get(effectiveDirectory)
-    if (cached) {
+    if (cached && (cached._version ?? 0) >= OVERVIEW_CACHE_VERSION) {
       setAgentNodes(cached.agentNodes)
       setMessageNodes(cached.messageNodes)
       setAgentEdges(cached.agentEdges)
@@ -182,17 +185,15 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
           mode === "dashscope" ? 120000 : 150000,
         )
         .then((resp) => {
+          const msgs = (resp.messageNodes ?? resp.nodes ?? []) as MessageNode[]
           console.info("[overview.init] response", {
             directory: effectiveDirectory,
-            nodeCount: resp.nodes?.length ?? 0,
-            agentNodeCount: resp.agentNodes?.length ?? 0,
-            messageNodeCount: resp.messageNodes?.length ?? 0,
-            edgeCount: resp.agentEdges?.length ?? 0,
+            messageNodeCount: msgs.length,
+            firstMessageHasKeyword: msgs[0] ? { keyword: msgs[0].keyword, keywordWeight: msgs[0].keywordWeight } : null,
             debug: resp.debug,
           })
           if (!cancelled) {
             const ag = (resp.agentNodes ?? []) as AgentNode[]
-            const msgs = (resp.messageNodes ?? resp.nodes ?? []) as MessageNode[]
             setAgentNodes(ag)
             setMessageNodes(msgs)
             setAgentEdges(resp.agentEdges ?? [])
@@ -201,6 +202,7 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
               agentNodes: ag,
               messageNodes: msgs,
               agentEdges: resp.agentEdges ?? [],
+              _version: OVERVIEW_CACHE_VERSION,
             })
             messageNodeMapRef.current = new Map(msgs.map((m) => [m.nodeId, m]))
             initializedRef.current = true
@@ -370,13 +372,14 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
     const out: Array<{ agent: string; path: string; color: string }> = []
     for (const [agent, pts] of groups.entries()) {
       if (pts.length < 3) continue
-      // 高斯核 KDE：bandwidth 越大密度越平滑，thresholds 越多最外层等高线越包得住孤立点
+      // 等高线层数按该 agent 的点数动态：点越多层数越多，便于区分密度
+      const numLevels = Math.max(3, Math.min(12, Math.floor(Math.sqrt(pts.length)) + 2))
       const density = contourDensity<{ x: number; y: number }>()
         .x((d) => d.x)
         .y((d) => d.y)
         .size([width, height])
         .bandwidth(28)
-        .thresholds(7)
+        .thresholds(numLevels)
       const cs = density(pts)
       for (const c of cs) {
         const path = (c.coordinates || [])
@@ -476,21 +479,26 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
                 )
               })}
 
-              {/* message 小点层：按类型用 MESSAGE_TYPE_COLOR */}
-              {projectedMessages.map((n) => {
+              {/* message 小点层：按类型用 MESSAGE_TYPE_COLOR；关键词按权值阈值展示，字号与权值成比例 */}
+              {projectedMessages.map((n, idx) => {
                 const messageType = (n.type || n.role || "unknown").toString().toLowerCase()
                 const baseColor = MESSAGE_TYPE_COLOR[messageType] ?? MESSAGE_TYPE_COLOR.unknown
                 const selected = n.sessionId === selectedSessionIdForHighlight
                 const r = selected ? 4 : 2.6
                 const ageMin = n.timestamp ? Math.max(0, (nowMs - n.timestamp) / 60000) : 120
                 const ageRatio = clamp(ageMin / 90, 0, 1)
-                // 变淡有度：最多只混入 40% 白色，保证最旧的点仍能看清
                 const toWhiteRatio = Math.min(0.4, 0.08 + ageRatio * 0.32)
                 const fill = blendColorToWhite(baseColor, toWhiteRatio)
                 const opacity = clamp(0.92 - ageRatio * 0.15, 0.72, 0.95)
+                const weight = Number(n.keywordWeight) || 0
+                const keywordThreshold = 0.35
+                const hasKeyword = n.keyword != null && String(n.keyword).trim() !== ""
+                const showKeyword = hasKeyword && weight >= keywordThreshold
+                const keywordFontSize = Math.max(8, 8 + weight * 8)
+                const uniqueKey = `${n.nodeId}-${n.sessionId}-${n.messageId}-${idx}`
                 return (
                   <g
-                    key={n.nodeId}
+                    key={uniqueKey}
                     transform={`translate(${n.px},${n.py})`}
                     onClick={() => {
                       onSelectSession(n.sessionId)
@@ -506,6 +514,18 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
                       strokeWidth={1}
                       style={{ transition: "all 700ms ease" }}
                     />
+                    {showKeyword && (
+                      <text
+                        textAnchor="middle"
+                        y={-r - 4}
+                        fontSize={keywordFontSize}
+                        fill="#374151"
+                        fontWeight={500}
+                        style={{ pointerEvents: "none" }}
+                      >
+                        {n.keyword}
+                      </text>
+                    )}
                     <title>
                       {n.agent} · message · {messageType}
                       {"\n"}
@@ -514,6 +534,7 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
                       message: {n.messageId}
                       {"\n"}
                       age(min): {ageMin.toFixed(1)}
+                      {n.keyword ? `\nkeyword: ${n.keyword} (weight: ${weight.toFixed(2)})` : ""}
                     </title>
                   </g>
                 )
@@ -567,12 +588,12 @@ export function OverviewPanel({ onSelectSession, selectedId, directory: director
       {selectedPoint && (
         <div className="border border-blue-200 bg-blue-50 rounded-lg p-3 text-xs text-gray-700">
           <div className="text-[10px] text-blue-400 uppercase tracking-widest mb-1">
-            {selectedPoint.kind === "agent" ? "Agent Init Vector Input" : "Message Vector Input"}
+            {selectedPoint.kind === "agent" ? "Agent Init" : "消息原文"}
           </div>
           <div className="font-mono text-[11px] text-gray-500 mb-1">
             {selectedPoint.kind === "agent"
               ? `${selectedPoint.node.agent} · ${(liveStatusByAgent.get(selectedPoint.node.agent) ?? selectedPoint.node.status)} · ${selectedPoint.node.sessionId}`
-              : `${selectedPoint.node.agent} · ${selectedPoint.node.sessionId} · ${selectedPoint.node.messageId}`}
+              : `${selectedPoint.node.agent} · ${selectedPoint.node.sessionId} · ${(selectedPoint.node as MessageNode).messageId}`}
           </div>
           <pre className={`whitespace-pre-wrap break-words overflow-y-auto bg-white border border-blue-100 rounded p-2 text-[11px] ${!embeddingDetailExpanded ? "max-h-40" : ""}`}>
             {selectedPoint.node.embeddingInput}

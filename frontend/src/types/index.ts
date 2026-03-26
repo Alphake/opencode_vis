@@ -170,6 +170,12 @@ export interface OverviewMessageNode {
   type?: string
   timestamp?: number
   embeddingInput: string
+  /** 抽取的一句话，用于算 embedding */
+  intentSentence?: string
+  /** 一个关键词，在等高线图上按权值阈值展示 */
+  keyword?: string
+  /** 关键词展示权值，0～1，超过阈值才显示，字号与权值成比例 */
+  keywordWeight?: number
   x?: number
   y?: number
 }
