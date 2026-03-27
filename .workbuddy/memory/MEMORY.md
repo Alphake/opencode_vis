@@ -19,6 +19,13 @@ opencode 进程 → Plugin (Hook) → POST /api/events/batch → Flask → SSE �
 - `AgentTreePanel`：左侧 session 树
 - **待开发**：TodoFlowPanel（D3 event 序列图）、MessageStreamPanel
 
+## cockpit-ui（新前端，2026-03-27 创建）
+- **位置**：`cockpit-ui/`（Vite + React 19 + TS + Tailwind v4 + D3）
+- **数据源**：直连 opencode API `localhost:4096`，零后端依赖
+- **CORS**：已验证 opencode 完美支持 CORS
+- **组件**：Header / MessagePanel / MessageBubble / ToolCallCard / ReasoningBlock / TodoPanel / EventFlowChart
+- **开发计划**：`docs/development-plan.md`
+
 ## UI 目标（导师演示用）
 左侧：对话消息面板（MVP：只读；后期：iframe 嵌 opencode --web）
 右侧：每个 Todo 任务一个卡片，卡片内 D3 event flow 图（矩形序列 + 颜色 = event type）
@@ -28,11 +35,27 @@ opencode 进程 → Plugin (Hook) → POST /api/events/batch → Flask → SSE �
 - 用 `instructions` 字段注入系统级提示（让 agent 每次先生成 Todo 计划）
 - 用 `plugin` 字段加载编译后的 plugin dist/index.js
 
-## 可用 API（无需新开，下周一前够用）
+## 可用 API
+
+### opencode 原生 API（`localhost:4096`，MVP 优先使用）
+- `GET /session` → session 列表（含 id、slug、title、directory、time）
+- `GET /session/:id/todo` → Todo 列表（含 content、status、priority）✅已验证
+- `GET /session/:id/message` → 消息流（结构待确认）
+- SSE `GET /session/:id/event` → 实时会话事件
+- SSE `GET /global/event` → 全局事件
+- `POST /session/:id/message` → 发送消息
+
+### 自有 backend API（`localhost:5000`，长期保留用于历史数据）
 - `GET /api/todos/:sessionId` → 任务列表
 - `GET /api/tools/calls?sessionId=` → 工具调用序列（含时间戳、状态）
 - `GET /api/sessions/:id/messages` → 完整消息流（含 parts）
 - SSE `GET /api/events/stream` → 实时事件推送
+
+## 架构决策（2026-03-27 确定）
+- **MVP Demo**：只用 opencode API（`localhost:4096`），前端直连，零额外依赖
+- **长期**：加回 plugin + backend，提供历史持久化和更丰富可视化
+- **前端样式**：无法复用 opencode SolidJS 组件（非公开 npm 包），改为视觉参考 + React/Tailwind 重新实现
+- **新布局**：Header（session 选择下拉）+ 左侧 MessagePanel + 右侧 TodoPanel（D3 矩形序列图）
 
 ## 用户信息
 - 研究生，导师做可视化研究，下周一要演示
