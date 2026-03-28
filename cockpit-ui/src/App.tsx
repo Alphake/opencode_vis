@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { OcSession } from './types/opencode'
-import { getSessions, getTodos, getMessages } from './services/opencodeApi'
+import { getSessions, getTodos, getMessages, sendMessage, subscribeGlobalEvents } from './services/opencodeApi'
 import type { OcMessage, OcTodo } from './types/opencode'
-import Header from './components/Header'
+import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
-import TodoPanel from './components/TodoPanel'
 
 function App() {
   const [sessions, setSessions] = useState<OcSession[]>([])
@@ -12,8 +11,8 @@ function App() {
   const [messages, setMessages] = useState<OcMessage[]>([])
   const [todos, setTodos] = useState<OcTodo[]>([])
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [apiConnected, setApiConnected] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   // Load sessions on mount
   useEffect(() => {
@@ -21,23 +20,41 @@ function App() {
       .then((data) => {
         setSessions(data)
         setApiConnected(true)
-        // Auto-select the most recently updated session with messages
         const sorted = [...data].sort((a, b) => b.time.updated - a.time.updated)
         if (sorted.length > 0) {
           setSelectedSessionId(sorted[0].id)
         }
       })
-      .catch((err) => {
-        setError(`无法连接 opencode API (${BASE})：${err.message}`)
-        setApiConnected(false)
-      })
+      .catch(() => setApiConnected(false))
   }, [])
+
+  // Subscribe to global SSE events
+  useEffect(() => {
+    const unsubscribe = subscribeGlobalEvents((event) => {
+      const payload = event?.payload || event
+      const eventType = payload?.type
+      if (!eventType) return
+
+      if (eventType.startsWith('message') || eventType.startsWith('session')) {
+        getMessages(selectedSessionId)
+          .then(setMessages)
+          .catch(err => console.warn('[SSE] Failed to refresh messages:', err))
+      }
+
+      if (eventType.startsWith('todo')) {
+        getTodos(selectedSessionId)
+          .then(setTodos)
+          .catch(err => console.warn('[SSE] Failed to refresh todos:', err))
+      }
+    })
+
+    return unsubscribe
+  }, [selectedSessionId])
 
   // Load messages + todos when session changes
   const loadSessionData = useCallback(async (sessionId: string) => {
     if (!sessionId) return
     setLoading(true)
-    setError(null)
     try {
       const [msgs, td] = await Promise.all([
         getMessages(sessionId),
@@ -45,8 +62,8 @@ function App() {
       ])
       setMessages(msgs)
       setTodos(td)
-    } catch (err: any) {
-      setError(`加载 session 数据失败：${err.message}`)
+    } catch (err) {
+      console.error('Failed to load session data:', err)
     } finally {
       setLoading(false)
     }
@@ -56,41 +73,85 @@ function App() {
     loadSessionData(selectedSessionId)
   }, [selectedSessionId, loadSessionData])
 
+  const handleSendMessage = useCallback(async (text: string) => {
+    if (!selectedSessionId) return
+    await sendMessage(selectedSessionId, text)
+    const msgs = await getMessages(selectedSessionId)
+    setMessages(msgs)
+  }, [selectedSessionId])
+
+  const selectedSession = sessions.find(s => s.id === selectedSessionId)
+
   return (
-    <div className="flex flex-col h-screen bg-bg-primary">
-      <Header
+    <div
+      style={{
+        display: 'flex',
+        height: '100vh',
+        width: '100vw',
+        overflow: 'hidden',
+        background: '#F8F8F8',
+      }}
+    >
+      {/* Left Sidebar (240px) */}
+      <Sidebar
         sessions={sessions}
         selectedSessionId={selectedSessionId}
         onSelectSession={setSelectedSessionId}
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         apiConnected={apiConnected}
       />
 
-      {error && (
-        <div className="mx-4 mt-2 px-4 py-2 rounded-lg bg-red-900/30 border border-red-800/50 text-red-300 text-sm">
-          {error}
-        </div>
-      )}
+      {/* Center MessagePanel (flex: 1) */}
+      <MessagePanel
+        messages={messages}
+        todos={todos}
+        loading={loading}
+        sessionId={selectedSessionId}
+        sessionTitle={selectedSession?.title}
+        onRefresh={() => loadSessionData(selectedSessionId)}
+        onSendMessage={handleSendMessage}
+      />
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left: Messages */}
-        <div className="flex-1 min-w-0 border-r border-border">
-          <MessagePanel
-            messages={messages}
-            loading={loading}
-            sessionId={selectedSessionId}
-            onRefresh={() => loadSessionData(selectedSessionId)}
-          />
+      {/* Right Panel (400px) */}
+      <div
+        style={{
+          width: 400,
+          flexShrink: 0,
+          background: '#FFFFFF',
+          borderLeft: '1px solid #E8E8E8',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {/* Right Panel Header */}
+        <div
+          style={{
+            height: 48,
+            padding: '0 16px',
+            display: 'flex',
+            alignItems: 'center',
+            borderBottom: '1px solid #E8E8E8',
+            fontSize: 14,
+            fontWeight: 500,
+            color: '#171717',
+          }}
+        >
+          右侧面板
         </div>
-
-        {/* Right: Todos + Visualization */}
-        <div className="w-[420px] min-w-[320px] max-w-[50vw]">
-          <TodoPanel todos={todos} messages={messages} loading={loading} />
+        <div
+          style={{
+            flex: 1,
+            padding: '24px',
+            color: '#8F8F8F',
+            fontSize: 14,
+          }}
+        >
+          待开发（D3 event flow）
         </div>
       </div>
     </div>
   )
 }
-
-const BASE = 'http://127.0.0.1:4096'
 
 export default App

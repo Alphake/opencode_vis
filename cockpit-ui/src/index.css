@@ -1,106 +1,141 @@
-@import "tailwindcss";
+/* OpenCode Design System - Extracted from Figma */
 
-/* ===== Dark theme as default (matching opencode aesthetic) ===== */
-@theme {
-  --color-bg-primary: #0f1017;
-  --color-bg-secondary: #16171d;
-  --color-bg-tertiary: #1f2028;
-  --color-bg-hover: #252630;
-  --color-border: #2e303a;
-  --color-text-primary: #e5e7eb;
-  --color-text-secondary: #9ca3af;
-  --color-text-muted: #6b7280;
-  --color-accent: #c084fc;
-  --color-accent-dim: rgba(192, 132, 252, 0.15);
-  --color-accent-border: rgba(192, 132, 252, 0.4);
-
-  /* Event type colors for D3 */
-  --color-event-thinking: #60a5fa;
-  --color-event-tool: #f59e0b;
-  --color-event-file-write: #34d399;
-  --color-event-bash: #f87171;
-  --color-event-error: #ef4444;
-  --color-event-text: #a78bfa;
-
-  /* Status colors */
-  --color-status-completed: #34d399;
-  --color-status-in-progress: #fbbf24;
-  --color-status-pending: #6b7280;
-
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, Consolas, monospace;
+:root {
+  /* Colors */
+  --color-bg-base: #F8F8F8;
+  --color-bg-elevated: #FCFCFC;
+  --color-bg-white: #FFFFFF;
+  
+  --color-border: #DBDBDB;
+  --color-border-light: #E8E8E8;
+  --color-border-strong: #C1C0C0;
+  
+  --color-text-primary: #171717;
+  --color-text-secondary: #6F6F6F;
+  --color-text-tertiary: #8F8F8F;
+  --color-text-placeholder: #ADACAB;
+  
+  --color-accent: #8445BC;
+  --color-success: #0ABE00;
+  --color-warning: #FF9500;
+  --color-error: #FF3B30;
+  
+  --color-gray-100: #E2E2E2;
+  --color-gray-200: #C7C7C7;
+  
+  /* Typography */
+  --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-family-mono: 'IBM Plex Mono', 'Consolas', monospace;
+  
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+  
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+  --spacing-2xl: 32px;
+  
+  /* Border Radius */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+  
+  /* Shadows */
+  --shadow-sm: 0px 1px 2px rgba(19, 16, 16, 0.06);
+  --shadow-md: 0px 1px 3px rgba(19, 16, 16, 0.08);
+  --shadow-lg: 0px 4px 12px rgba(19, 16, 16, 0.12);
+  
+  /* Layout */
+  --header-height: 40px;
+  --sidebar-width: 280px;
+  --input-height: 140px;
 }
 
-/* ===== Base ===== */
+/* Reset */
 * {
-  box-sizing: border-box;
   margin: 0;
   padding: 0;
+  box-sizing: border-box;
 }
 
 html, body, #root {
   height: 100%;
   width: 100%;
-  overflow: hidden;
 }
 
 body {
-  font-family: var(--font-sans);
-  background: var(--color-bg-primary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
   color: var(--color-text-primary);
-  font-size: 14px;
-  line-height: 1.6;
+  background: var(--color-bg-base);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* ===== Scrollbar ===== */
+/* Scrollbar Styling */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
+  height: 8px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: var(--color-border);
-  border-radius: 3px;
+  border-radius: var(--radius-full);
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
+  background: var(--color-border-strong);
 }
 
-/* ===== Custom utilities ===== */
-.mono {
-  font-family: var(--font-mono);
+/* Focus States */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
-.glass {
-  background: rgba(31, 32, 40, 0.6);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--color-border);
+/* Utility Classes */
+.font-mono {
+  font-family: var(--font-family-mono);
 }
 
-/* ===== Markdown-lite ===== */
-.msg-text p { margin-bottom: 0.5em; }
-.msg-text p:last-child { margin-bottom: 0; }
-.msg-text code {
-  font-family: var(--font-mono);
-  font-size: 0.9em;
-  padding: 2px 6px;
-  background: var(--color-bg-tertiary);
-  border-radius: 4px;
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.msg-text pre {
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  overflow-x: auto;
-  margin: 8px 0;
-  font-family: var(--font-mono);
-  font-size: 0.85em;
-  line-height: 1.5;
+
+/* Animations */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
-.msg-text pre code {
-  background: none;
-  padding: 0;
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out;
 }

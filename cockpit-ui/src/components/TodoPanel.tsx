@@ -1,131 +1,156 @@
-import type { OcTodo, OcMessage } from '../types/opencode'
-import EventFlowChart from './EventFlowChart'
+import { useState } from 'react'
+import type { OcTodo } from '../types/opencode'
 
 interface TodoPanelProps {
   todos: OcTodo[]
-  messages: OcMessage[]
-  loading: boolean
 }
 
-const statusConfig = {
-  completed: { icon: '✅', color: 'text-status-completed', border: 'border-status-completed/30' },
-  in_progress: { icon: '🔄', color: 'text-status-in-progress', border: 'border-status-in-progress/30' },
-  pending: { icon: '⏳', color: 'text-status-pending', border: 'border-status-pending/30' },
-}
+export default function TodoPanel({ todos }: TodoPanelProps) {
+  const [expanded, setExpanded] = useState(true)
 
-const priorityConfig = {
-  high: { label: 'H', color: 'bg-event-error' },
-  medium: { label: 'M', color: 'bg-event-tool' },
-  low: { label: 'L', color: 'bg-event-thinking' },
-}
+  if (todos.length === 0) return null
 
-export default function TodoPanel({ todos, messages, loading }: TodoPanelProps) {
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full text-text-muted text-sm">
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-          <span>加载中...</span>
-        </div>
-      </div>
-    )
-  }
+  const completedCount = todos.filter(t => t.status === 'completed').length
+  const totalCount = todos.length
+
+  // Sort: pending first, then in_progress, then completed
+  // BUT: keep original order within each group (newest at end)
+  const sortedTodos = [...todos].sort((a, b) => {
+    const order = { pending: 0, in_progress: 1, completed: 2 }
+    const aOrder = order[a.status] ?? 0
+    const bOrder = order[b.status] ?? 0
+    if (aOrder !== bOrder) return aOrder - bOrder
+
+    // Within same status, keep original order (newest at end)
+    return 0
+  })
 
   return (
-    <div className="flex flex-col h-full border-l border-border">
+    <div
+      style={{
+        maxWidth: '100%',
+        margin: '0 16px',
+        background: 'var(--color-bg-white)',
+        border: '1px solid var(--color-border-light)',
+        borderRadius: '8px',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+      }}
+    >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-bg-secondary/50 shrink-0">
-        <div className="flex items-center gap-2 text-sm">
-          <span>📋</span>
-          <span className="font-medium text-text-primary">Todos</span>
-          <span className="text-text-muted">({todos.length})</span>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          width: '100%',
+          padding: '8px 12px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          flexShrink: 0,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)" strokeWidth="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <path d="M9 12l2 2 4-4" />
+          </svg>
+          <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--color-text-primary)' }}>
+            {completedCount} of {totalCount} 待办事项 completed
+          </span>
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-text-muted">
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded bg-status-completed" /> Done
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded bg-status-in-progress" /> Active
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded bg-status-pending" /> Pending
-          </span>
-        </div>
-      </div>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--color-text-tertiary)"
+          strokeWidth="2"
+          style={{
+            transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s ease',
+          }}
+        >
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
 
       {/* Todo List */}
-      <div className="flex-1 overflow-y-auto">
-        {todos.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-text-muted text-sm">
-            <div className="text-center">
-              <p>暂无 Todo</p>
-              <p className="text-xs mt-1">该 Session 没有任务计划</p>
-            </div>
-          </div>
-        ) : (
-          <div className="p-3 space-y-2">
-            {todos.map((todo, i) => {
-              const status = statusConfig[todo.status]
-              const priority = priorityConfig[todo.priority]
-              return (
-                <div
-                  key={i}
-                  className={`rounded-xl border bg-bg-secondary p-3 transition-colors hover:bg-bg-hover ${status.border}`}
-                >
-                  {/* Todo Header */}
-                  <div className="flex items-start gap-2">
-                    <span className="text-sm mt-0.5">{status.icon}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm text-text-primary leading-snug">
-                        {todo.content}
-                      </div>
-                      <div className="flex items-center gap-2 mt-1.5">
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${priority.color} text-white`}>
-                          {priority.label}
-                        </span>
-                        <span className={`text-[10px] ${status.color}`}>
-                          {todo.status === 'completed' ? '已完成' : todo.status === 'in_progress' ? '进行中' : '待办'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
+      {expanded && (
+        <div
+          style={{
+            padding: '0 12px 8px',
+            maxHeight: 120,
+            overflowY: 'auto',
+          }}
+        >
+          {sortedTodos.map((todo) => (
+            <TodoItem key={todo.id} todo={todo} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
-                  {/* D3 Event Flow Chart (show for in_progress and completed todos) */}
-                  {(todo.status === 'completed' || todo.status === 'in_progress') && (
-                    <div className="mt-3 border-t border-border/50 pt-2">
-                      <EventFlowChart messages={messages} todoContent={todo.content} />
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+function TodoItem({ todo }: { todo: OcTodo }) {
+  const isCompleted = todo.status === 'completed'
+  const isInProgress = todo.status === 'in_progress'
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: '8px',
+        padding: '4px 0',
+        opacity: isCompleted ? 0.5 : 1,
+      }}
+    >
+      {/* Status Icon */}
+      <div
+        style={{
+          width: 14,
+          height: 14,
+          marginTop: 2,
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {isCompleted ? (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-success)" strokeWidth="2.5">
+            <path d="M20 6L9 17l-5-5" />
+          </svg>
+        ) : isInProgress ? (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" strokeWidth="2">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 3" />
+          </svg>
+        ) : (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-tertiary)" strokeWidth="2">
+            <circle cx="12" cy="12" r="9" />
+          </svg>
         )}
       </div>
 
-      {/* Legend */}
-      <div className="border-t border-border px-4 py-2 bg-bg-secondary/50 shrink-0">
-        <div className="flex items-center justify-center gap-3 text-[10px] text-text-muted">
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-2 rounded-sm bg-event-thinking" /> Think
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-2 rounded-sm bg-event-tool" /> Tool
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-2 rounded-sm bg-event-file-write" /> File
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-2 rounded-sm bg-event-bash" /> Bash
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-2 rounded-sm bg-event-text" /> Text
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-2 rounded-sm bg-event-error" /> Error
-          </span>
-        </div>
-      </div>
+      {/* Content */}
+      <p
+        style={{
+          fontSize: '13px',
+          color: isCompleted ? 'var(--color-text-tertiary)' : 'var(--color-text-primary)',
+          textDecoration: isCompleted ? 'line-through' : 'none',
+          lineHeight: 1.4,
+          wordBreak: 'break-word',
+          margin: 0,
+        }}
+      >
+        {todo.content}
+      </p>
     </div>
   )
 }

@@ -11,7 +11,9 @@ import type {
 export async function getSessions(): Promise<OcSession[]> {
   const res = await fetch(`${BASE}/session`)
   if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.status}`)
-  return res.json()
+  const data = await res.json()
+  console.log('[API] getSessions returned:', Array.isArray(data) ? `${data.length} sessions` : data)
+  return data
 }
 
 export async function getTodos(sessionId: string): Promise<OcTodo[]> {
@@ -35,29 +37,19 @@ export async function sendMessage(sessionId: string, text: string): Promise<void
   if (!res.ok) throw new Error(`Failed to send message: ${res.status}`)
 }
 
+export async function getDiff(sessionId: string): Promise<any[]> {
+  const res = await fetch(`${BASE}/session/${sessionId}/diff`)
+  if (!res.ok) throw new Error(`Failed to fetch diff: ${res.status}`)
+  return res.json()
+}
+
 // ===== SSE (real-time events) =====
 
-export function subscribeSessionEvents(
-  sessionId: string,
-  onEvent: (event: any) => void
-): () => void {
-  const url = `${BASE}/session/${sessionId}/event`
-  const es = new EventSource(url)
-
-  es.onmessage = (e) => {
-    try {
-      onEvent(JSON.parse(e.data))
-    } catch {
-      console.warn('Failed to parse SSE event:', e.data)
-    }
-  }
-
-  es.onerror = () => {
-    console.warn('SSE connection error, reconnecting...')
-  }
-
-  return () => es.close()
-}
+// SSE 端点说明（来自 opencode 源码分析）：
+// - GET /global/event → 全局事件流（跨 workspace，事件包含 directory 字段）
+// - GET /event       → 当前 workspace 事件流
+// - ❌ 没有 /session/:id/event 端点！（会 fallthrough 到 app.opencode.ai 代理）
+// 客户端需要从 /global/event 事件中按 directory 或 session 过滤
 
 export function subscribeGlobalEvents(
   onEvent: (event: any) => void
@@ -67,14 +59,16 @@ export function subscribeGlobalEvents(
 
   es.onmessage = (e) => {
     try {
-      onEvent(JSON.parse(e.data))
+      const parsed = JSON.parse(e.data)
+      console.log('[SSE] Global event:', parsed?.payload?.type || parsed?.type, parsed)
+      onEvent(parsed)
     } catch {
-      console.warn('Failed to parse global SSE event:', e.data)
+      console.warn('[SSE] Failed to parse global event:', e.data)
     }
   }
 
-  es.onerror = () => {
-    console.warn('Global SSE connection error, reconnecting...')
+  es.onerror = (err) => {
+    console.warn('[SSE] Global connection error, reconnecting...', err)
   }
 
   return () => es.close()
