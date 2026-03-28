@@ -34,6 +34,7 @@ export type PartType = 'text' | 'reasoning' | 'tool' | 'step-start' | 'text-file
 
 export interface OcMessageInfo {
   role: 'user' | 'assistant'
+  content?: string  // user message 的文本内容
   time: {
     created: number
     completed?: number

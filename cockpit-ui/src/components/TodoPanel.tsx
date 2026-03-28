@@ -13,25 +13,16 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
   const completedCount = todos.filter(t => t.status === 'completed').length
   const totalCount = todos.length
 
-  // Sort: pending first, then in_progress, then completed
-  // BUT: keep original order within each group (newest at end)
-  const sortedTodos = [...todos].sort((a, b) => {
-    const order = { pending: 0, in_progress: 1, completed: 2 }
-    const aOrder = order[a.status] ?? 0
-    const bOrder = order[b.status] ?? 0
-    if (aOrder !== bOrder) return aOrder - bOrder
-
-    // Within same status, keep original order (newest at end)
-    return 0
-  })
+  // NO sorting - use API returned order (newest at end)
+  // Only filter/complete indicator at top
 
   return (
     <div
       style={{
         maxWidth: '100%',
         margin: '0 16px',
-        background: 'var(--color-bg-white)',
-        border: '1px solid var(--color-border-light)',
+        background: '#FFFFFF',
+        border: '1px solid #E8E8E8',
         borderRadius: '8px',
         display: 'flex',
         flexDirection: 'column',
@@ -54,11 +45,11 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)" strokeWidth="2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6F6F6F" strokeWidth="2">
             <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
             <path d="M9 12l2 2 4-4" />
           </svg>
-          <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--color-text-primary)' }}>
+          <span style={{ fontSize: '13px', fontWeight: 500, color: '#171717' }}>
             {completedCount} of {totalCount} 待办事项 completed
           </span>
         </div>
@@ -67,7 +58,7 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
           height="14"
           viewBox="0 0 24 24"
           fill="none"
-          stroke="var(--color-text-tertiary)"
+          stroke="#8F8F8F"
           strokeWidth="2"
           style={{
             transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)',
@@ -78,7 +69,7 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
         </svg>
       </button>
 
-      {/* Todo List */}
+      {/* Todo List - NO sorting, use original order from API */}
       {expanded && (
         <div
           style={{
@@ -87,8 +78,8 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
             overflowY: 'auto',
           }}
         >
-          {sortedTodos.map((todo) => (
-            <TodoItem key={todo.id} todo={todo} />
+          {todos.map((todo, index) => (
+            <TodoItem key={`todo-${index}`} todo={todo} />
           ))}
         </div>
       )}
@@ -123,16 +114,16 @@ function TodoItem({ todo }: { todo: OcTodo }) {
         }}
       >
         {isCompleted ? (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-success)" strokeWidth="2.5">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0ABE00" strokeWidth="2.5">
             <path d="M20 6L9 17l-5-5" />
           </svg>
         ) : isInProgress ? (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" strokeWidth="2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8445BC" strokeWidth="2">
             <circle cx="12" cy="12" r="9" />
             <path d="M12 7v5l3 3" />
           </svg>
         ) : (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-tertiary)" strokeWidth="2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8F8F8F" strokeWidth="2">
             <circle cx="12" cy="12" r="9" />
           </svg>
         )}
@@ -142,7 +133,7 @@ function TodoItem({ todo }: { todo: OcTodo }) {
       <p
         style={{
           fontSize: '13px',
-          color: isCompleted ? 'var(--color-text-tertiary)' : 'var(--color-text-primary)',
+          color: isCompleted ? '#8F8F8F' : '#171717',
           textDecoration: isCompleted ? 'line-through' : 'none',
           lineHeight: 1.4,
           wordBreak: 'break-word',

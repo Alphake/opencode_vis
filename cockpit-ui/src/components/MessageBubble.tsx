@@ -1,153 +1,263 @@
-import type { OcMessage } from '../types/opencode'
-import ToolCallCard from './ToolCallCard'
-import ReasoningBlock from './ReasoningBlock'
+import { useState } from 'react'
+import type { OcMessage, OcMessagePart, OcMessageInfo } from '../types/opencode'
 
 interface MessageBubbleProps {
   message: OcMessage
+  isLastInTurn: boolean
 }
 
-export default function MessageBubble({ message }: MessageBubbleProps) {
+/** 简单 Markdown 渲染（统一字号，无斜体） */
+function renderMarkdown(text: string): string {
+  if (!text) return ''
+  return text
+    // 代码块
+    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:#F5F5F5;padding:8px;border-radius:4px;overflow-x:auto;margin:6px 0;font-family:IBM Plex Mono,monospace;font-size:11px"><code>$2</code></pre>')
+    // 行内代码
+    .replace(/`([^`]+)`/g, '<code style="background:#F5F5F5;padding:1px 3px;border-radius:2px;font-family:IBM Plex Mono,monospace;font-size:11px">$1</code>')
+    // 表格
+    .replace(/(\|.+\|)\n(\|[-:| ]+\|)\n((?:\|.+\|\n?)*)/g, (match, header, divider, rows) => {
+      const headerCells = header.split('|').filter(c => c.trim())
+      const rowLines = rows.trim().split('\n')
+      const bodyCells = rowLines.map(row => row.split('|').filter(c => c.trim()))
+      let html = '<table style="border-collapse:collapse;margin:8px 0;font-size:12px">'
+      html += '<thead><tr>' + headerCells.map(c => `<th style="border:1px solid #E8E8E8;padding:4px 8px;background:#F5F5F5;font-weight:600">${c}</th>`).join('') + '</tr></thead>'
+      html += '<tbody>'
+      bodyCells.forEach(cells => {
+        html += '<tr>' + cells.map(c => `<td style="border:1px solid #E8E8E8;padding:4px 8px">${c}</td>`).join('') + '</tr>'
+      })
+      html += '</tbody></table>'
+      return html
+    })
+    // **bold** -> strong
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // *italic* -> just text (no italic)
+    .replace(/\*(.+?)\*/g, '$1')
+    // Headers: 统一渲染为粗体文字，不改变字号
+    .replace(/^#{1,6} (.+)$/gm, '<strong>$1</strong>')
+    // bullet lists
+    .replace(/^- (.+)$/gm, '<div style="margin-left:16px">• $1</div>')
+    // numbered lists
+    .replace(/^\d+\. (.+)$/gm, '<div style="margin-left:16px">$1</div>')
+    // 段落
+    .replace(/\n\n/g, '</p><p style="margin:6px 0">')
+    // 单换行
+    .replace(/\n/g, '<br/>')
+}
+
+export default function MessageBubble({ message, isLastInTurn }: MessageBubbleProps) {
   const { info, parts } = message
   const isUser = info.role === 'user'
 
+  if (isUser) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '4px 0' }}>
+        <div
+          style={{
+            maxWidth: '70%',
+            padding: '8px 12px',
+            background: '#FFFFFF',
+            border: '1px solid #E8E8E8',
+            borderRadius: '8px',
+            fontSize: 12,
+            lineHeight: 1.5,
+            color: '#333',
+            wordBreak: 'break-word',
+          }}
+        >
+          {info.content || ''}
+        </div>
+      </div>
+    )
+  }
+
+  // Assistant message
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-      }}
-    >
-      {/* Role Label */}
+    <div style={{ padding: '4px 0' }}>
+      {parts.map((part, idx) => (
+        <PartView key={idx} part={part} />
+      ))}
+
+      {/* Agent 信息：只在 turn 最后显示 */}
+      {isLastInTurn && (
+        <AgentInfo info={info} />
+      )}
+    </div>
+  )
+}
+
+function AgentInfo({ info }: { info: OcMessageInfo }) {
+  const modelName = info.model?.modelID || null
+  const totalTokens = info.tokens?.total || null
+
+  let duration: string | null = null
+  if (info.time?.completed && info.time?.created) {
+    const ms = info.time.completed - info.time.created
+    if (ms > 0) {
+      duration = `${(ms / 1000).toFixed(1)}s`
+    }
+  }
+
+  if (!modelName && !totalTokens && !duration) return null
+
+  return (
+    <div style={{
+      marginTop: '8px',
+      fontSize: 11,
+      color: '#999',
+      display: 'flex',
+      gap: '12px',
+    }}>
+      {modelName && <span>{modelName}</span>}
+      {duration && <span>{duration}</span>}
+      {totalTokens && <span>{totalTokens} tokens</span>}
+    </div>
+  )
+}
+
+function PartView({ part }: { part: OcMessagePart }) {
+  switch (part.type) {
+    case 'text':
+      return (
+        <div
+          style={{ fontSize: 12, lineHeight: 1.6, color: '#333' }}
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(part.text || '') }}
+        />
+      )
+
+    case 'reasoning':
+      return (
+        <div style={{
+          fontSize: 12,
+          color: '#999',
+          margin: '4px 0',
+          padding: '6px 10px',
+          background: '#FAFAFA',
+          borderRadius: '4px',
+          lineHeight: 1.5,
+        }}>
+          {part.text}
+        </div>
+      )
+
+    case 'tool': {
+      const state = part.state
+      const output = state?.output
+      const hasOutput = output && output.trim().length > 0
+      return (
+        <ToolCallView
+          toolName={part.tool}
+          status={state?.status}
+          output={output}
+          hasOutput={hasOutput}
+        />
+      )
+    }
+
+    case 'text-file':
+      return (
+        <div style={{
+          fontSize: 11,
+          background: '#F5F5F5',
+          padding: '6px 10px',
+          borderRadius: '4px',
+          margin: '4px 0',
+          fontFamily: 'IBM Plex Mono, monospace',
+          whiteSpace: 'pre-wrap',
+          color: '#555',
+          overflow: 'hidden',
+        }}>
+          [{part.path}]
+        </div>
+      )
+
+    case 'image': {
+      const url = part.source?.data
+        ? `data:${part.source.media_type};base64,${part.source.data}`
+        : null
+      return (
+        <div style={{ fontSize: 12, color: '#888', margin: '4px 0' }}>
+          {url ? <img src={url} alt="image" style={{ maxWidth: '150px', borderRadius: '4px' }} /> : '[图片]'}
+        </div>
+      )
+    }
+
+    case 'step-start':
+    case 'step-end':
+    case 'step-finish':
+      return null // 不显示 step 分隔线
+
+    default:
+      return null
+  }
+}
+
+function ToolCallView({
+  toolName,
+  status,
+  output,
+  hasOutput,
+}: {
+  toolName: string
+  status?: string
+  output?: string
+  hasOutput: boolean
+}) {
+  const [expanded, setExpanded] = useState(false)
+
+  return (
+    <div style={{
+      margin: '4px 0',
+      border: '1px solid #E8E8E8',
+      borderRadius: '6px',
+      overflow: 'hidden',
+    }}>
+      {/* 工具名称，点击可展开 */}
       <div
+        onClick={() => hasOutput && setExpanded(!expanded)}
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
+          padding: '6px 10px',
+          background: '#FAFAFA',
+          cursor: hasOutput ? 'pointer' : 'default',
           fontSize: 12,
         }}
       >
-        <span
-          style={{
-            fontWeight: 500,
-            color: isUser ? '#8445BC' : '#171717',
-          }}
-        >
-          {isUser ? 'You' : 'Assistant'}
+        <span style={{ fontFamily: 'IBM Plex Mono, monospace', color: '#333' }}>
+          {toolName}
         </span>
-        {info.model && (
-          <span style={{ color: '#8F8F8F', fontSize: 11 }}>
-            {info.model.modelID}
+        {status && (
+          <span style={{
+            fontSize: 10,
+            color: status === 'completed' ? '#666' : status === 'error' ? '#999' : '#999',
+            marginLeft: '8px',
+          }}>
+            {status}
           </span>
         )}
-        {info.time && (
-          <span style={{ color: '#8F8F8F', fontSize: 11 }}>
-            {new Date(info.time.created).toLocaleTimeString()}
+        {hasOutput && (
+          <span style={{ marginLeft: 'auto', color: '#CCC', fontSize: 11 }}>
+            {expanded ? '▲' : '▼'}
           </span>
         )}
       </div>
 
-      {/* User Message */}
-      {isUser && (
-        <div
-          style={{
-            padding: '10px 14px',
-            background: '#FFFFFF',
-            borderRadius: 8,
-            border: '1px solid #E8E8E8',
-            maxWidth: '80%',
-            fontSize: 14,
-            lineHeight: 1.5,
-            color: '#171717',
-          }}
-        >
-          {parts.find(p => p.type === 'text')?.text || ''}
-        </div>
-      )}
-
-      {/* Assistant Message */}
-      {!isUser && (
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-          }}
-        >
-          {parts.map((part, i) => {
-            if (part.type === 'text') {
-              return (
-                <div
-                  key={part.id || i}
-                  style={{
-                    fontSize: 14,
-                    lineHeight: 1.6,
-                    color: '#171717',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {part.text}
-                </div>
-              )
-            }
-
-            if (part.type === 'reasoning') {
-              return (
-                <ReasoningBlock
-                  key={part.id || i}
-                  text={part.text}
-                  time={part.time}
-                />
-              )
-            }
-
-            if (part.type === 'tool') {
-              return (
-                <ToolCallCard
-                  key={part.id || i}
-                  tool={part.tool}
-                  callID={part.callID}
-                  state={part.state}
-                />
-              )
-            }
-
-            if (part.type === 'step-start') {
-              return (
-                <div
-                  key={part.id || i}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '8px 0',
-                  }}
-                >
-                  <div style={{ flex: 1, height: 1, background: '#E8E8E8' }} />
-                  <span style={{ fontSize: 11, color: '#8F8F8F' }}>step</span>
-                  <div style={{ flex: 1, height: 1, background: '#E8E8E8' }} />
-                </div>
-              )
-            }
-
-            if (part.type === 'image') {
-              return (
-                <img
-                  key={part.id || i}
-                  src={`data:${part.source.media_type};base64,${part.source.data}`}
-                  alt="attached"
-                  style={{
-                    maxWidth: '100%',
-                    maxHeight: 240,
-                    borderRadius: 8,
-                  }}
-                />
-              )
-            }
-
-            return null
-          })}
+      {/* 工具输出：折叠，垂直滚动 */}
+      {hasOutput && expanded && (
+        <div style={{
+          padding: '8px 10px',
+          background: '#FFFFFF',
+          borderTop: '1px solid #E8E8E8',
+          fontSize: 11,
+          fontFamily: 'IBM Plex Mono, monospace',
+          whiteSpace: 'pre-wrap',
+          color: '#555',
+          maxHeight: '200px',
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          wordBreak: 'break-all',
+        }}>
+          {output}
         </div>
       )}
     </div>

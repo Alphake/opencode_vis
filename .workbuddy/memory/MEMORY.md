@@ -149,11 +149,13 @@ cd cockpit-ui && npm run dev
 - Inter（主字体）
 - IBM Plex Mono（代码）
 
-## 待解决问题（2026-03-28）
-1. ~~SSE 连通性~~ ✅ 已修复：SSE 端点是 `/global/event`，不是 `/session/:id/event`
+## 待解决问题（2026-03-28 晚间）
+1. ~~SSE 连通性~~ ✅ 已修复
 2. ~~三栏布局~~ ✅ 已完成：左 240px + 中 flex:1 + 右 400px
-3. ~~顶部 Header~~ ✅ 已移除：每个面板有独立的 48px header
+3. ~~顶部 Header~~ ✅ 已移除：每个面板有独立的 header
 4. ~~消息气泡美化~~ ✅ 已完成：去掉黑框，简洁现代样式
-5. **消息类型 UI** - question/todo 等类型的专门 UI 还没实现
-6. **右侧面板** - 待开发（D3 event flow 可视化）
-7. **消息发送** - 需要 opencode serve 运行才能通信
+5. ~~消息分组~~ ✅ 已完成：按 turn 分组，agent 信息只在 turn 底部显示
+6. ~~Markdown 渲染~~ ✅ 已完成：### 转 h3，**bold** 转 strong，代码块等
+7. ~~工具调用折叠~~ ✅ 已完成：名称+状态，输出点击展开
+8. **右侧面板** - 待开发（D3 event flow 可视化）
+9. **消息发送** - 需要 opencode serve 运行才能通信
