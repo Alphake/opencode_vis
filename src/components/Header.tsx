@@ -1,79 +1,123 @@
 import type { OcSession } from '../types/opencode'
 
 interface HeaderProps {
-  sessions: OcSession[]
-  selectedSessionId: string
-  onSelectSession: (id: string) => void
+  selectedSession: OcSession | undefined
   apiConnected: boolean
+  sidebarCollapsed: boolean
+  onToggleSidebar: () => void
 }
 
-export default function Header({ sessions, selectedSessionId, onSelectSession, apiConnected }: HeaderProps) {
-  const selected = sessions.find(s => s.id === selectedSessionId)
-
+export default function Header({
+  selectedSession,
+  apiConnected,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: HeaderProps) {
   return (
-    <header className="flex items-center gap-4 px-4 py-2.5 border-b border-border bg-bg-secondary shrink-0">
-      {/* Logo / Title */}
-      <div className="flex items-center gap-2 shrink-0">
-        <div className="w-7 h-7 rounded-lg bg-accent-dim border border-accent-border flex items-center justify-center">
-          <span className="text-sm">🛩️</span>
-        </div>
-        <h1 className="text-base font-semibold text-text-primary tracking-tight">
-          Agent Cockpit
-        </h1>
-      </div>
-
-      {/* Session Selector */}
-      <div className="flex-1 max-w-xl">
-        <select
-          value={selectedSessionId}
-          onChange={(e) => onSelectSession(e.target.value)}
-          className="w-full px-3 py-1.5 rounded-lg bg-bg-tertiary border border-border text-text-primary text-sm
-                     focus:outline-none focus:border-accent-border appearance-none cursor-pointer
-                     hover:bg-bg-hover transition-colors"
+    <header
+      style={{
+        height: 40,
+        background: 'var(--color-bg-base)',
+        borderBottom: '1px solid var(--color-border-light)',
+        display: 'flex',
+        alignItems: 'center',
+        padding: '0 12px',
+        gap: '8px',
+      }}
+    >
+      {/* Toggle Sidebar Button */}
+      {sidebarCollapsed && (
+        <button
+          onClick={onToggleSidebar}
+          style={{
+            width: 28,
+            height: 28,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'transparent',
+            border: 'none',
+            borderRadius: 6,
+            cursor: 'pointer',
+          }}
+          title="展开侧边栏"
         >
-          <option value="">-- 选择 Session --</option>
-          {sessions
-            .sort((a, b) => b.time.updated - a.time.updated)
-            .map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.title || s.slug}
-              </option>
-            ))}
-        </select>
-      </div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-primary)" strokeWidth="2">
+            <path d="M3 12h18M3 6h18M3 18h18" />
+          </svg>
+        </button>
+      )}
 
-      {/* Status Indicators */}
-      <div className="flex items-center gap-3 shrink-0 text-xs text-text-secondary">
-        {/* API Status */}
-        <div className="flex items-center gap-1.5">
-          <div className={`w-2 h-2 rounded-full ${apiConnected ? 'bg-status-completed' : 'bg-status-pending'}`} />
-          <span>API</span>
-        </div>
-
-        {/* Session Info */}
-        {selected && (
+      {/* Current Session Title */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {selectedSession && (
           <>
-            <div className="h-3 w-px bg-border" />
-            <span className="mono text-text-muted">
-              {selected.messages !== undefined ? `${selected.messages} msgs` : ''}
+            <span
+              style={{
+                fontSize: '14px',
+                fontWeight: 500,
+                color: 'var(--color-text-primary)',
+              }}
+            >
+              {selectedSession.title || 'Untitled'}
             </span>
-            <div className="h-3 w-px bg-border" />
-            <span className="text-text-muted truncate max-w-[200px]" title={selected.directory}>
-              {selected.directory.split('\\').pop()}
-            </span>
-          </>
-        )}
-
-        {/* Messages count */}
-        {selectedSessionId && (
-          <>
-            <div className="h-3 w-px bg-border" />
-            <span className="text-text-muted">
-              {selected?.slug}
+            <span
+              style={{
+                fontSize: '12px',
+                color: 'var(--color-text-tertiary)',
+              }}
+              title={selectedSession.directory}
+            >
+              · {selectedSession.directory?.split(/[\\/]/).pop()}
             </span>
           </>
         )}
       </div>
+
+      {/* Spacer */}
+      <div style={{ flex: 1 }} />
+
+      {/* Connection Status */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '4px',
+          fontSize: '12px',
+          color: apiConnected ? 'var(--color-success)' : 'var(--color-error)',
+        }}
+      >
+        <div
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: apiConnected ? 'var(--color-success)' : 'var(--color-error)',
+          }}
+        />
+        {apiConnected ? 'Connected' : 'Disconnected'}
+      </div>
+
+      {/* Menu Button */}
+      <button
+        style={{
+          width: 28,
+          height: 28,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'transparent',
+          border: 'none',
+          borderRadius: 6,
+          cursor: 'pointer',
+        }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-tertiary)" strokeWidth="2">
+          <circle cx="12" cy="12" r="1" />
+          <circle cx="12" cy="5" r="1" />
+          <circle cx="12" cy="19" r="1" />
+        </svg>
+      </button>
     </header>
   )
 }
