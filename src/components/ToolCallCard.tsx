@@ -13,56 +13,56 @@ interface ToolCallCardProps {
 // Tool name to SVG icon mapping
 const toolIcons: Record<string, JSX.Element> = {
   bash: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <polyline points="4 17 10 11 4 5" />
       <line x1="12" y1="19" x2="20" y2="19" />
     </svg>
   ),
   read_file: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
     </svg>
   ),
-  write_file: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+  write_to_file: (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
     </svg>
   ),
   edit_file: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
     </svg>
   ),
   glob: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="11" cy="11" r="8" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   ),
   grep: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="11" cy="11" r="8" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   ),
   search_content: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="11" cy="11" r="8" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   ),
   fetch: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="12" cy="12" r="10" />
       <line x1="2" y1="12" x2="22" y2="12" />
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
     </svg>
   ),
   websearch: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="11" cy="11" r="8" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
@@ -71,8 +71,9 @@ const toolIcons: Record<string, JSX.Element> = {
 
 // Default icon
 const DefaultIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </svg>
 )
 
@@ -80,12 +81,6 @@ export default function ToolCallCard({ tool, callID, state }: ToolCallCardProps)
   const [expanded, setExpanded] = useState(false)
 
   const icon = toolIcons[tool] || <DefaultIcon />
-  const statusColor =
-    state.status === 'completed'
-      ? { color: 'var(--color-status-completed)' }
-      : state.status === 'error'
-        ? { color: 'var(--surface-critical-strong)' }
-        : { color: 'var(--color-status-in-progress)' }
 
   const formatInput = (input?: Record<string, unknown>) => {
     if (!input) return null
@@ -104,158 +99,90 @@ export default function ToolCallCard({ tool, callID, state }: ToolCallCardProps)
 
   return (
     <div
-      className="rounded-lg overflow-hidden w-full"
       style={{
-        background: 'var(--surface-base)',
-        border: '1px solid var(--border-weak-base)',
+        background: '#FAFAFA',
+        borderRadius: 6,
+        overflow: 'hidden',
+        maxWidth: '100%',
       }}
     >
       {/* Header - always visible */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 text-left transition-colors cursor-pointer"
         style={{
-          height: 37,
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '8px 12px',
           background: 'transparent',
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.background = 'var(--surface-base-hover)'
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.background = 'transparent'
+          border: 'none',
+          cursor: 'pointer',
+          textAlign: 'left',
         }}
       >
         {/* Tool icon */}
-        <span style={{ color: 'var(--icon-weak-base)' }}>{icon}</span>
+        <span style={{ color: '#6F6F6F' }}>{icon}</span>
 
         {/* Tool name */}
         <span
-          className="mono text-sm font-medium"
-          style={{ color: 'var(--text-base)', textTransform: 'capitalize' }}
+          style={{
+            fontSize: 12,
+            fontWeight: 500,
+            color: '#171717',
+            fontFamily: 'IBM Plex Mono, monospace',
+            textTransform: 'capitalize',
+          }}
         >
           {tool}
         </span>
 
         {/* Status indicator */}
-        <span style={statusColor}>
+        <span style={{ marginLeft: 'auto' }}>
           {state.status === 'running' ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8445BC" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
               <path d="M21 12a9 9 0 1 1-6.219-8.56" />
             </svg>
           ) : state.status === 'error' ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#FF3B30" strokeWidth="2">
               <circle cx="12" cy="12" r="10" />
               <line x1="15" y1="9" x2="9" y2="15" />
               <line x1="9" y1="9" x2="15" y2="15" />
             </svg>
           ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0ABE00" strokeWidth="2">
               <polyline points="20 6 9 17 4 12" />
             </svg>
           )}
         </span>
-
-        {/* Input preview */}
-        {inputStr && (
-          <span
-            className="flex-1 text-xs truncate"
-            style={{
-              color: 'var(--text-weaker)',
-              fontFamily: 'var(--font-family-mono)',
-              marginLeft: 8,
-            }}
-            title={inputStr}
-          >
-            {inputStr.split('\n')[0]}
-          </span>
-        )}
-
-        {/* Expand arrow */}
-        <span
-          style={{
-            color: 'var(--icon-weak-base)',
-            marginLeft: 'auto',
-            transition: 'transform 0.15s ease',
-            transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-          }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </span>
       </button>
 
       {/* Expanded content */}
-      {expanded && (
+      {expanded && inputStr && (
         <div
           style={{
-            borderTop: '1px solid var(--border-weaker-base)',
+            borderTop: '1px solid #E8E8E8',
             padding: '8px 12px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
           }}
         >
-          {inputStr && (
-            <div>
-              <div
-                className="text-[10px] uppercase tracking-wider mb-1"
-                style={{ color: 'var(--text-weaker)', fontWeight: 500 }}
-              >
-                Input
-              </div>
-              <pre
-                className="whitespace-pre-wrap break-all"
-                style={{
-                  fontFamily: 'var(--font-family-mono)',
-                  fontSize: 12,
-                  lineHeight: 'var(--line-height-large)',
-                  color: 'var(--text-weak)',
-                  background: 'var(--surface-raised-base)',
-                  borderRadius: 'var(--radius-sm)',
-                  padding: 8,
-                }}
-              >
-                {inputStr}
-              </pre>
-            </div>
-          )}
-          {state.output && (
-            <div>
-              <div
-                className="text-[10px] uppercase tracking-wider mb-1"
-                style={{ color: 'var(--text-weaker)', fontWeight: 500 }}
-              >
-                Output
-              </div>
-              <pre
-                className="whitespace-pre-wrap break-all"
-                style={{
-                  fontFamily: 'var(--font-family-mono)',
-                  fontSize: 12,
-                  lineHeight: 'var(--line-height-large)',
-                  color: 'var(--text-weak)',
-                  background: 'var(--surface-raised-base)',
-                  borderRadius: 'var(--radius-sm)',
-                  padding: 8,
-                  maxHeight: 240,
-                  overflowY: 'auto',
-                }}
-              >
-                {state.output.length > 2000 ? state.output.slice(0, 2000) + '\n... (truncated)' : state.output}
-              </pre>
-            </div>
-          )}
-          <div
-            className="mono"
+          <pre
             style={{
-              fontSize: 10,
-              color: 'var(--text-weaker)',
-              fontFamily: 'var(--font-family-mono)',
+              fontFamily: 'IBM Plex Mono, monospace',
+              fontSize: 11,
+              lineHeight: 1.5,
+              color: '#6F6F6F',
+              background: '#FFFFFF',
+              borderRadius: 4,
+              padding: 8,
+              overflow: 'auto',
+              maxHeight: 200,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              margin: 0,
             }}
           >
-            {callID}
-          </div>
+            {inputStr}
+          </pre>
         </div>
       )}
     </div>

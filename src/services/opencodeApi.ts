@@ -19,13 +19,23 @@ export async function getSessions(): Promise<OcSession[]> {
 export async function getTodos(sessionId: string): Promise<OcTodo[]> {
   const res = await fetch(`${BASE}/session/${sessionId}/todo`)
   if (!res.ok) throw new Error(`Failed to fetch todos: ${res.status}`)
-  return res.json()
+  const data = await res.json()
+  console.log('[API] getTodos returned:', data.length, 'todos', data)
+  return data
 }
 
 export async function getMessages(sessionId: string): Promise<OcMessage[]> {
   const res = await fetch(`${BASE}/session/${sessionId}/message`)
   if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`)
-  return res.json()
+  const data = await res.json()
+  console.log('[API] getMessages returned:', data.length, 'messages')
+  data.forEach((msg: OcMessage, i: number) => {
+    console.log(`  [${i}] role=${msg.info.role}, parts=${msg.parts.length}, id=${msg.info.id}`)
+    msg.parts.forEach((part, j) => {
+      console.log(`       part[${j}]: type=${part.type}`)
+    })
+  })
+  return data
 }
 
 export async function sendMessage(sessionId: string, text: string): Promise<void> {

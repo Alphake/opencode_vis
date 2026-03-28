@@ -19,9 +19,13 @@ export default function MessagePanel({
   loading,
   sessionId,
   sessionTitle,
-  onRefresh,
   onSendMessage,
 }: MessagePanelProps) {
+  // 获取当前 agent 和模型信息（从最后一条 assistant message）
+  const lastAssistantMsg = [...messages].reverse().find(m => m.info.role === 'assistant')
+  const agentName = lastAssistantMsg?.info.agent || null
+  const modelName = lastAssistantMsg?.info.model?.modelID || null
+
   return (
     <div
       style={{
@@ -29,11 +33,10 @@ export default function MessagePanel({
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        background: '#F8F8F8',
-        minWidth: 0, // 防止内容撑开
+        background: '#FFFFFF',
       }}
     >
-      {/* MessagePanel Header */}
+      {/* Header */}
       <div
         style={{
           height: 48,
@@ -42,19 +45,11 @@ export default function MessagePanel({
           alignItems: 'center',
           borderBottom: '1px solid #E8E8E8',
           background: '#FFFFFF',
+          flexShrink: 0,
         }}
       >
-        <span
-          style={{
-            fontSize: 14,
-            fontWeight: 500,
-            color: '#171717',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {sessionTitle || 'Chat'}
+        <span style={{ fontSize: 13, fontWeight: 500, color: '#171717' }}>
+          {sessionTitle || '未命名 Session'}
         </span>
       </div>
 
@@ -63,39 +58,55 @@ export default function MessagePanel({
         style={{
           flex: 1,
           overflowY: 'auto',
-          padding: '16px 20px',
+          padding: '16px',
           display: 'flex',
           flexDirection: 'column',
-          gap: '16px',
+          gap: '0',
         }}
       >
         {loading ? (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '32px' }}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#8F8F8F" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
-              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-            </svg>
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '32px', color: '#888', fontSize: 12 }}>
+            加载中...
           </div>
         ) : messages.length === 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#8F8F8F' }}>
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '12px', opacity: 0.4 }}>
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-            </svg>
-            <p style={{ fontSize: '14px' }}>选择一个 Session 开始对话</p>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888', fontSize: 12 }}>
+            选择一个 Session 开始对话
           </div>
         ) : (
-          messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)
+          messages.map((msg, idx) => (
+            <MessageBubble
+              key={msg.info.id || `msg-${idx}`}
+              message={msg}
+              isLastInTurn={isLastMessageInTurn(messages, idx)}
+            />
+          ))
         )}
       </div>
 
-      {/* Todo Panel */}
+      {/* Todo Panel (fixed, max 150px) */}
       {todos.length > 0 && (
         <div style={{ flexShrink: 0 }}>
           <TodoPanel todos={todos} />
         </div>
       )}
 
-      {/* Message Input */}
-      <div style={{ flexShrink: 0 }}>
+      {/* Agent info + Input */}
+      <div style={{ flexShrink: 0, borderTop: '1px solid #E8E8E8' }}>
+        {/* Agent info bar */}
+        {(agentName || modelName) && (
+          <div style={{
+            padding: '6px 16px',
+            fontSize: 11,
+            color: '#999',
+            background: '#FAFAFA',
+            display: 'flex',
+            gap: '12px',
+          }}>
+            {agentName && <span>{agentName}</span>}
+            {modelName && <span>{modelName}</span>}
+          </div>
+        )}
+        {/* Message Input */}
         <MessageInput
           onSend={onSendMessage}
           disabled={!sessionId || loading}
@@ -104,4 +115,13 @@ export default function MessagePanel({
       </div>
     </div>
   )
+}
+
+function isLastMessageInTurn(messages: OcMessage[], idx: number): boolean {
+  const current = messages[idx]
+  if (current.info.role === 'user') {
+    return false
+  }
+  const next = messages[idx + 1]
+  return !next || next.info.role === 'user'
 }
