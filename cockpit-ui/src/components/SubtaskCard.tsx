@@ -4,23 +4,27 @@ import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import { buildSubtaskCardMetrics, formatDurationMs } from '../utils/subtaskMetrics'
 import { buildMappedActionsFromMessages } from '../utils/actionMapping'
 import ActionFlowVisualization from './ActionFlowVisualization'
+import { actionFlowPalette } from '../styles/actionFlowPalette'
 
 const fontSans =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
 
-const CARD_HEIGHT = 380
+/** 子任务卡片固定总高；要改高度只调这一处即可 */
+const CARD_HEIGHT = 220
 
 interface SubtaskCardProps {
   subtask: AssistantSubtask
   messages: OcMessage[]
   displayIndex: number
+  isLinked?: boolean
+  onSelectSubtask?: () => void
 }
 
 type ColorByMode = 'status' | 'tokens'
 
-function BreakdownDonutPlaceholder() {
+function ContextDonutPlaceholder() {
   return (
-    <svg width={28} height={28} viewBox="0 0 38 38" aria-hidden>
+    <svg width={24} height={24} viewBox="0 0 38 38" aria-hidden>
       <circle cx={19} cy={19} r={18} fill="#D9D9D9" />
       <path d="M19 1 A18 18 0 0 1 35 12 L19 19 Z" fill="#C6C6C6" />
       <path d="M19 19 L35 12 A18 18 0 0 1 19 37 Z" fill="#E2E2E2" />
@@ -38,12 +42,12 @@ function MetricBox({ label, value }: { label: string; value: string }) {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '4px 6px',
+        padding: '3px 4px',
         minWidth: 0,
         flex: '1 1 0',
-        minHeight: 52,
+        minHeight: 44,
         border: '1px solid #DBDBDB',
-        borderRadius: 12,
+        borderRadius: 10,
         background: '#FCFCFC',
       }}
     >
@@ -51,8 +55,8 @@ function MetricBox({ label, value }: { label: string; value: string }) {
         style={{
           fontFamily: fontSans,
           fontWeight: 600,
-          fontSize: 10,
-          lineHeight: '13px',
+          fontSize: 9,
+          lineHeight: '12px',
           textAlign: 'center',
           color: '#5C5C5C',
           marginBottom: 2,
@@ -64,8 +68,8 @@ function MetricBox({ label, value }: { label: string; value: string }) {
         style={{
           fontFamily: fontSans,
           fontWeight: 600,
-          fontSize: 15,
-          lineHeight: '18px',
+          fontSize: 13,
+          lineHeight: '16px',
           textAlign: 'center',
           color: '#2B2B2B',
           wordBreak: 'break-all',
@@ -77,7 +81,7 @@ function MetricBox({ label, value }: { label: string; value: string }) {
   )
 }
 
-function MetricBoxBreakdown() {
+function MetricBoxContext() {
   return (
     <div
       style={{
@@ -86,12 +90,12 @@ function MetricBoxBreakdown() {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '4px 6px',
+        padding: '3px 4px',
         minWidth: 0,
         flex: '1 1 0',
-        minHeight: 52,
+        minHeight: 44,
         border: '1px solid #DBDBDB',
-        borderRadius: 12,
+        borderRadius: 10,
         background: '#FCFCFC',
       }}
     >
@@ -99,23 +103,27 @@ function MetricBoxBreakdown() {
         style={{
           fontFamily: fontSans,
           fontWeight: 600,
-          fontSize: 10,
+          fontSize: 9,
           lineHeight: '12px',
           textAlign: 'center',
           color: '#5C5C5C',
-          marginBottom: 2,
+          marginBottom: 1,
         }}
       >
-        Content
-        <br />
-        Breakdown
+        Context
       </div>
-      <BreakdownDonutPlaceholder />
+      <ContextDonutPlaceholder />
     </div>
   )
 }
 
-export default function SubtaskCard({ subtask, messages, displayIndex }: SubtaskCardProps) {
+export default function SubtaskCard({
+  subtask,
+  messages,
+  displayIndex,
+  isLinked = false,
+  onSelectSubtask,
+}: SubtaskCardProps) {
   const m = buildSubtaskCardMetrics(subtask, messages, displayIndex)
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [colorBy, setColorBy] = useState<ColorByMode>('status')
@@ -137,6 +145,8 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
 
   return (
     <div
+      data-subtask-card-index={displayIndex}
+      onClick={() => onSelectSubtask?.()}
       style={{
         boxSizing: 'border-box',
         display: 'flex',
@@ -145,22 +155,25 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
         height: CARD_HEIGHT,
         flexShrink: 0,
         padding: '12px 14px',
-        gap: 6,
+        gap: 4,
         width: '100%',
         background: '#FCFCFC',
-        border: '1px solid #DBDBDB',
+        border: isLinked ? `2px solid ${actionFlowPalette.green.stroke}` : '1px solid #DBDBDB',
         borderRadius: 14,
         marginBottom: 8,
         fontFamily: fontSans,
         overflow: 'hidden',
+        boxShadow: isLinked ? `0 0 0 3px rgba(145, 163, 123, 0.22)` : 'none',
+        cursor: onSelectSubtask ? 'pointer' : 'default',
+        transition: 'box-shadow 0.15s ease, border-color 0.15s ease',
       }}
     >
       <h3
         style={{
           margin: 0,
           fontWeight: 600,
-          fontSize: 14,
-          lineHeight: '20px',
+          fontSize: 13,
+          lineHeight: '18px',
           color: '#2B2B2B',
           flexShrink: 0,
         }}
@@ -169,6 +182,7 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
       </h3>
 
       <div
+        onClick={e => e.stopPropagation()}
         style={{
           display: 'flex',
           flexDirection: 'row',
@@ -180,7 +194,7 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
         }}
       >
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 11, fontWeight: 400, lineHeight: '16px', color: '#2B2B2B' }}>
+          <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
             Actions&apos; duration
           </span>
           <button
@@ -189,8 +203,8 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
             aria-checked={actionsDurationOn}
             onClick={() => setActionsDurationOn(v => !v)}
             style={{
-              width: 32,
-              height: 15,
+              width: 26,
+              height: 13,
               borderRadius: 80,
               background: actionsDurationOn ? '#2B2B2B' : '#8A8A8A',
               border: 'none',
@@ -203,8 +217,8 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
           >
             <span
               style={{
-                width: 11,
-                height: 11,
+                width: 9,
+                height: 9,
                 borderRadius: '50%',
                 background: '#FFFFFF',
                 display: 'block',
@@ -224,7 +238,7 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
         />
 
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 11, fontWeight: 400, lineHeight: '16px', color: '#2B2B2B' }}>
+          <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
             Actions&apos; color
           </span>
           <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -294,12 +308,10 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
 
       <div
         style={{
-          flex: 1,
+          flex: '0 0 auto',
           minHeight: 0,
           display: 'flex',
           flexDirection: 'column',
-          marginTop: 2,
-          marginBottom: 2,
         }}
       >
         <ActionFlowVisualization
@@ -320,38 +332,14 @@ export default function SubtaskCard({ subtask, messages, displayIndex }: Subtask
           flexShrink: 0,
         }}
       >
-        <MetricBox label="Total Tokens" value={String(m.tokensSegmentSum)} />
-        <MetricBox label="时间" value={durationLabel} />
         <MetricBox label="Agent Msg" value={String(m.llmCallCount)} />
-        <MetricBox label="变更/产物" value={changesLabel} />
-        <MetricBoxBreakdown />
+        <MetricBox label="Changes" value={changesLabel} />
+        <MetricBox label="Time" value={durationLabel} />
+        <MetricBox label="Total Tokens" value={String(m.tokensSegmentSum)} />
+        <MetricBoxContext />
       </div>
 
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          gap: 10,
-          width: '100%',
-          marginTop: 2,
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#8A8A8A' }}>
-          Tokens: {m.tokensSegmentSum}
-        </span>
-        <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#8A8A8A' }}>
-          耗时: {durationLabel}
-        </span>
-        <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#8A8A8A' }}>
-          Agent: {m.llmCallCount}
-        </span>
-        <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#8A8A8A' }}>
-          变更/产物: {changesLabel}
-        </span>
-      </div>
+      <div style={{ flex: 1, minHeight: 0 }} aria-hidden />
     </div>
   )
 }

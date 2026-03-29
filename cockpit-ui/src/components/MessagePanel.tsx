@@ -1,7 +1,9 @@
+import type { RefObject } from 'react'
 import type { OcMessage, OcTodo } from '../types/opencode'
 import MessageBubble from './MessageBubble'
 import TodoPanel from './TodoPanel'
 import MessageInput from './MessageInput'
+import { actionFlowPalette } from '../styles/actionFlowPalette'
 
 interface MessagePanelProps {
   messages: OcMessage[]
@@ -11,6 +13,11 @@ interface MessagePanelProps {
   sessionTitle?: string
   onRefresh: () => void
   onSendMessage: (text: string) => Promise<void>
+  /** 可滚动消息列表容器 ref（供联动连线计算） */
+  messageListScrollRef?: RefObject<HTMLDivElement | null>
+  /** 与高亮子任务关联的消息下标 */
+  highlightMessageIndices?: Set<number> | null
+  onTodoClick?: (todo: OcTodo) => void
 }
 
 export default function MessagePanel({
@@ -20,6 +27,9 @@ export default function MessagePanel({
   sessionId,
   sessionTitle,
   onSendMessage,
+  messageListScrollRef,
+  highlightMessageIndices,
+  onTodoClick,
 }: MessagePanelProps) {
   // 获取当前 agent 和模型信息（从最后一条 assistant message）
   const lastAssistantMsg = [...messages].reverse().find(m => m.info.role === 'assistant')
@@ -55,6 +65,7 @@ export default function MessagePanel({
 
       {/* Messages (scrollable) */}
       <div
+        ref={messageListScrollRef}
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -73,20 +84,34 @@ export default function MessagePanel({
             选择一个 Session 开始对话
           </div>
         ) : (
-          messages.map((msg, idx) => (
-            <MessageBubble
-              key={msg.info.id || `msg-${idx}`}
-              message={msg}
-              isLastInTurn={isLastMessageInTurn(messages, idx)}
-            />
-          ))
+          messages.map((msg, idx) => {
+            const hl = highlightMessageIndices?.has(idx) ?? false
+            return (
+              <div
+                key={msg.info.id || `msg-${idx}`}
+                data-message-index={idx}
+                style={{
+                  borderRadius: 10,
+                  padding: hl ? '6px 8px' : '2px 0',
+                  margin: hl ? '2px -4px' : 0,
+                  outline: hl ? `2px solid ${actionFlowPalette.green.stroke}` : 'none',
+                  outlineOffset: hl ? 1 : 0,
+                  background: hl ? 'rgba(245, 255, 234, 0.55)' : 'transparent',
+                  boxShadow: hl ? `0 0 0 1px rgba(145, 163, 123, 0.25)` : 'none',
+                  transition: 'background 0.15s ease, outline 0.15s ease',
+                }}
+              >
+                <MessageBubble message={msg} isLastInTurn={isLastMessageInTurn(messages, idx)} />
+              </div>
+            )
+          })
         )}
       </div>
 
       {/* Todo Panel (紧贴消息区域) */}
       {todos.length > 0 && (
         <div style={{ flexShrink: 0 }}>
-          <TodoPanel todos={todos} />
+          <TodoPanel todos={todos} onTodoClick={onTodoClick} />
         </div>
       )}
 

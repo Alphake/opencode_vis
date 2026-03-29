@@ -195,7 +195,7 @@ export default function Sidebar({
                 />
                 <span
                   style={{
-                    fontSize: 13,
+                    fontSize: 12,
                     color: '#171717',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
