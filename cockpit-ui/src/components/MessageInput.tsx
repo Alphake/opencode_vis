@@ -4,15 +4,16 @@ interface MessageInputProps {
   onSend: (text: string) => Promise<void>
   disabled?: boolean
   sessionId?: string
+  agentName?: string | null
+  modelName?: string | null
 }
 
-export default function MessageInput({ onSend, disabled, sessionId }: MessageInputProps) {
+export default function MessageInput({ onSend, disabled, agentName, modelName }: MessageInputProps) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
 
   const handleSend = async () => {
     if (!text.trim() || sending || disabled) return
-
     setSending(true)
     try {
       await onSend(text.trim())
@@ -32,21 +33,28 @@ export default function MessageInput({ onSend, disabled, sessionId }: MessageInp
   }
 
   return (
-    <div
-      style={{
-        padding: '12px 16px',
-        background: 'var(--color-bg-base)',
-        borderTop: '1px solid var(--color-border-light)',
-      }}
-    >
+    <div style={{ padding: '10px 16px' }}>
+      {/* Agent info below input */}
+      {(agentName || modelName) && (
+        <div style={{
+          marginBottom: '6px',
+          fontSize: 11,
+          color: '#999',
+          display: 'flex',
+          gap: '12px',
+        }}>
+          {agentName && <span>{agentName}</span>}
+          {modelName && <span>{modelName}</span>}
+        </div>
+      )}
       {/* Input Container */}
       <div
         style={{
           display: 'flex',
           alignItems: 'flex-end',
           gap: '8px',
-          background: 'var(--color-bg-white)',
-          border: '1px solid var(--color-border)',
+          background: '#FFFFFF',
+          border: '1px solid #E8E8E8',
           borderRadius: '8px',
           padding: '8px 12px',
         }}
@@ -55,7 +63,7 @@ export default function MessageInput({ onSend, disabled, sessionId }: MessageInp
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
+          placeholder="输入消息..."
           disabled={disabled || sending}
           rows={1}
           style={{
@@ -64,8 +72,8 @@ export default function MessageInput({ onSend, disabled, sessionId }: MessageInp
             border: 'none',
             outline: 'none',
             resize: 'none',
-            color: 'var(--color-text-primary)',
-            fontSize: '14px',
+            color: '#333',
+            fontSize: 12,
             lineHeight: 1.5,
             maxHeight: 120,
             fontFamily: 'inherit',
@@ -75,66 +83,23 @@ export default function MessageInput({ onSend, disabled, sessionId }: MessageInp
           onClick={handleSend}
           disabled={!text.trim() || sending || disabled}
           style={{
-            width: 32,
-            height: 32,
+            width: 28,
+            height: 28,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: text.trim() && !disabled
-              ? 'var(--color-accent)'
-              : 'var(--color-gray-100)',
+            background: text.trim() && !disabled ? '#8B5CF6' : '#F5F5F5',
             border: 'none',
             borderRadius: '6px',
             cursor: text.trim() && !disabled ? 'pointer' : 'not-allowed',
             opacity: sending ? 0.7 : 1,
-            transition: 'all 0.2s ease',
           }}
         >
-          {sending ? (
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2"
-              className="animate-spin"
-            >
-              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-            </svg>
-          ) : (
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke={text.trim() && !disabled ? 'white' : 'var(--color-text-tertiary)'}
-              strokeWidth="2"
-            >
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
-          )}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={text.trim() && !disabled ? 'white' : '#CCC'} strokeWidth="2">
+            <line x1="22" y1="2" x2="11" y2="13" />
+            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
         </button>
-      </div>
-
-      {/* Footer */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: '8px',
-          fontSize: '12px',
-          color: 'var(--color-text-tertiary)',
-        }}
-      >
-        <span>按 Enter 发送 · Shift+Enter 换行</span>
-        {sessionId && (
-          <span style={{ fontFamily: 'var(--font-family-mono)' }}>
-            Session: {sessionId.slice(0, 8)}...
-          </span>
-        )}
       </div>
     </div>
   )

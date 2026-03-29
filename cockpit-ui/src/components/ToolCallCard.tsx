@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactElement } from 'react'
 
 interface ToolCallCardProps {
   tool: string
@@ -11,7 +11,7 @@ interface ToolCallCardProps {
 }
 
 // Tool name to SVG icon mapping
-const toolIcons: Record<string, JSX.Element> = {
+const toolIcons: Record<string, ReactElement> = {
   bash: (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <polyline points="4 17 10 11 4 5" />
@@ -77,7 +77,7 @@ const DefaultIcon = () => (
   </svg>
 )
 
-export default function ToolCallCard({ tool, callID, state }: ToolCallCardProps) {
+export default function ToolCallCard({ tool, callID: _callID, state }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(false)
 
   const icon = toolIcons[tool] || <DefaultIcon />
