@@ -34,20 +34,6 @@ export default function MessageInput({ onSend, disabled, agentName, modelName }:
 
   return (
     <div style={{ padding: '10px 16px' }}>
-      {/* Agent info below input */}
-      {(agentName || modelName) && (
-        <div style={{
-          marginBottom: '6px',
-          fontSize: 11,
-          color: '#999',
-          display: 'flex',
-          gap: '12px',
-        }}>
-          {agentName && <span>{agentName}</span>}
-          {modelName && <span>{modelName}</span>}
-        </div>
-      )}
-      {/* Input Container */}
       <div
         style={{
           display: 'flex',
@@ -101,6 +87,20 @@ export default function MessageInput({ onSend, disabled, agentName, modelName }:
           </svg>
         </button>
       </div>
+      {(agentName || modelName) && (
+        <div
+          style={{
+            marginTop: 6,
+            fontSize: 11,
+            color: '#999',
+            display: 'flex',
+            gap: 12,
+          }}
+        >
+          {agentName && <span>{agentName}</span>}
+          {modelName && <span>{modelName}</span>}
+        </div>
+      )}
     </div>
   )
 }

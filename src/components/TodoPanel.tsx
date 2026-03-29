@@ -3,9 +3,11 @@ import type { OcTodo } from '../types/opencode'
 
 interface TodoPanelProps {
   todos: OcTodo[]
+  /** 点击某条待办：用于点亮对应子任务面板与中间消息 */
+  onTodoClick?: (todo: OcTodo) => void
 }
 
-export default function TodoPanel({ todos }: TodoPanelProps) {
+export default function TodoPanel({ todos, onTodoClick }: TodoPanelProps) {
   const [expanded, setExpanded] = useState(true)
 
   if (todos.length === 0) return null
@@ -79,7 +81,12 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
           }}
         >
           {todos.map((todo, index) => (
-            <TodoItem key={`todo-${index}`} todo={todo} />
+            <TodoItem
+              key={`todo-${index}`}
+              todo={todo}
+              clickable={Boolean(onTodoClick)}
+              onPick={onTodoClick}
+            />
           ))}
         </div>
       )}
@@ -87,18 +94,46 @@ export default function TodoPanel({ todos }: TodoPanelProps) {
   )
 }
 
-function TodoItem({ todo }: { todo: OcTodo }) {
+function TodoItem({
+  todo,
+  clickable,
+  onPick,
+}: {
+  todo: OcTodo
+  clickable?: boolean
+  onPick?: (todo: OcTodo) => void
+}) {
   const isCompleted = todo.status === 'completed'
   const isInProgress = todo.status === 'in_progress'
 
   return (
     <div
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={
+        clickable && onPick
+          ? () => onPick(todo)
+          : undefined
+      }
+      onKeyDown={
+        clickable && onPick
+          ? e => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onPick(todo)
+              }
+            }
+          : undefined
+      }
       style={{
         display: 'flex',
         alignItems: 'flex-start',
         gap: '8px',
         padding: '4px 0',
         opacity: isCompleted ? 0.5 : 1,
+        cursor: clickable ? 'pointer' : 'default',
+        borderRadius: 6,
+        outline: 'none',
       }}
     >
       {/* Status Icon */}

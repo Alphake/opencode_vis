@@ -44,12 +44,24 @@ function renderMarkdown(text: string): string {
     .replace(/\n/g, '<br/>')
 }
 
+/** 用户消息：OpenCode 常把正文放在 parts.text，info.content 可能为空 */
+function userMessageDisplayText(message: OcMessage): string {
+  const c = message.info.content?.trim()
+  if (c) return message.info.content!
+  const fromParts = message.parts
+    .filter((p): p is Extract<OcMessagePart, { type: 'text' }> => p.type === 'text')
+    .map(p => p.text || '')
+    .join('')
+    .trim()
+  return fromParts
+}
+
 export default function MessageBubble({ message, isLastInTurn }: MessageBubbleProps) {
   const { info, parts } = message
   const isUser = info.role === 'user'
 
   if (isUser) {
-    return <UserMessage content={info.content || ''} />
+    return <UserMessage message={message} />
   }
 
   // Assistant message
@@ -63,7 +75,8 @@ export default function MessageBubble({ message, isLastInTurn }: MessageBubblePr
   )
 }
 
-function UserMessage({ content }: { content: string }) {
+function UserMessage({ message }: { message: OcMessage }) {
+  const content = userMessageDisplayText(message)
   const [showCopy, setShowCopy] = useState(false)
   const [copied, setCopied] = useState(false)
 
@@ -93,7 +106,7 @@ function UserMessage({ content }: { content: string }) {
           wordBreak: 'break-word',
         }}
       >
-        {content}
+        {content || <span style={{ color: '#BBB' }}>（无文本内容）</span>}
       </div>
       {/* Copy button */}
       {showCopy && (

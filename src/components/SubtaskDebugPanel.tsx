@@ -1,3 +1,4 @@
+import type { RefObject } from 'react'
 import type { OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import SubtaskCard from './SubtaskCard'
@@ -5,9 +6,18 @@ import SubtaskCard from './SubtaskCard'
 interface SubtaskDebugPanelProps {
   messages: OcMessage[]
   assistantSubtasks: AssistantSubtask[]
+  linkedSubtaskIndex: number | null
+  onSelectSubtask: (index: number) => void
+  listScrollRef?: RefObject<HTMLDivElement | null>
 }
 
-export default function SubtaskDebugPanel({ messages, assistantSubtasks }: SubtaskDebugPanelProps) {
+export default function SubtaskDebugPanel({
+  messages,
+  assistantSubtasks,
+  linkedSubtaskIndex,
+  onSelectSubtask,
+  listScrollRef,
+}: SubtaskDebugPanelProps) {
   return (
     <div
       style={{
@@ -19,19 +29,7 @@ export default function SubtaskDebugPanel({ messages, assistantSubtasks }: Subta
       }}
     >
       <div
-        style={{
-          fontSize: 10,
-          color: '#8F8F8F',
-          lineHeight: 1.45,
-          marginBottom: 8,
-          flexShrink: 0,
-        }}
-      >
-        子任务卡片字段说明见{' '}
-        <code style={{ fontSize: 9 }}>docs/subtask-card-fields.md</code>。切段规则见{' '}
-        <code style={{ fontSize: 9 }}>docs/subtask-grouping.md</code>。
-      </div>
-      <div
+        ref={listScrollRef}
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -49,6 +47,8 @@ export default function SubtaskDebugPanel({ messages, assistantSubtasks }: Subta
               subtask={st}
               messages={messages}
               displayIndex={si}
+              isLinked={linkedSubtaskIndex === si}
+              onSelectSubtask={() => onSelectSubtask(si)}
             />
           ))
         )}

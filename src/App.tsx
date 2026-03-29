@@ -1,12 +1,14 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { OcSession } from './types/opencode'
 import { getSessions, getTodos, getMessages, sendMessage, subscribeGlobalEvents } from './services/opencodeApi'
 import type { OcMessage, OcTodo } from './types/opencode'
 import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
 import SubtaskDebugPanel from './components/SubtaskDebugPanel'
+import SubtaskMessageConnector from './components/SubtaskMessageConnector'
 import { groupAssistantSubtasks, isTodoWriteMessage } from './utils/subtaskGrouping'
 import { buildMappedActionsFromMessages } from './utils/actionMapping'
+import { buildMessageHighlightSet, findSubtaskIndexForTodo } from './utils/subtaskLinkage'
 
 /** 每条「含 todo 写入」的 message 下标 → 当时同步到的 todos（用于重放 diff） */
 type TodosSnapshotMap = Record<string, OcTodo[]>
@@ -57,6 +59,11 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [apiConnected, setApiConnected] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [linkedSubtaskIndex, setLinkedSubtaskIndex] = useState<number | null>(null)
+
+  const linkAreaRef = useRef<HTMLDivElement>(null)
+  const messageScrollRef = useRef<HTMLDivElement>(null)
+  const subtaskScrollRef = useRef<HTMLDivElement>(null)
 
   // Load sessions on mount
   useEffect(() => {
@@ -166,6 +173,55 @@ function App() {
     console.log('[AssistantSubtasks]', payload)
   }, [assistantSubtasks, messages])
 
+  const highlightMessageIndices = useMemo(() => {
+    if (linkedSubtaskIndex === null) return null
+    const st = assistantSubtasks[linkedSubtaskIndex]
+    if (!st) return null
+    return buildMessageHighlightSet(st, messages)
+  }, [linkedSubtaskIndex, assistantSubtasks, messages])
+
+  const toggleSubtaskLink = useCallback((si: number) => {
+    setLinkedSubtaskIndex(prev => (prev === si ? null : si))
+  }, [])
+
+  const handleTodoClick = useCallback(
+    (todo: OcTodo) => {
+      const si = findSubtaskIndexForTodo(assistantSubtasks, todo)
+      if (si === null) return
+      setLinkedSubtaskIndex(si)
+    },
+    [assistantSubtasks]
+  )
+
+  useEffect(() => {
+    setLinkedSubtaskIndex(null)
+  }, [selectedSessionId])
+
+  useEffect(() => {
+    if (linkedSubtaskIndex !== null && linkedSubtaskIndex >= assistantSubtasks.length) {
+      setLinkedSubtaskIndex(null)
+    }
+  }, [linkedSubtaskIndex, assistantSubtasks.length])
+
+  useEffect(() => {
+    if (highlightMessageIndices === null || highlightMessageIndices.size === 0) return
+    const first = Math.min(...highlightMessageIndices)
+    requestAnimationFrame(() => {
+      messageScrollRef.current
+        ?.querySelector(`[data-message-index="${first}"]`)
+        ?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    })
+  }, [linkedSubtaskIndex, highlightMessageIndices])
+
+  useEffect(() => {
+    if (linkedSubtaskIndex === null) return
+    requestAnimationFrame(() => {
+      subtaskScrollRef.current
+        ?.querySelector(`[data-subtask-card-index="${linkedSubtaskIndex}"]`)
+        ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+  }, [linkedSubtaskIndex])
+
   const handleSendMessage = useCallback(async (text: string) => {
     if (!selectedSessionId) return
     await sendMessage(selectedSessionId, text)
@@ -195,76 +251,102 @@ function App() {
         apiConnected={apiConnected}
       />
 
-      {/* Center MessagePanel：限制最大宽度，相对变窄 */}
+      {/* 中栏 + 右栏：同一相对定位容器，便于子任务与消息连线 */}
       <div
+        ref={linkAreaRef}
         style={{
           flex: 1,
           minWidth: 0,
           minHeight: 0,
           display: 'flex',
-          flexDirection: 'column',
+          flexDirection: 'row',
+          position: 'relative',
         }}
       >
         <div
           style={{
-            width: '100%',
-            maxWidth: 640,
-            minHeight: 0,
             flex: 1,
+            minWidth: 0,
+            minHeight: 0,
             display: 'flex',
             flexDirection: 'column',
           }}
         >
-          <MessagePanel
-            messages={messages}
-            todos={todos}
-            loading={loading}
-            sessionId={selectedSessionId}
-            sessionTitle={selectedSession?.title}
-            onRefresh={() => loadSessionData(selectedSessionId)}
-            onSendMessage={handleSendMessage}
-          />
+          <div
+            style={{
+              width: '100%',
+              minHeight: 0,
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            <MessagePanel
+              messages={messages}
+              todos={todos}
+              loading={loading}
+              sessionId={selectedSessionId}
+              sessionTitle={selectedSession?.title}
+              onRefresh={() => loadSessionData(selectedSessionId)}
+              onSendMessage={handleSendMessage}
+              messageListScrollRef={messageScrollRef}
+              highlightMessageIndices={highlightMessageIndices}
+              onTodoClick={handleTodoClick}
+            />
+          </div>
         </div>
-      </div>
 
-      {/* Right Panel */}
-      <div
-        style={{
-          width: 520,
-          flexShrink: 0,
-          background: '#FFFFFF',
-          borderLeft: '1px solid #E8E8E8',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
-        {/* Right Panel Header */}
         <div
           style={{
-            height: 44,
-            padding: '0 14px',
-            display: 'flex',
-            alignItems: 'center',
-            borderBottom: '1px solid #E8E8E8',
-            fontSize: 12,
-            fontWeight: 500,
-            color: '#171717',
-          }}
-        >
-          子任务分组（调试）
-        </div>
-        <div
-          style={{
-            flex: 1,
+            width: 600,
+            flexShrink: 0,
+            background: '#FFFFFF',
+            borderLeft: '1px solid #E8E8E8',
             display: 'flex',
             flexDirection: 'column',
-            minHeight: 0,
-            padding: '12px 14px',
-            gap: 12,
           }}
         >
-          <SubtaskDebugPanel messages={messages} assistantSubtasks={assistantSubtasks} />
+          <div
+            style={{
+              height: 44,
+              padding: '0 14px',
+              display: 'flex',
+              alignItems: 'center',
+              borderBottom: '1px solid #E8E8E8',
+              fontSize: 12,
+              fontWeight: 500,
+              color: '#171717',
+            }}
+          >
+            子任务分组（调试）
+          </div>
+          <div
+            style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              minHeight: 0,
+              padding: '12px 14px',
+              gap: 12,
+            }}
+          >
+            <SubtaskDebugPanel
+              messages={messages}
+              assistantSubtasks={assistantSubtasks}
+              linkedSubtaskIndex={linkedSubtaskIndex}
+              onSelectSubtask={toggleSubtaskLink}
+              listScrollRef={subtaskScrollRef}
+            />
+          </div>
         </div>
+
+        <SubtaskMessageConnector
+          containerRef={linkAreaRef}
+          messageScrollRef={messageScrollRef}
+          subtaskScrollRef={subtaskScrollRef}
+          subtaskIndex={linkedSubtaskIndex}
+          messageIndices={highlightMessageIndices}
+        />
       </div>
     </div>
   )
