@@ -139,3 +139,19 @@ body {
 .animate-fade-in {
   animation: fadeIn 0.2s ease-out;
 }
+
+@keyframes actionFlowRunningPulse {
+  0%,
+  100% {
+    opacity: 1;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 0.65;
+    filter: brightness(1.15);
+  }
+}
+
+.action-flow-running {
+  animation: actionFlowRunningPulse 0.9s ease-in-out infinite;
+}

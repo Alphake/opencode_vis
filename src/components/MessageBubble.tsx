@@ -11,19 +11,19 @@ function renderMarkdown(text: string): string {
   if (!text) return ''
   return text
     // 代码块
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:#F5F5F5;padding:8px;border-radius:4px;overflow-x:auto;margin:6px 0;font-family:IBM Plex Mono,monospace;font-size:11px"><code>$2</code></pre>')
+    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:#F5F5F5;padding:8px;border-radius:4px;margin:6px 0;font-family:IBM Plex Mono,monospace;font-size:11px"><code>$2</code></pre>')
     // 行内代码
     .replace(/`([^`]+)`/g, '<code style="background:#F5F5F5;padding:1px 3px;border-radius:2px;font-family:IBM Plex Mono,monospace;font-size:11px">$1</code>')
     // 表格
-    .replace(/(\|.+\|)\n(\|[-:| ]+\|)\n((?:\|.+\|\n?)*)/g, (match, header, divider, rows) => {
-      const headerCells = header.split('|').filter(c => c.trim())
+    .replace(/(\|.+\|)\n(\|[-:| ]+\|)\n((?:\|.+\|\n?)*)/g, (_match, header, _divider, rows) => {
+      const headerCells = header.split('|').filter((c: string) => c.trim())
       const rowLines = rows.trim().split('\n')
-      const bodyCells = rowLines.map(row => row.split('|').filter(c => c.trim()))
-      let html = '<table style="border-collapse:collapse;margin:8px 0;font-size:12px">'
-      html += '<thead><tr>' + headerCells.map(c => `<th style="border:1px solid #E8E8E8;padding:4px 8px;background:#F5F5F5;font-weight:600">${c}</th>`).join('') + '</tr></thead>'
+      const bodyCells = rowLines.map((row: string) => row.split('|').filter((c: string) => c.trim()))
+      let html = '<table style="border-collapse:collapse;margin:8px 0;font-size:11px">'
+      html += '<thead><tr>' + headerCells.map((c: string) => `<th style="border:1px solid #E8E8E8;padding:4px 8px;background:#F5F5F5;font-weight:600">${c}</th>`).join('') + '</tr></thead>'
       html += '<tbody>'
-      bodyCells.forEach(cells => {
-        html += '<tr>' + cells.map(c => `<td style="border:1px solid #E8E8E8;padding:4px 8px">${c}</td>`).join('') + '</tr>'
+      bodyCells.forEach((cells: string[]) => {
+        html += '<tr>' + cells.map((c: string) => `<td style="border:1px solid #E8E8E8;padding:4px 8px">${c}</td>`).join('') + '</tr>'
       })
       html += '</tbody></table>'
       return html
@@ -32,7 +32,7 @@ function renderMarkdown(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     // *italic* -> just text (no italic)
     .replace(/\*(.+?)\*/g, '$1')
-    // Headers: 统一渲染为粗体文字，不改变字号
+    // Headers: 统一渲染为粗体文字
     .replace(/^#{1,6} (.+)$/gm, '<strong>$1</strong>')
     // bullet lists
     .replace(/^- (.+)$/gm, '<div style="margin-left:16px">• $1</div>')
@@ -49,25 +49,7 @@ export default function MessageBubble({ message, isLastInTurn }: MessageBubblePr
   const isUser = info.role === 'user'
 
   if (isUser) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '4px 0' }}>
-        <div
-          style={{
-            maxWidth: '70%',
-            padding: '8px 12px',
-            background: '#FFFFFF',
-            border: '1px solid #E8E8E8',
-            borderRadius: '8px',
-            fontSize: 12,
-            lineHeight: 1.5,
-            color: '#333',
-            wordBreak: 'break-word',
-          }}
-        >
-          {info.content || ''}
-        </div>
-      </div>
-    )
+    return <UserMessage content={info.content || ''} />
   }
 
   // Assistant message
@@ -76,10 +58,62 @@ export default function MessageBubble({ message, isLastInTurn }: MessageBubblePr
       {parts.map((part, idx) => (
         <PartView key={idx} part={part} />
       ))}
+      {isLastInTurn && <AgentInfo info={info} />}
+    </div>
+  )
+}
 
-      {/* Agent 信息：只在 turn 最后显示 */}
-      {isLastInTurn && (
-        <AgentInfo info={info} />
+function UserMessage({ content }: { content: string }) {
+  const [showCopy, setShowCopy] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+
+  return (
+    <div
+      style={{ display: 'flex', justifyContent: 'flex-end', padding: '4px 0', position: 'relative' }}
+      onMouseEnter={() => setShowCopy(true)}
+      onMouseLeave={() => setShowCopy(false)}
+    >
+      <div
+        style={{
+          maxWidth: '70%',
+          padding: '8px 12px',
+          background: '#FFFFFF',
+          border: '1px solid #E8E8E8',
+          borderRadius: '12px',
+          fontSize: 12,
+          lineHeight: 1.5,
+          color: '#333',
+          wordBreak: 'break-word',
+        }}
+      >
+        {content}
+      </div>
+      {/* Copy button */}
+      {showCopy && (
+        <button
+          onClick={handleCopy}
+          style={{
+            position: 'absolute',
+            bottom: -4,
+            right: 8,
+            background: '#FFFFFF',
+            border: '1px solid #E8E8E8',
+            borderRadius: '4px',
+            padding: '2px 6px',
+            fontSize: 10,
+            color: copied ? '#0ABE00' : '#999',
+            cursor: 'pointer',
+          }}
+        >
+          {copied ? 'copied' : 'copy'}
+        </button>
       )}
     </div>
   )
@@ -100,13 +134,7 @@ function AgentInfo({ info }: { info: OcMessageInfo }) {
   if (!modelName && !totalTokens && !duration) return null
 
   return (
-    <div style={{
-      marginTop: '8px',
-      fontSize: 11,
-      color: '#999',
-      display: 'flex',
-      gap: '12px',
-    }}>
+    <div style={{ marginTop: '8px', fontSize: 11, color: '#999', display: 'flex', gap: '12px' }}>
       {modelName && <span>{modelName}</span>}
       {duration && <span>{duration}</span>}
       {totalTokens && <span>{totalTokens} tokens</span>}
@@ -142,14 +170,9 @@ function PartView({ part }: { part: OcMessagePart }) {
     case 'tool': {
       const state = part.state
       const output = state?.output
-      const hasOutput = output && output.trim().length > 0
+      const hasOutput = Boolean(output && output.trim().length > 0)
       return (
-        <ToolCallView
-          toolName={part.tool}
-          status={state?.status}
-          output={output}
-          hasOutput={hasOutput}
-        />
+        <ToolCallView toolName={part.tool} status={state?.status} output={output} hasOutput={hasOutput} />
       )
     }
 
@@ -181,22 +204,29 @@ function PartView({ part }: { part: OcMessagePart }) {
       )
     }
 
+    case 'compaction':
+      return (
+        <div style={{
+          fontSize: 10,
+          color: '#C62828',
+          margin: '4px 0',
+          fontFamily: 'var(--font-family-mono)',
+        }}>
+          [compaction]
+        </div>
+      )
+
     case 'step-start':
     case 'step-end':
     case 'step-finish':
-      return null // 不显示 step 分隔线
+      return null
 
     default:
       return null
   }
 }
 
-function ToolCallView({
-  toolName,
-  status,
-  output,
-  hasOutput,
-}: {
+function ToolCallView({ toolName, status, output, hasOutput }: {
   toolName: string
   status?: string
   output?: string
@@ -205,13 +235,7 @@ function ToolCallView({
   const [expanded, setExpanded] = useState(false)
 
   return (
-    <div style={{
-      margin: '4px 0',
-      border: '1px solid #E8E8E8',
-      borderRadius: '6px',
-      overflow: 'hidden',
-    }}>
-      {/* 工具名称，点击可展开 */}
+    <div style={{ margin: '4px 0', border: '1px solid #E8E8E8', borderRadius: '6px', overflow: 'hidden' }}>
       <div
         onClick={() => hasOutput && setExpanded(!expanded)}
         style={{
@@ -223,26 +247,14 @@ function ToolCallView({
           fontSize: 12,
         }}
       >
-        <span style={{ fontFamily: 'IBM Plex Mono, monospace', color: '#333' }}>
-          {toolName}
-        </span>
+        <span style={{ fontFamily: 'IBM Plex Mono, monospace', color: '#333' }}>{toolName}</span>
         {status && (
-          <span style={{
-            fontSize: 10,
-            color: status === 'completed' ? '#666' : status === 'error' ? '#999' : '#999',
-            marginLeft: '8px',
-          }}>
-            {status}
-          </span>
+          <span style={{ fontSize: 10, color: '#999', marginLeft: '8px' }}>{status}</span>
         )}
         {hasOutput && (
-          <span style={{ marginLeft: 'auto', color: '#CCC', fontSize: 11 }}>
-            {expanded ? '▲' : '▼'}
-          </span>
+          <span style={{ marginLeft: 'auto', color: '#CCC', fontSize: 11 }}>{expanded ? '▲' : '▼'}</span>
         )}
       </div>
-
-      {/* 工具输出：折叠，垂直滚动 */}
       {hasOutput && expanded && (
         <div style={{
           padding: '8px 10px',

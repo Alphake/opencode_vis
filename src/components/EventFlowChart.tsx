@@ -8,6 +8,8 @@ interface EventFlowChartProps {
   todoContent: string
 }
 
+type BarDatum = FlowEvent & { x: number; width: number }
+
 // Classify tool names into event categories
 function classifyTool(toolName: string): FlowEvent['type'] {
   const t = toolName.toLowerCase()
@@ -65,7 +67,7 @@ const colorMap: Record<FlowEvent['type'], string> = {
   step: 'var(--color-border)',
 }
 
-export default function EventFlowChart({ messages, todoContent }: EventFlowChartProps) {
+export default function EventFlowChart({ messages, todoContent: _todoContent }: EventFlowChartProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -103,9 +105,9 @@ export default function EventFlowChart({ messages, todoContent }: EventFlowChart
     const availableWidth = width - (events.length - 1) * gap
 
     let x = 0
-    const bars = events.map((event, i) => {
-      const w = Math.max(2, (durations[i] / totalDuration) * availableWidth)
-      const bar = { ...event, x, width: w }
+    const bars: BarDatum[] = events.map((event, i) => {
+      const w = Math.max(2, (durations[i]! / totalDuration) * availableWidth)
+      const bar: BarDatum = { ...event, x, width: w }
       x += w + gap
       return bar
     })
@@ -140,8 +142,8 @@ export default function EventFlowChart({ messages, todoContent }: EventFlowChart
       .style('opacity', 0)
       .style('z-index', 50)
 
-    g.selectAll('rect')
-      .on('mouseenter', (event, d) => {
+    g.selectAll<SVGRectElement, BarDatum>('rect')
+      .on('mouseenter', (_event, d) => {
         tooltip
           .style('opacity', 1)
           .html(`<strong>${d.label}</strong>${d.duration ? ` · ${d.duration.toFixed(1)}s` : ''}`)

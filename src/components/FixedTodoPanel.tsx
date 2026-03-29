@@ -176,7 +176,6 @@ export default function FixedTodoPanel({ todos, loading, onTodoClick }: FixedTod
               style={{
                 background: 'var(--surface-raised-stronger)',
                 border: `1px solid ${status.border}`,
-                hover: 'background: var(--surface-raised-base-hover)',
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = 'var(--surface-raised-base-hover)'

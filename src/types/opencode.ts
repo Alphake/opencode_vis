@@ -30,7 +30,18 @@ export interface OcTodo {
   priority: 'high' | 'medium' | 'low'
 }
 
-export type PartType = 'text' | 'reasoning' | 'tool' | 'step-start' | 'text-file' | 'image' | 'step-end' | 'snapshot'
+export type PartType =
+  | 'text'
+  | 'reasoning'
+  | 'tool'
+  | 'step-start'
+  | 'step-finish'
+  | 'text-file'
+  | 'image'
+  | 'step-end'
+  | 'snapshot'
+  /** OpenCode 在上下文压缩时写入的部件（见 packages/opencode 消息序列化） */
+  | 'compaction'
 
 export interface OcMessageInfo {
   role: 'user' | 'assistant'
@@ -98,6 +109,22 @@ export type StepStartPart = {
   messageID: string
 }
 
+/** Agent 单步结束；reason === 'stop' 表示本步 Agent 主动暂停（一次完整 Agent 输出边界） */
+export type StepFinishPart = {
+  type: 'step-finish'
+  reason?: string
+  id: string
+  sessionID: string
+  messageID: string
+}
+
+export type StepEndPart = {
+  type: 'step-end'
+  id: string
+  sessionID: string
+  messageID: string
+}
+
 export type TextFilePart = {
   type: 'text-file'
   path: string
@@ -119,13 +146,60 @@ export type ImagePart = {
   messageID: string
 }
 
+export type CompactionPart = {
+  type: 'compaction'
+  id: string
+  sessionID: string
+  messageID: string
+  /** 部分版本会带摘要或占位文本 */
+  text?: string
+}
+
 export type OcMessagePart =
   | TextPart
   | ReasoningPart
   | ToolPart
   | StepStartPart
+  | StepFinishPart
+  | StepEndPart
   | TextFilePart
   | ImagePart
+  | CompactionPart
+
+// ===== 可视化：12 类 Agent Action =====
+
+export type ActionType =
+  | 'Think'
+  | 'Clarify'
+  | 'Plan'
+  | 'Permission'
+  | 'Subagent'
+  | 'Response'
+  | 'Read'
+  | 'Write'
+  | 'Shell'
+  | 'Search'
+  | 'Skill'
+  | 'Compaction'
+
+export type ActionStatus = 'pending' | 'running' | 'completed' | 'error'
+
+/** 单条可绘制动作（来自 message part 或 SSE 事件） */
+export interface MappedAction {
+  actionType: ActionType
+  status: ActionStatus
+  /** 毫秒；无可靠时间戳时可为 0，由 UI 在 duration 模式下用下限代替 */
+  durationMs: number
+  /** 按字符/4 的粗估 token */
+  tokenEstimate: number
+  /** 排序与时间轴 */
+  sortTime: number
+  source: 'part' | 'sse-permission' | 'sse-session'
+  messageID?: string
+  partIndex?: number
+  messageIndex?: number
+  detail?: string
+}
 
 export interface OcMessage {
   info: OcMessageInfo
@@ -139,4 +213,12 @@ export interface FlowEvent {
   timestamp: number
   duration?: number
   toolName?: string
+}
+
+/** 全局/工作区 SSE 中与动作相关、需与 message 合并的事件（OpenCode Bus） */
+export interface OcSseActionEvent {
+  type: 'permission.asked' | 'session.compacted' | string
+  time: number
+  sessionID?: string
+  raw: unknown
 }

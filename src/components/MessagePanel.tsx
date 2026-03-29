@@ -83,34 +83,21 @@ export default function MessagePanel({
         )}
       </div>
 
-      {/* Todo Panel (fixed, max 150px) */}
+      {/* Todo Panel (紧贴消息区域) */}
       {todos.length > 0 && (
         <div style={{ flexShrink: 0 }}>
           <TodoPanel todos={todos} />
         </div>
       )}
 
-      {/* Agent info + Input */}
-      <div style={{ flexShrink: 0, borderTop: '1px solid #E8E8E8' }}>
-        {/* Agent info bar */}
-        {(agentName || modelName) && (
-          <div style={{
-            padding: '6px 16px',
-            fontSize: 11,
-            color: '#999',
-            background: '#FAFAFA',
-            display: 'flex',
-            gap: '12px',
-          }}>
-            {agentName && <span>{agentName}</span>}
-            {modelName && <span>{modelName}</span>}
-          </div>
-        )}
-        {/* Message Input */}
+      {/* Message Input (直接贴着 todo 或消息) */}
+      <div style={{ flexShrink: 0 }}>
         <MessageInput
           onSend={onSendMessage}
           disabled={!sessionId || loading}
           sessionId={sessionId}
+          agentName={agentName}
+          modelName={modelName}
         />
       </div>
     </div>
