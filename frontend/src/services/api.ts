@@ -54,9 +54,23 @@ export const api = {
   sessions: {
     list: () => http.get<Session[]>("/sessions").then((r) => r.data),
     get: (id: string) => http.get<Session>(`/sessions/${id}`).then((r) => r.data),
-    messages: (id: string) => http.get<Message[]>(`/sessions/${id}/messages`).then((r) => r.data),
-    sendMessage: (id: string, content: string) =>
-      http.post(`/sessions/${id}/user-message`, { content }).then((r) => r.data),
+    messages: async (id: string) => {
+      const url = `/sessions/${id}/messages`
+      console.log("[Harness Backend · HTTP] GET 消息列表", url, "（本仓库 Flask 后端，非 OpenCode 直连）")
+      const r = await http.get<Message[]>(url)
+      console.log("[Harness Backend · HTTP] GET 响应", r.data?.length, "条")
+      return r.data
+    },
+    sendMessage: async (id: string, content: string) => {
+      const url = `/sessions/${id}/user-message`
+      console.log("[Harness Backend · HTTP] POST 发送用户消息", url, {
+        contentLen: content.length,
+        预览: content.slice(0, 120),
+      })
+      const r = await http.post(url, { content })
+      console.log("[Harness Backend · HTTP] POST 响应 data:", r.data)
+      return r.data
+    },
     partsProjection: (
       id: string,
       params?: {

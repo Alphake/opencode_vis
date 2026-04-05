@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
-import { buildSubtaskCardMetrics, formatDurationMs } from '../utils/subtaskMetrics'
+import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
 import { buildMappedActionsFromMessages } from '../utils/actionMapping'
 import ActionFlowVisualization from './ActionFlowVisualization'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
@@ -21,17 +21,6 @@ interface SubtaskCardProps {
 }
 
 type ColorByMode = 'status' | 'tokens'
-
-function ContextDonutPlaceholder() {
-  return (
-    <svg width={24} height={24} viewBox="0 0 38 38" aria-hidden>
-      <circle cx={19} cy={19} r={18} fill="#D9D9D9" />
-      <path d="M19 1 A18 18 0 0 1 35 12 L19 19 Z" fill="#C6C6C6" />
-      <path d="M19 19 L35 12 A18 18 0 0 1 19 37 Z" fill="#E2E2E2" />
-      <circle cx={19} cy={19} r={8} fill="#FCFCFC" />
-    </svg>
-  )
-}
 
 function MetricBox({ label, value }: { label: string; value: string }) {
   return (
@@ -77,42 +66,6 @@ function MetricBox({ label, value }: { label: string; value: string }) {
       >
         {value}
       </div>
-    </div>
-  )
-}
-
-function MetricBoxContext() {
-  return (
-    <div
-      style={{
-        boxSizing: 'border-box',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '3px 4px',
-        minWidth: 0,
-        flex: '1 1 0',
-        minHeight: 44,
-        border: '1px solid #DBDBDB',
-        borderRadius: 10,
-        background: '#FCFCFC',
-      }}
-    >
-      <div
-        style={{
-          fontFamily: fontSans,
-          fontWeight: 600,
-          fontSize: 9,
-          lineHeight: '12px',
-          textAlign: 'center',
-          color: '#5C5C5C',
-          marginBottom: 1,
-        }}
-      >
-        Context
-      </div>
-      <ContextDonutPlaceholder />
     </div>
   )
 }
@@ -336,7 +289,7 @@ export default function SubtaskCard({
         <MetricBox label="Changes" value={changesLabel} />
         <MetricBox label="Time" value={durationLabel} />
         <MetricBox label="Total Tokens" value={String(m.tokensSegmentSum)} />
-        <MetricBoxContext />
+        <MetricBox label="Cost" value={formatSubtaskCostDisplay(m)} />
       </div>
 
       <div style={{ flex: 1, minHeight: 0 }} aria-hidden />

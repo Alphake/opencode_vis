@@ -149,6 +149,15 @@ cd cockpit-ui && npm run dev
 - Inter（主字体）
 - IBM Plex Mono（代码）
 
+## 研究定位（2026-03-30 确定）
+- **核心目标**：Closing the AI trust gap for developers
+- **目标场景**：Agentic coding（多步自主执行，区别于旧的 reactive 补全）
+- **研究新颖性**：旧研究对象是 Copilot 式补全；Agentic 场景下 Human 被推到 out-of-the-loop，是新问题
+- **四个覆盖环节**：前置对齐 → 过程监控（核心/可视化）→ 结果验收 → 经验沉淀
+- **关键数据**：SO 2025调查：84%用AI，29%信任（连续三年下降）
+- **相关发表场地**：CHI（人机交互）、IEEE TVCG/VIS（可视化）、CSCW
+- **代表论文**：FlowForge(VIS'25), VizTrust(CHI'25), CHI'24 Workshop on Trust
+
 ## 待解决问题（2026-03-28 晚间）
 1. ~~SSE 连通性~~ ✅ 已修复
 2. ~~三栏布局~~ ✅ 已完成：左 240px + 中 flex:1 + 右 400px

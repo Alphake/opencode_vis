@@ -17,15 +17,17 @@ export function connectSocket() {
   }
 
   es.onmessage = (e: MessageEvent) => {
+    console.log("[Harness Backend · SSE · 原始 data 字符串]", e.data?.slice?.(0, 1500) ?? e.data)
     try {
       const msg = JSON.parse(e.data)
+      console.log("[Harness Backend · SSE · 解析后 JSON]", msg)
       if (msg.type === "__snapshot__") {
         store.loadSnapshot(msg.data)
       } else {
         store.handleAgentEvent(msg.type, msg.data)
       }
     } catch {
-      console.warn("[AgentCockpit] Failed to parse SSE message", e.data)
+      console.warn("[Harness Backend · SSE] 解析失败", e.data)
     }
   }
 

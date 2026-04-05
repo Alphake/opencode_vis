@@ -58,8 +58,46 @@ export interface SubtaskCardMetrics {
   mutatedFileCount: number
   /** 首条 created → 末条 completed（无则用 created）的跨度 ms */
   durationMs: number | null
+  /** 本子任务内各 assistant message 的 `info.cost` 之和（API 未给则为 0） */
+  costSegmentSum: number
+  /**
+   * 按单价从 token 分项估算的美元成本（与 `TOKEN_COST_RATES_USD` 相乘后求和；当前单价均为 0，占位供以后接模型价目表）。
+   * 若将来与 API `cost` 并存，UI 可优先展示 API 或二者择一。
+   */
+  costEstimatedUsd: number
   /** 本段解决的 todo 数（= todosNewlyCompleted.length） */
   todosResolvedCount: number
+}
+
+/** 每千 token 美元单价占位：input/output/reasoning/cache read/cache write 可分别定价；当前全 0 */
+export const TOKEN_COST_RATES_USD_PER_1K = {
+  input: 0,
+  output: 0,
+  reasoning: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+} as const
+
+export function estimateCostUsdFromTokenBreakdown(bd: SubtaskTokenBreakdown): number {
+  const r = TOKEN_COST_RATES_USD_PER_1K
+  return (
+    (bd.input / 1000) * r.input +
+    (bd.output / 1000) * r.output +
+    (bd.reasoning / 1000) * r.reasoning +
+    (bd.cacheRead / 1000) * r.cacheRead +
+    (bd.cacheWrite / 1000) * r.cacheWrite
+  )
+}
+
+/** 卡片展示：优先 API 累计 cost；否则用分项估算（单价见 `TOKEN_COST_RATES_USD_PER_1K`） */
+export function formatSubtaskCostDisplay(m: {
+  costSegmentSum: number
+  costEstimatedUsd: number
+}): string {
+  if (m.costSegmentSum > 0) {
+    return `$${m.costSegmentSum.toFixed(4)}`
+  }
+  return `$${m.costEstimatedUsd.toFixed(2)}`
 }
 
 function isFileMutatingTool(toolName: string): boolean {
@@ -165,6 +203,15 @@ export function buildSubtaskCardMetrics(
   }
   bd.total = bd.input + bd.output + bd.reasoning + bd.cacheRead + bd.cacheWrite
 
+  let costSegmentSum = 0
+  for (const m of msgs) {
+    const c = m.info.cost
+    if (typeof c === 'number' && Number.isFinite(c)) {
+      costSegmentSum += c
+    }
+  }
+  const costEstimatedUsd = estimateCostUsdFromTokenBreakdown(bd)
+
   const paths = new Set<string>()
   for (const m of msgs) {
     for (const part of m.parts) {
@@ -198,6 +245,8 @@ export function buildSubtaskCardMetrics(
     mutatedFilePaths,
     mutatedFileCount: mutatedFilePaths.length,
     durationMs,
+    costSegmentSum,
+    costEstimatedUsd,
     todosResolvedCount: st.todosNewlyCompleted.length,
   }
 }
