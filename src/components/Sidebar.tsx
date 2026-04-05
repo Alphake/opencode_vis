@@ -1,37 +1,41 @@
-import { useState } from 'react'
+import { useMemo } from 'react'
 import type { OcSession } from '../types/opencode'
+import { folderDisplayName } from '../utils/sessionFolders'
 
 interface SidebarProps {
-  sessions: OcSession[]
+  /** 当前文件夹下的会话（已排序、已过滤） */
+  sessionsInFolder: OcSession[]
+  directories: string[]
+  selectedDirectory: string
+  onSelectDirectory: (dir: string) => void
   selectedSessionId: string
   onSelectSession: (id: string) => void
+  onCreateSession: () => void | Promise<void>
+  creatingSession?: boolean
   collapsed: boolean
   onToggle: () => void
   apiConnected: boolean
 }
 
+const RAIL_WIDTH = 44
+
 export default function Sidebar({
-  sessions,
+  sessionsInFolder,
+  directories,
+  selectedDirectory,
+  onSelectDirectory,
   selectedSessionId,
   onSelectSession,
+  onCreateSession,
+  creatingSession,
   collapsed,
   onToggle,
   apiConnected,
 }: SidebarProps) {
-  const [searchQuery, setSearchQuery] = useState('')
-
-  const filteredSessions = sessions.filter(s =>
-    s.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    s.directory?.toLowerCase().includes(searchQuery.toLowerCase())
+  const titleName = useMemo(
+    () => folderDisplayName(selectedDirectory),
+    [selectedDirectory],
   )
-
-  // Group by directory
-  const grouped = filteredSessions.reduce((acc, session) => {
-    const dir = session.directory || 'Unknown'
-    if (!acc[dir]) acc[dir] = []
-    acc[dir].push(session)
-    return acc
-  }, {} as Record<string, OcSession[]>)
 
   if (collapsed) {
     return (
@@ -74,101 +78,167 @@ export default function Sidebar({
   return (
     <div
       style={{
-        width: 240,
-        height: '100%',
-        background: '#FFFFFF',
-        borderRight: '1px solid #E8E8E8',
         display: 'flex',
-        flexDirection: 'column',
+        height: '100%',
         flexShrink: 0,
       }}
     >
-      {/* Sidebar Header */}
+      {/* 文件夹窄栏 */}
       <div
         style={{
-          height: 48,
-          padding: '0 12px',
+          width: RAIL_WIDTH,
+          background: '#FAFAFA',
+          borderRight: '1px solid #E8E8E8',
           display: 'flex',
+          flexDirection: 'column',
           alignItems: 'center',
-          justifyContent: 'space-between',
-          borderBottom: '1px solid #E8E8E8',
+          paddingTop: 8,
+          paddingBottom: 8,
+          gap: 6,
+          overflowY: 'auto',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 14, fontWeight: 500, color: '#171717' }}>Sessions</span>
-          <div
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: '50%',
-              background: apiConnected ? '#0ABE00' : '#FF3B30',
-            }}
-            title={apiConnected ? 'Connected' : 'Disconnected'}
-          />
-        </div>
-        <button
-          onClick={onToggle}
-          style={{
-            width: 24,
-            height: 24,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'transparent',
-            border: 'none',
-            borderRadius: 4,
-            cursor: 'pointer',
-          }}
-          title="折叠侧边栏"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8F8F8F" strokeWidth="2">
-            <path d="M11 19l-7-7 7-7M18 19l-7-7 7-7" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Search */}
-      <div style={{ padding: '8px 12px' }}>
-        <input
-          type="text"
-          placeholder="搜索..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          style={{
-            width: '100%',
-            height: 32,
-            padding: '0 10px',
-            background: '#F8F8F8',
-            border: '1px solid #E8E8E8',
-            borderRadius: 6,
-            fontSize: 13,
-            outline: 'none',
-          }}
-        />
-      </div>
-
-      {/* Session List */}
-      <div
-        style={{
-          flex: 1,
-          overflow: 'auto',
-          padding: '4px 0',
-        }}
-      >
-        {Object.entries(grouped).map(([directory, sessions]) => (
-          <div key={directory}>
-            <div
+        {directories.map((dir) => {
+          const active = dir === selectedDirectory
+          const label = folderDisplayName(dir).slice(0, 2)
+          return (
+            <button
+              key={dir || '__root__'}
+              type="button"
+              title={dir || '使用服务端当前工作区目录'}
+              onClick={() => onSelectDirectory(dir)}
               style={{
-                padding: '6px 12px',
+                width: 32,
+                minHeight: 32,
+                padding: '4px 2px',
+                borderRadius: 8,
+                border: active ? '1px solid #8445BC' : '1px solid transparent',
+                background: active ? '#F0E6FA' : 'transparent',
+                cursor: 'pointer',
                 fontSize: 11,
-                color: '#8F8F8F',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
+                fontWeight: 600,
+                color: active ? '#5B2D82' : '#525252',
+                lineHeight: 1.15,
+                wordBreak: 'break-all',
               }}
             >
-              {directory.split(/[\\/]/).pop()}
+              {label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* 会话列表 */}
+      <div
+        style={{
+          width: 240,
+          height: '100%',
+          background: '#FFFFFF',
+          borderRight: '1px solid #E8E8E8',
+          display: 'flex',
+          flexDirection: 'column',
+          flexShrink: 0,
+        }}
+      >
+        <div
+          style={{
+            height: 48,
+            padding: '0 12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            borderBottom: '1px solid #E8E8E8',
+            minWidth: 0,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            <span
+              title={selectedDirectory || '当前工作区'}
+              style={{
+                fontSize: 14,
+                fontWeight: 500,
+                color: '#171717',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {titleName}
+            </span>
+            <div
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: apiConnected ? '#0ABE00' : '#FF3B30',
+                flexShrink: 0,
+              }}
+              title={apiConnected ? '已连接 OpenCode' : '未连接'}
+            />
+          </div>
+          <button
+            onClick={onToggle}
+            style={{
+              width: 24,
+              height: 24,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+            title="折叠侧边栏"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8F8F8F" strokeWidth="2">
+              <path d="M11 19l-7-7 7-7M18 19l-7-7 7-7" />
+            </svg>
+          </button>
+        </div>
+
+        <div style={{ padding: '8px 12px' }}>
+          <button
+            type="button"
+            disabled={creatingSession}
+            onClick={() => void onCreateSession()}
+            style={{
+              width: '100%',
+              height: 36,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              background: creatingSession ? '#ECECEC' : '#8445BC',
+              color: '#FFFFFF',
+              border: 'none',
+              borderRadius: 8,
+              fontSize: 13,
+              fontWeight: 500,
+              cursor: creatingSession ? 'wait' : 'pointer',
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            {creatingSession ? '创建中…' : '新建会话'}
+          </button>
+        </div>
+
+        <div
+          style={{
+            flex: 1,
+            overflow: 'auto',
+            padding: '4px 0',
+          }}
+        >
+          {sessionsInFolder.length === 0 ? (
+            <div style={{ padding: '12px 14px', fontSize: 12, color: '#8F8F8F', lineHeight: 1.5 }}>
+              该文件夹下暂无会话，点击「新建会话」开始。
             </div>
-            {sessions.map((session) => (
+          ) : (
+            sessionsInFolder.map((session) => (
               <button
                 key={session.id}
                 onClick={() => onSelectSession(session.id)}
@@ -205,9 +275,9 @@ export default function Sidebar({
                   {session.title || 'Untitled'}
                 </span>
               </button>
-            ))}
-          </div>
-        ))}
+            ))
+          )}
+        </div>
       </div>
     </div>
   )

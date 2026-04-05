@@ -1,6 +1,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { OcSession } from './types/opencode'
-import { getSessions, getTodos, getMessages, sendMessage, subscribeGlobalEvents } from './services/opencodeApi'
+import {
+  getSessions,
+  getTodos,
+  getMessages,
+  sendMessage,
+  createSession,
+  subscribeGlobalEvents,
+  subscribeWorkspaceEvents,
+} from './services/opencodeApi'
+import { normalizeSessionDirectory, uniqueDirectoriesFromSessions } from './utils/sessionFolders'
 import type { OcMessage, OcTodo } from './types/opencode'
 import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
@@ -9,6 +18,7 @@ import SubtaskMessageConnector from './components/SubtaskMessageConnector'
 import { groupAssistantSubtasks, isTodoWriteMessage } from './utils/subtaskGrouping'
 import { buildMappedActionsFromMessages } from './utils/actionMapping'
 import { buildMessageHighlightSet, findSubtaskIndexForTodo } from './utils/subtaskLinkage'
+import { buildUserMessageWithGuidance } from './config/harnessGuidance'
 
 /** 每条「含 todo 写入」的 message 下标 → 当时同步到的 todos（用于重放 diff） */
 type TodosSnapshotMap = Record<string, OcTodo[]>
@@ -60,10 +70,30 @@ function App() {
   const [apiConnected, setApiConnected] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [linkedSubtaskIndex, setLinkedSubtaskIndex] = useState<number | null>(null)
+  const [selectedDirectory, setSelectedDirectory] = useState<string>('')
+  const [creatingSession, setCreatingSession] = useState(false)
+
+  const directories = useMemo(() => {
+    const u = uniqueDirectoriesFromSessions(sessions)
+    return u.length > 0 ? u : ['']
+  }, [sessions])
+
+  const sessionsInFolder = useMemo(() => {
+    return sessions
+      .filter(s => normalizeSessionDirectory(s.directory) === selectedDirectory)
+      .sort((a, b) => b.time.updated - a.time.updated)
+  }, [sessions, selectedDirectory])
 
   const linkAreaRef = useRef<HTMLDivElement>(null)
   const messageScrollRef = useRef<HTMLDivElement>(null)
   const subtaskScrollRef = useRef<HTMLDivElement>(null)
+  const sessionsRef = useRef(sessions)
+  sessionsRef.current = sessions
+
+  const activeSessionDirectory = useMemo(
+    () => sessions.find(s => s.id === selectedSessionId)?.directory,
+    [sessions, selectedSessionId],
+  )
 
   // Load sessions on mount
   useEffect(() => {
@@ -73,11 +103,34 @@ function App() {
         setApiConnected(true)
         const sorted = [...data].sort((a, b) => b.time.updated - a.time.updated)
         if (sorted.length > 0) {
-          setSelectedSessionId(sorted[0].id)
+          const first = sorted[0]!
+          setSelectedSessionId(first.id)
+          setSelectedDirectory(normalizeSessionDirectory(first.directory))
         }
       })
       .catch(() => setApiConnected(false))
   }, [])
+
+  /** 当前选中的 session 已从列表消失时，回退到同文件夹或全局最新；文件夹内无会话且未选中时保持空白 */
+  useEffect(() => {
+    if (sessions.length === 0) return
+    if (selectedSessionId && sessions.some(s => s.id === selectedSessionId)) return
+
+    const inFolder = sessions
+      .filter(s => normalizeSessionDirectory(s.directory) === selectedDirectory)
+      .sort((a, b) => b.time.updated - a.time.updated)
+
+    if (inFolder.length > 0) {
+      setSelectedSessionId(inFolder[0]!.id)
+      return
+    }
+    if (!selectedSessionId) return
+
+    const sorted = [...sessions].sort((a, b) => b.time.updated - a.time.updated)
+    const pick = sorted[0]!
+    setSelectedSessionId(pick.id)
+    setSelectedDirectory(normalizeSessionDirectory(pick.directory))
+  }, [sessions, selectedSessionId, selectedDirectory])
 
   // Subscribe to global SSE events
   useEffect(() => {
@@ -87,29 +140,44 @@ function App() {
       if (!eventType) return
 
       if (eventType.startsWith('message') || eventType.startsWith('session')) {
-        getMessages(selectedSessionId)
-          .then(setMessages)
-          .catch(err => console.warn('[SSE] Failed to refresh messages:', err))
+        console.log('[OpenCode · App] SSE 事件触发刷新消息列表', eventType)
+        getSessions()
+          .then(setSessions)
+          .catch(err => console.warn('[SSE] Failed to refresh sessions:', err))
+        const dir = sessionsRef.current.find(s => s.id === selectedSessionId)?.directory
+        if (selectedSessionId) {
+          getMessages(selectedSessionId, `SSE:${eventType}`, dir)
+            .then(setMessages)
+            .catch(err => console.warn('[SSE] Failed to refresh messages:', err))
+        }
       }
 
       if (eventType.startsWith('todo')) {
-        getTodos(selectedSessionId)
-          .then(setTodos)
-          .catch(err => console.warn('[SSE] Failed to refresh todos:', err))
+        const dir = sessionsRef.current.find(s => s.id === selectedSessionId)?.directory
+        if (selectedSessionId) {
+          getTodos(selectedSessionId, dir)
+            .then(setTodos)
+            .catch(err => console.warn('[SSE] Failed to refresh todos:', err))
+        }
       }
     })
 
     return unsubscribe
   }, [selectedSessionId])
 
+  // 并行监听当前 workspace 的 GET /event（仅控制台有输出；handler 空避免与 global 重复刷新 UI）
+  useEffect(() => {
+    return subscribeWorkspaceEvents(() => {})
+  }, [])
+
   // Load messages + todos when session changes
-  const loadSessionData = useCallback(async (sessionId: string) => {
+  const loadSessionData = useCallback(async (sessionId: string, directory?: string) => {
     if (!sessionId) return
     setLoading(true)
     try {
       const [msgs, td] = await Promise.all([
-        getMessages(sessionId),
-        getTodos(sessionId),
+        getMessages(sessionId, '进入会话/切换 session 首次加载', directory),
+        getTodos(sessionId, directory),
       ])
       setMessages(msgs)
       setTodos(td)
@@ -121,8 +189,8 @@ function App() {
   }, [])
 
   useEffect(() => {
-    loadSessionData(selectedSessionId)
-  }, [selectedSessionId, loadSessionData])
+    void loadSessionData(selectedSessionId, activeSessionDirectory)
+  }, [selectedSessionId, activeSessionDirectory, loadSessionData])
 
   useEffect(() => {
     setTodosSnapshotAtMessageIndex({})
@@ -224,12 +292,47 @@ function App() {
 
   const handleSendMessage = useCallback(async (text: string) => {
     if (!selectedSessionId) return
-    await sendMessage(selectedSessionId, text)
-    const msgs = await getMessages(selectedSessionId)
+    const dir = sessions.find(s => s.id === selectedSessionId)?.directory
+    // 引导语在 buildUserMessageWithGuidance（cockpit-ui/src/config/harnessGuidance.ts）中配置
+    await sendMessage(selectedSessionId, buildUserMessageWithGuidance(text), dir)
+    const msgs = await getMessages(selectedSessionId, 'POST 发送完成后拉取完整列表', dir)
     setMessages(msgs)
-  }, [selectedSessionId])
+  }, [selectedSessionId, sessions])
 
   const selectedSession = sessions.find(s => s.id === selectedSessionId)
+
+  const handleSelectDirectory = useCallback(
+    (dir: string) => {
+      setSelectedDirectory(dir)
+      const inFolder = sessions
+        .filter(s => normalizeSessionDirectory(s.directory) === dir)
+        .sort((a, b) => b.time.updated - a.time.updated)
+      if (inFolder.length === 0) {
+        setSelectedSessionId('')
+      } else {
+        setSelectedSessionId(inFolder[0]!.id)
+      }
+    },
+    [sessions],
+  )
+
+  const handleCreateSession = useCallback(async () => {
+    setCreatingSession(true)
+    try {
+      const dir = selectedDirectory || undefined
+      const created = await createSession(dir)
+      const list = await getSessions()
+      setSessions(list)
+      setApiConnected(true)
+      setSelectedDirectory(normalizeSessionDirectory(created.directory))
+      setSelectedSessionId(created.id)
+    } catch (e) {
+      console.error('Failed to create session:', e)
+      setApiConnected(false)
+    } finally {
+      setCreatingSession(false)
+    }
+  }, [selectedDirectory])
 
   return (
     <div
@@ -241,11 +344,16 @@ function App() {
         background: '#F8F8F8',
       }}
     >
-      {/* Left Sidebar (240px) */}
+      {/* 左侧：文件夹窄栏 + 会话列表 */}
       <Sidebar
-        sessions={sessions}
+        sessionsInFolder={sessionsInFolder}
+        directories={directories}
+        selectedDirectory={selectedDirectory}
+        onSelectDirectory={handleSelectDirectory}
         selectedSessionId={selectedSessionId}
         onSelectSession={setSelectedSessionId}
+        onCreateSession={handleCreateSession}
+        creatingSession={creatingSession}
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         apiConnected={apiConnected}
@@ -287,7 +395,7 @@ function App() {
               loading={loading}
               sessionId={selectedSessionId}
               sessionTitle={selectedSession?.title}
-              onRefresh={() => loadSessionData(selectedSessionId)}
+              onRefresh={() => loadSessionData(selectedSessionId, activeSessionDirectory)}
               onSendMessage={handleSendMessage}
               messageListScrollRef={messageScrollRef}
               highlightMessageIndices={highlightMessageIndices}

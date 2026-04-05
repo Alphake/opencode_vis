@@ -33,6 +33,8 @@ Sidebar  MessagePanel  SubtaskDebugPanel → SubtaskCard(s)
 
 ### 2.2 SSE（实时刷新）
 
+> **延期事项：** 当前实现是「SSE 仅作触发、消息正文仍以 `GET /message` 全量拉取」，长期是否改为更偏 SSE/增量的方案见 [deferred-backlog.md](./deferred-backlog.md) §1。
+
 - 使用 **`EventSource` 订阅 `GET /global/event`**（`subscribeGlobalEvents`）。
 - 收到事件后解析 `payload.type`（或顶层 `type`）：
   - 若以 `message` 或 `session` 开头 → 对**当前选中的 `selectedSessionId`** 再调一次 `getMessages`，用返回结果 **整体替换** `messages`。

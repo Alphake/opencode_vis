@@ -1,7 +1,9 @@
 import { useLayoutEffect, useRef, useId } from 'react'
 import * as d3 from 'd3'
-import type { ActionStatus, ActionType, MappedAction } from '../types/opencode'
+import { Tooltip } from 'react-tooltip'
+import type { ActionStatus, MappedAction } from '../types/opencode'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
+import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 
 type FlowNode =
   | { kind: 'end'; row: number }
@@ -25,21 +27,6 @@ const MAX_ROW = 2
 const MIN_W = 28
 const MAX_W = 220
 const BOTTOM_PAD = 6
-
-const ACTION_ICON: Record<ActionType, string> = {
-  Think: '◉',
-  Clarify: '?',
-  Plan: '≡',
-  Permission: '⚿',
-  Subagent: 'A',
-  Response: '¶',
-  Read: '◇',
-  Write: '✎',
-  Shell: '$',
-  Search: '⌕',
-  Skill: '⌘',
-  Compaction: '▽',
-}
 
 function blockWidth(durationMode: boolean, durationMs: number): number {
   if (!durationMode) return MIN_W
@@ -80,6 +67,41 @@ function flowNodeRow(node: FlowNode): number {
 }
 
 /** 把「当前用到的行」在固定总高 totalH 内竖直居中（整体 translate 到 content <g>） */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function buildActionTooltipHtml(act: MappedAction & { row: number }): string {
+  const lines: string[] = []
+  lines.push(`<strong>Action</strong>: ${escapeHtml(String(act.actionType))}`)
+  lines.push(`<strong>Row</strong>: ${act.row}`)
+  lines.push(`<strong>Status</strong>: ${escapeHtml(String(act.status))}`)
+  if (Number.isFinite(act.durationMs) && act.durationMs > 0) {
+    lines.push(`<strong>Duration</strong>: ${(act.durationMs / 1000).toFixed(2)}s`)
+  } else {
+    lines.push(`<strong>Duration</strong>: —`)
+  }
+  lines.push(`<strong>Tokens (est.)</strong>: ${act.tokenEstimate}`)
+  lines.push(`<strong>Source</strong>: ${escapeHtml(act.source)}`)
+  if (act.messageIndex !== undefined) {
+    lines.push(`<strong>Message</strong> #${act.messageIndex}`)
+  }
+  if (act.partIndex !== undefined) {
+    lines.push(`<strong>Part</strong> #${act.partIndex}`)
+  }
+  if (act.messageID) {
+    lines.push(`<strong>Message ID</strong>: ${escapeHtml(act.messageID)}`)
+  }
+  if (act.detail?.trim()) {
+    lines.push(`<strong>Detail</strong>: ${escapeHtml(act.detail.trim())}`)
+  }
+  return lines.join('<br/>')
+}
+
 function verticalCenterOffsetY(layout: { node: FlowNode }[], totalH: number): number {
   if (layout.length === 0) return 0
   let minR = Infinity
@@ -152,6 +174,7 @@ export default function ActionFlowVisualization({
   const svgRef = useRef<SVGSVGElement | null>(null)
   const reactId = useId().replace(/:/g, '')
   const markerId = `action-flow-arrow-${reactId}`
+  const tooltipId = `action-flow-tip-${reactId}`
 
   useLayoutEffect(() => {
     const svg = svgRef.current
@@ -181,6 +204,7 @@ export default function ActionFlowVisualization({
 
     const markerUrl = `url(#${markerId})`
     const content = root.append('g').attr('transform', `translate(0, ${offsetY})`)
+    const contentNode = content.node() as SVGGElement | null
 
     for (let i = 0; i < layout.length - 1; i++) {
       const a = layout[i]!
@@ -204,7 +228,7 @@ export default function ActionFlowVisualization({
         .attr('marker-end', markerUrl)
     }
 
-    layout.forEach(item => {
+    layout.forEach((item, layoutIndex) => {
       const { node, x: nx, y: ny, w, h } = item
       if (node.kind === 'end') {
         content
@@ -235,37 +259,30 @@ export default function ActionFlowVisualization({
         .attr('fill', fill)
         .attr('stroke', stroke)
         .attr('stroke-width', 1.5)
-
-      const tooltipLines: string[] = []
-      tooltipLines.push(`Action: ${act.actionType}`)
-      tooltipLines.push(`Status: ${act.status}`)
-      if (Number.isFinite(act.durationMs) && act.durationMs > 0) {
-        tooltipLines.push(`Duration: ${(act.durationMs / 1000).toFixed(2)}s`)
-      }
-      if (Number.isFinite(act.tokenEstimate)) {
-        tooltipLines.push(`Tokens: ${act.tokenEstimate}`)
-      }
-      rect.append('title').text(tooltipLines.join('\n'))
+        .style('cursor', 'pointer')
+        .attr('data-tooltip-id', tooltipId)
+        .attr('data-tooltip-html', buildActionTooltipHtml(act))
+        .attr('data-tooltip-place', 'top')
 
       if (act.status === 'running' && colorMode === 'status') {
         rect.attr('class', 'action-flow-running')
       }
 
-      const icon = ACTION_ICON[act.actionType] ?? '·'
-      content
-        .append('text')
-        .attr('x', nx + w / 2)
-        .attr('y', ny + h / 2 + 4)
-        .attr('text-anchor', 'middle')
-        .attr('font-size', 12)
-        .attr('font-family', 'Segoe UI Symbol, Apple Symbols, sans-serif')
-        .attr('fill', iconFill)
-        .text(icon)
+      if (contentNode) {
+        appendActionFlowIcon(
+          contentNode,
+          getActionFlowIconSvg(act.actionType),
+          nx + w / 2,
+          ny + h / 2,
+          iconFill,
+          `${reactId}-${layoutIndex}-`
+        )
+      }
     })
 
     root.attr('width', totalW).attr('height', totalH)
     svg.setAttribute('viewBox', `0 0 ${totalW} ${totalH}`)
-  }, [actions, durationMode, colorMode, markerId])
+  }, [actions, durationMode, colorMode, markerId, tooltipId])
 
   const minSvgH = TOP_PAD + MAX_ROW * ROW_H + BLOCK_H + BOTTOM_PAD
 
@@ -307,6 +324,12 @@ export default function ActionFlowVisualization({
           }}
         />
       </div>
+      <Tooltip
+        id={tooltipId}
+        className="action-flow-react-tooltip"
+        delayShow={150}
+        opacity={1}
+      />
     </div>
   )
 }
