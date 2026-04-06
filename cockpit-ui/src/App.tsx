@@ -6,11 +6,13 @@ import {
   getMessages,
   sendMessage,
   createSession,
+  updateSessionTitle,
   subscribeGlobalEvents,
   subscribeWorkspaceEvents,
 } from './services/opencodeApi'
 import { normalizeSessionDirectory, uniqueDirectoriesFromSessions } from './utils/sessionFolders'
 import type { OcMessage, OcTodo } from './types/opencode'
+import type { MessageSendPayload } from './components/MessageInput'
 import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
 import SubtaskDebugPanel from './components/SubtaskDebugPanel'
@@ -290,11 +292,24 @@ function App() {
     })
   }, [linkedSubtaskIndex])
 
-  const handleSendMessage = useCallback(async (text: string) => {
+  const handleSessionTitleCommit = useCallback(
+    async (title: string) => {
+      if (!selectedSessionId) return
+      const dir = sessions.find(s => s.id === selectedSessionId)?.directory
+      await updateSessionTitle(selectedSessionId, title, dir)
+      const list = await getSessions()
+      setSessions(list)
+    },
+    [selectedSessionId, sessions],
+  )
+
+  const handleSendMessage = useCallback(async (payload: MessageSendPayload) => {
     if (!selectedSessionId) return
     const dir = sessions.find(s => s.id === selectedSessionId)?.directory
     // 引导语在 buildUserMessageWithGuidance（cockpit-ui/src/config/harnessGuidance.ts）中配置
-    await sendMessage(selectedSessionId, buildUserMessageWithGuidance(text), dir)
+    await sendMessage(selectedSessionId, buildUserMessageWithGuidance(payload.combinedText), dir, {
+      imageParts: payload.imageParts,
+    })
     const msgs = await getMessages(selectedSessionId, 'POST 发送完成后拉取完整列表', dir)
     setMessages(msgs)
   }, [selectedSessionId, sessions])
@@ -400,6 +415,7 @@ function App() {
               messageListScrollRef={messageScrollRef}
               highlightMessageIndices={highlightMessageIndices}
               onTodoClick={handleTodoClick}
+              onSessionTitleCommit={handleSessionTitleCommit}
             />
           </div>
         </div>

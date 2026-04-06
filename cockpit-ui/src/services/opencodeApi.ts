@@ -84,6 +84,28 @@ export async function createSession(directory?: string): Promise<OcSession> {
   return pick
 }
 
+/** PATCH /session/:id，更新标题（OpenCode：session.update） */
+export async function updateSessionTitle(
+  sessionId: string,
+  title: string,
+  directory?: string,
+): Promise<OcSession> {
+  const url = `${BASE}/session/${sessionId}`
+  console.log(`${LOG.http} PATCH 会话标题`, url, { title: clip(title, 80) }, directory ? { directory } : '')
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: withDirectoryHeaders({ 'Content-Type': 'application/json' }, directory),
+    body: JSON.stringify({ title }),
+  })
+  const bodyText = await res.text()
+  if (!res.ok) {
+    throw new Error(`Failed to update session title: ${res.status} ${bodyText}`)
+  }
+  const data = JSON.parse(bodyText) as OcSession
+  console.log(`${LOG.http} PATCH /session 响应`, data?.id, data?.title)
+  return data
+}
+
 export async function getTodos(sessionId: string, directory?: string): Promise<OcTodo[]> {
   const url = `${BASE}/session/${sessionId}/todo`
   console.log(`${LOG.http} GET todos`, url, directory ? { directory } : '')
@@ -110,10 +132,40 @@ export async function getMessages(sessionId: string, reason?: string, directory?
   return data
 }
 
-export async function sendMessage(sessionId: string, text: string, directory?: string): Promise<void> {
+/** 与 OpenCode POST /session/:id/message 对齐；服务端会为 part 补全 id */
+export type UserMessagePartBody =
+  | { type: 'text'; text: string }
+  | {
+      type: 'image'
+      source: { type: string; media_type: string; data: string }
+    }
+
+/**
+ * 发送用户消息。`text` 为单条 text part（通常已含 harness 引导）；`images` 会先作为 image parts 再跟 text（便于视觉模型）。
+ */
+export async function sendMessage(
+  sessionId: string,
+  text: string,
+  directory?: string,
+  options?: { imageParts?: Array<{ media_type: string; data: string }> },
+): Promise<void> {
   const url = `${BASE}/session/${sessionId}/message`
-  const reqBody = { parts: [{ type: 'text', text }] as const }
-  console.log(`${LOG.http} POST 发送用户消息`, url, { 预览: clip(text, 200) }, directory ? { directory } : '')
+  const imageParts: UserMessagePartBody[] = (options?.imageParts ?? []).map((img) => ({
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: img.media_type,
+      data: img.data,
+    },
+  }))
+  const parts: UserMessagePartBody[] = [...imageParts, { type: 'text', text }]
+  const reqBody = { parts }
+  console.log(
+    `${LOG.http} POST 发送用户消息`,
+    url,
+    { parts: parts.length, 预览: clip(text, 200) },
+    directory ? { directory } : '',
+  )
   const res = await fetch(url, {
     method: 'POST',
     headers: withDirectoryHeaders({ 'Content-Type': 'application/json' }, directory),
