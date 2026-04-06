@@ -87,7 +87,7 @@ Sidebar  MessagePanel  SubtaskDebugPanel → SubtaskCard(s)
 ### 4.1 子任务分组（右侧数据源）
 
 - **`assistantSubtasks = useMemo(() => groupAssistantSubtasks(...), [messages, todosSnapshotAtMessageIndex, todos])`**。
-- 分组规则（简化）：按时间顺序扫 `messages`，以 **user 消息** 切段；在 assistant 段内根据 **todowrite 快照变化**、**step-finish + stop** 等规则 flush 为多个 `AssistantSubtask`（详见 `docs/subtask-grouping.md`）。
+- 分组规则（简化）：以 **user 消息** 切段；在每段 assistant 序列内划分 **planning / execution / wrap_up**（`AssistantSubtask.phase`），**全部**在右栏展示；`planning` **含**写出列表的 todowrite（详见 `docs/subtask-grouping.md`）。
 - **`todosSnapshotAtMessageIndex`**：为解决「历史 todowrite 时刻的 Todo 列表」与当前 `todos` 不一致，对「最后一条 todowrite 所在下标」记录一份 `todos` 快照，供 `todosAfterMessageIndex` 回调使用，从而 **重放 completed diff**。
 
 ### 4.2 右侧卡片内的 Action 流

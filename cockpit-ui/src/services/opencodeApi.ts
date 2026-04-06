@@ -206,6 +206,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+function sseReconnectWarn(label: string, e: unknown): void {
+  const msg = e instanceof Error ? e.message : String(e)
+  console.warn(
+    `${label} 流结束或出错，将重连`,
+    msg,
+    '（TypeError: network error 多为：OpenCode 未启动、VITE 代理/baseURL 不对、HTTPS 混用、或连接被服务端/网络断开）'
+  )
+}
+
 /** 解析 SSE：空行触发一次 dispatch（event 名 + data 拼接） */
 function createSseLineDispatcher(
   onDispatch: (eventName: string, data: string) => void
@@ -311,7 +320,7 @@ export function subscribeGlobalEvents(
         await streamGlobalSse(url, ac.signal, onEvent)
       } catch (e) {
         if (ac.signal.aborted) break
-        console.warn('[OpenCode · SSE] 流结束或出错，将重连', e)
+        sseReconnectWarn('[OpenCode · SSE]', e)
       }
       if (ac.signal.aborted) break
       await sleep(SSE_RECONNECT_MS)
@@ -336,7 +345,7 @@ export function subscribeWorkspaceEvents(onEvent: (event: any) => void): () => v
         await streamGlobalSse(url, ac.signal, onEvent)
       } catch (e) {
         if (ac.signal.aborted) break
-        console.warn('[OpenCode · SSE /event] 流结束或出错，将重连', e)
+        sseReconnectWarn('[OpenCode · SSE /event]', e)
       }
       if (ac.signal.aborted) break
       await sleep(SSE_RECONNECT_MS)

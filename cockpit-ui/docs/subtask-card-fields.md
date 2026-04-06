@@ -33,7 +33,7 @@
 
 ## 2. 涉及的 message 与 part
 
-- **Message：** `AssistantSubtask.assistantMessageIndices` 指向全局 `messages[]` 下标；仅包含 `role === assistant` 的条目（由 `groupAssistantSubtasks` 保证）。
+- **Message：** `AssistantSubtask.assistantMessageIndices` 指向全局 `messages[]` 下标；仅 `role === assistant`。`phase === planning` 时 **含** todowrite；`execution` 时 **不含** 区间两端的 todowrite（见 `subtask-grouping.md`）。
 - **Part：** 每条 `OcMessage.parts` 数组；卡片上展示 **part 总数** `partCount`（所有涉及 message 的 `parts.length` 之和）。
 - **程序化访问：** `getSubtaskMessagesAndParts(subtask, messages)`（`subtaskMetrics.ts`）返回 `{ messageIndex, message, parts }[]`，供后续可视化使用。
 
@@ -128,8 +128,7 @@ total ≈ input + output + reasoning + cache.read + cache.write
 
 **定义：** `AssistantSubtask.todosNewlyCompleted.length`。
 
-**语义：** 与 `subtaskGrouping` **规则 B** 一致——仅当本段因「同一 `content` 从非 `completed` → `completed`」而切段时，该数组非空。  
-**规则 A / C / D** 切段时为空，表示**本段不是「完成 todo」驱动的子任务**，计数为 0。
+**语义：** 与 `groupAssistantSubtasks` 中 **相邻两条 todowrite 快照**（或尾段相对最后 todowrite 与 fallback）的 `diffTodosNewlyCompleted` 一致——仅当存在「同一 `content` 从非 `completed` → `completed`」时该数组非空；否则为 0。
 
 ---
 

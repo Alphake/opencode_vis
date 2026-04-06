@@ -232,6 +232,7 @@ function App() {
         .filter((m): m is OcMessage => m != null)
       return {
         segmentIndex: si,
+        phase: st.phase,
         subtask_id: st.subtask_id,
         todos: st.todos,
         todosNewlyCompleted: st.todosNewlyCompleted,

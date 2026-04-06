@@ -140,27 +140,28 @@ export function diffTodosNewlyCompleted(prev: OcTodo[] | null, next: OcTodo[]): 
   return out
 }
 
+/** 尚有未完成的 todo（含 pending / in_progress） */
+function hasPendingTodos(s: OcTodo[]): boolean {
+  return s.length > 0 && s.some(t => t.status !== 'completed')
+}
+
+/** 列表非空且全部 completed */
+function allTodosCompleted(s: OcTodo[]): boolean {
+  return s.length > 0 && s.every(t => t.status === 'completed')
+}
+
 /**
- * 按顺序扫 messages；**message 为最小单位**（同一条 message 不会拆进两个 subtask）。
- *
- * **切段规则（满足任一即可能产生新 subtask，同条 message 内先处理 todowrite 再处理 step-finish）：**
- *
- * 1. **首次生成 todo 列表**：若此前从未有过 todowrite 快照（`lastTodowriteSnapshot === null`），本条解析出
- *    非空列表时，将 **本条之前** 已累积的 assistant **先** flush 为一段（尚无列表，`todosNewlyCompleted` 空）；
- *    本条留在下一段继续累积。
- * 2. **新 completed**：todowrite 相对上一快照有 **非 completed → completed**（同 content）时，flush 当前段
- *    （含本条），`todosNewlyCompleted` 为这些项；仅其它状态变化则只更新快照、不切段。
- * 3. **step-finish + reason stop**：本条处理完 todowrite 逻辑后，若仍留在当前累积中且含 agent 终止标记，
- *    再 flush 一段（`todosNewlyCompleted` 空）。
- * 4. **user / EOF**：强制 flush 当前累积（`todosNewlyCompleted` 空）。
- *
- * - **todos**：段末快照解析顺序：tool input/metadata/output → resolver → 沿用快照 → fallback。
+ * - **planning**：尚无列表 → 第一次写出列表；或「快照已全部完成」→ 下一次 todowrite（**含**该条 message）。
+ * - **execution**：上一条 todowrite 快照里**仍有未完成**时，到下一次 todowrite 之间的纯 assistant（**不含**两条 todowrite）。
+ * - **wrap_up**：最后一条 todowrite 快照已全部完成，且其后仍有 assistant（收尾输出）。
  */
+export type SubtaskPhase = 'planning' | 'execution' | 'wrap_up'
+
 export interface AssistantSubtask {
   subtask_id: string
-  /** 本段结束时的 todo 列表快照（尽量来自本条 todowrite） */
+  phase: SubtaskPhase
+  /** 本子任务语义上的段末列表（ planning 为段末 todowrite 快照；execution 为后一条 todowrite；wrap_up 为 fallback ） */
   todos: OcTodo[]
-  /** 仅规则 2（新 completed）切段时非空；规则 1/3/4 切段时为空 */
   todosNewlyCompleted: OcTodo[]
   assistantMessageIndices: number[]
 }
@@ -178,6 +179,62 @@ function buildSubtaskId(indices: number[], messages: OcMessage[]): string {
   return `subtask-idx-${first}-${last}`
 }
 
+function resolveSnapshotForSegment(
+  lastIdx: number,
+  messages: OcMessage[],
+  lastTodowriteSnapshot: OcTodo[] | null,
+  resolver: ((index: number) => OcTodo[] | undefined) | undefined,
+  fallback: OcTodo[]
+): OcTodo[] {
+  const lastMsg = messages[lastIdx]!
+  const fromTool = parseTodowriteTodosFromMessage(lastMsg)
+  if (fromTool && fromTool.length > 0) {
+    return fromTool.map(shallowCloneTodo)
+  }
+  const r = resolver?.(lastIdx)
+  if (r !== undefined && r.length > 0) {
+    return r.map(shallowCloneTodo)
+  }
+  if (lastTodowriteSnapshot && lastTodowriteSnapshot.length > 0) {
+    return lastTodowriteSnapshot.map(shallowCloneTodo)
+  }
+  return fallback.map(shallowCloneTodo)
+}
+
+function assistantRangesSplitByUser(messages: OcMessage[]): number[][] {
+  const ranges: number[][] = []
+  let cur: number[] = []
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!
+    if (msg.info.role === 'user') {
+      if (cur.length > 0) ranges.push(cur)
+      cur = []
+      continue
+    }
+    if (msg.info.role === 'assistant') {
+      cur.push(i)
+    }
+  }
+  if (cur.length > 0) ranges.push(cur)
+  return ranges
+}
+
+function collectIndicesInclusive(range: number[], lo: number, hi: number): number[] {
+  const out: number[] = []
+  for (const idx of range) {
+    if (idx >= lo && idx <= hi) out.push(idx)
+  }
+  return out
+}
+
+function collectOpenInterval(range: number[], a: number, b: number): number[] {
+  const out: number[] = []
+  for (const idx of range) {
+    if (idx > a && idx < b) out.push(idx)
+  }
+  return out
+}
+
 export function groupAssistantSubtasks(
   messages: OcMessage[],
   options?: {
@@ -189,91 +246,112 @@ export function groupAssistantSubtasks(
   const fallback = (options?.fallbackSessionTodos ?? []).map(shallowCloneTodo)
 
   const subtasks: AssistantSubtask[] = []
-  let currentIndices: number[] = []
-  /** 最近一次从 todowrite 得到的快照（用于下一段 diff） */
-  let lastTodowriteSnapshot: OcTodo[] | null = null
 
-  const resolveSnapshotForSegment = (lastIdx: number, lastMsg: OcMessage): OcTodo[] => {
-    const fromTool = parseTodowriteTodosFromMessage(lastMsg)
-    if (fromTool && fromTool.length > 0) {
-      return fromTool.map(shallowCloneTodo)
-    }
-    const r = resolver?.(lastIdx)
-    if (r !== undefined && r.length > 0) {
-      return r.map(shallowCloneTodo)
-    }
-    if (lastTodowriteSnapshot && lastTodowriteSnapshot.length > 0) {
-      return lastTodowriteSnapshot.map(shallowCloneTodo)
-    }
-    return fallback.map(shallowCloneTodo)
-  }
+  for (const range of assistantRangesSplitByUser(messages)) {
+    const rangeSubtasks: AssistantSubtask[] = []
 
-  const pushForcedSubtask = (indices: number[]) => {
-    if (indices.length === 0) return
-    const lastIdx = indices[indices.length - 1]!
-    const lastMsg = messages[lastIdx]!
-    const todosSnapshot = resolveSnapshotForSegment(lastIdx, lastMsg)
-    if (isTodoWriteMessage(lastMsg) && todosSnapshot.length > 0) {
-      lastTodowriteSnapshot = todosSnapshot.map(shallowCloneTodo)
+    const push = (
+      indices: number[],
+      phase: SubtaskPhase,
+      todos: OcTodo[],
+      newly: OcTodo[]
+    ) => {
+      if (indices.length === 0) return
+      rangeSubtasks.push({
+        subtask_id: buildSubtaskId(indices, messages),
+        phase,
+        todos: todos.map(shallowCloneTodo),
+        todosNewlyCompleted: newly.map(shallowCloneTodo),
+        assistantMessageIndices: indices,
+      })
     }
 
-    subtasks.push({
-      subtask_id: buildSubtaskId(indices, messages),
-      todos: todosSnapshot,
-      todosNewlyCompleted: [],
-      assistantMessageIndices: indices,
-    })
-  }
+    const twIndices: number[] = []
+    for (const idx of range) {
+      const list = parseTodowriteTodosFromMessage(messages[idx]!)
+      if (list && list.length > 0) twIndices.push(idx)
+    }
 
-  const flushForced = () => {
-    if (currentIndices.length === 0) return
-    const indices = [...currentIndices]
-    currentIndices = []
-    pushForcedSubtask(indices)
-  }
-
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!
-    if (msg.info.role === 'user') {
-      flushForced()
+    if (twIndices.length === 0) {
+      push([...range], 'planning', fallback, [])
+      subtasks.push(...rangeSubtasks)
       continue
     }
-    if (msg.info.role !== 'assistant') continue
 
-    currentIndices.push(i)
+    let lastTodowriteSnapshot: OcTodo[] | null = null
+    const snapAtTw = new Map<number, OcTodo[]>()
+    for (const idx of twIndices) {
+      const snap = resolveSnapshotForSegment(idx, messages, lastTodowriteSnapshot, resolver, fallback)
+      snapAtTw.set(idx, snap)
+      lastTodowriteSnapshot = snap
+    }
 
-    if (isTodoWriteMessage(msg)) {
-      const next = resolveSnapshotForSegment(i, msg)
+    /** 一次划清「前期调研与计划生成」：从当前 cursor 起，沿 todowrite 向前跳过「快照尚无未完成 todo」的若干条，直到第一次出现 hasPending，或全部跳过则收到最后一条 tw */
+    let twScan = 0
+    let assistantCursor = range[0]!
 
-      if (next.length > 0 && lastTodowriteSnapshot === null) {
-        if (currentIndices.length > 1) {
-          const pre = currentIndices.slice(0, -1)
-          currentIndices = [i]
-          pushForcedSubtask(pre)
-        }
+    while (twScan < twIndices.length) {
+      let k = twScan
+      while (k < twIndices.length && !hasPendingTodos(snapAtTw.get(twIndices[k]!)!)) {
+        k++
+      }
+      const endTw =
+        k < twIndices.length ? twIndices[k]! : twIndices[twIndices.length - 1]!
+
+      const planningIndices = collectIndicesInclusive(range, assistantCursor, endTw)
+      if (planningIndices.length > 0) {
+        const twInPlan = twIndices.filter(tw => tw >= assistantCursor && tw <= endTw)
+        const firstTw = twInPlan[0]!
+        const lastTwInPlan = twInPlan[twInPlan.length - 1]!
+        const snapFirst = snapAtTw.get(firstTw)!
+        const snapLast = snapAtTw.get(lastTwInPlan)!
+        const newly = diffTodosNewlyCompleted(snapFirst, snapLast)
+        push(planningIndices, 'planning', snapLast, newly)
       }
 
-      if (next.length > 0) {
-        const newly = diffTodosNewlyCompleted(lastTodowriteSnapshot, next)
-        if (newly.length > 0) {
-          const indices = [...currentIndices]
-          currentIndices = []
-          subtasks.push({
-            subtask_id: buildSubtaskId(indices, messages),
-            todos: next.map(shallowCloneTodo),
-            todosNewlyCompleted: newly.map(shallowCloneTodo),
-            assistantMessageIndices: indices,
-          })
-        }
-        lastTodowriteSnapshot = next.map(shallowCloneTodo)
+      if (k >= twIndices.length) {
+        assistantCursor = endTw + 1
+        break
+      }
+
+      const twK = twIndices[k]!
+      if (k + 1 >= twIndices.length) {
+        assistantCursor = twK + 1
+        break
+      }
+
+      const twNext = twIndices[k + 1]!
+      const between = collectOpenInterval(range, twK, twNext)
+      if (between.length > 0) {
+        const snapA = snapAtTw.get(twK)!
+        const snapB = snapAtTw.get(twNext)!
+        push(between, 'execution', snapB, diffTodosNewlyCompleted(snapA, snapB))
+      }
+
+      twScan = k + 1
+      assistantCursor = twNext + 1
+    }
+
+    const lastTw = twIndices[twIndices.length - 1]!
+    const snapLast = snapAtTw.get(lastTw)!
+    const trailing: number[] = []
+    for (const idx of range) {
+      if (idx >= assistantCursor) trailing.push(idx)
+    }
+    if (trailing.length > 0) {
+      const tailTodos = fallback.map(shallowCloneTodo)
+      const newly = diffTodosNewlyCompleted(snapLast, tailTodos)
+      if (hasPendingTodos(snapLast)) {
+        push(trailing, 'execution', tailTodos, newly)
+      } else if (allTodosCompleted(snapLast)) {
+        push(trailing, 'wrap_up', tailTodos, newly)
+      } else {
+        push(trailing, 'execution', tailTodos, newly)
       }
     }
 
-    if (messageHasAgentStepFinishStop(msg) && currentIndices.length > 0) {
-      flushForced()
-    }
+    subtasks.push(...rangeSubtasks)
   }
-  flushForced()
 
   return subtasks
 }
