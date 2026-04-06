@@ -133,12 +133,18 @@ function countPartsInMessages(messages: OcMessage[]): number {
   return n
 }
 
-/** 子任务标题：优先「新完成的 todo」摘要，否则首条 assistant 首行 text，否则默认 */
+/** 子任务标题：阶段固定名 → 「新完成的 todo」→ 首条 text → 默认 */
 export function deriveSubtaskTitle(
   st: AssistantSubtask,
   messages: OcMessage[],
   displayIndex: number
 ): string {
+  if (st.phase === 'planning') {
+    return '前期调研与计划生成'
+  }
+  if (st.phase === 'wrap_up') {
+    return '总结归纳与结果输出'
+  }
   if (st.todosNewlyCompleted.length > 0) {
     const first = st.todosNewlyCompleted[0]!
     const head = first.content.length > 36 ? `${first.content.slice(0, 36)}…` : first.content
