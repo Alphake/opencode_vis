@@ -6,13 +6,33 @@ export function normalizeTodoContent(content: string): string {
 }
 
 /**
- * 在子任务快照 `todos` 中查找与当前待办文案匹配的段。
- * 从**后往前**取第一个命中段，表示该待办最近一次出现在哪段子任务快照里。
+ * 子任务选中时：execution 且子任务上已有 **linkedTodoIds** 时，用 Todo 行高亮 + 连到 Todo 面板；否则（planning / wrap_up 或无 id）走消息高亮。
+ */
+export function subtaskShouldUseTodoLink(st: AssistantSubtask): boolean {
+  return st.phase === 'execution' && st.linkedTodoIds.length > 0
+}
+
+/** 与右侧子任务、连线绑定的 todo id 集合 */
+export function collectTodoLinkIdsForSubtask(st: AssistantSubtask): Set<string> {
+  return new Set(st.linkedTodoIds)
+}
+
+/**
+ * 在子任务中查找与当前待办匹配的段：有 id 时先 **linkedTodoIds**（本段新完成高亮），再 **todos** 快照；
+ * 无 id 则按 **content**。从后往前取第一个命中。
  */
 export function findSubtaskIndexForTodo(
   assistantSubtasks: AssistantSubtask[],
   todo: OcTodo
 ): number | null {
+  const id = todo.id?.trim()
+  if (id) {
+    for (let si = assistantSubtasks.length - 1; si >= 0; si--) {
+      const st = assistantSubtasks[si]!
+      if (st.linkedTodoIds.includes(id)) return si
+      if (st.todos.some(t => t.id?.trim() === id)) return si
+    }
+  }
   const key = normalizeTodoContent(todo.content)
   if (!key) return null
   for (let si = assistantSubtasks.length - 1; si >= 0; si--) {

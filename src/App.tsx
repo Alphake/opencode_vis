@@ -7,11 +7,13 @@ import {
   sendMessage,
   createSession,
   updateSessionTitle,
+  replyToQuestion,
+  rejectQuestion,
   subscribeGlobalEvents,
   subscribeWorkspaceEvents,
 } from './services/opencodeApi'
 import { normalizeSessionDirectory, uniqueDirectoriesFromSessions } from './utils/sessionFolders'
-import type { OcMessage, OcTodo } from './types/opencode'
+import type { OcMessage, OcPendingQuestionRequest, OcTodo } from './types/opencode'
 import type { MessageSendPayload } from './components/MessageInput'
 import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
@@ -19,7 +21,15 @@ import SubtaskDebugPanel from './components/SubtaskDebugPanel'
 import SubtaskMessageConnector from './components/SubtaskMessageConnector'
 import { groupAssistantSubtasks, isTodoWriteMessage } from './utils/subtaskGrouping'
 import { buildMappedActionsFromMessages } from './utils/actionMapping'
-import { buildMessageHighlightSet, findSubtaskIndexForTodo } from './utils/subtaskLinkage'
+import {
+  findSubtaskIndexForTodo,
+  subtaskShouldUseTodoLink,
+} from './utils/subtaskLinkage'
+import {
+  archivedCompletedList,
+  buildSessionTodoModel,
+  getLatestTodowriteBatchProgress,
+} from './utils/todoRegistry'
 import { buildUserMessageWithGuidance } from './config/harnessGuidance'
 
 /** 每条「含 todo 写入」的 message 下标 → 当时同步到的 todos（用于重放 diff） */
@@ -72,8 +82,13 @@ function App() {
   const [apiConnected, setApiConnected] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [linkedSubtaskIndex, setLinkedSubtaskIndex] = useState<number | null>(null)
+  /** 递增以驱动 Todo 面板在选中子任务时自动展开到正确分区 */
+  const [todoPanelRevealGeneration, setTodoPanelRevealGeneration] = useState(0)
   const [selectedDirectory, setSelectedDirectory] = useState<string>('')
   const [creatingSession, setCreatingSession] = useState(false)
+  /** 按 sessionID 保存待作答的 question 请求（SSE `question.asked`） */
+  const [pendingQuestions, setPendingQuestions] = useState<Record<string, OcPendingQuestionRequest>>({})
+  const [questionSubmitting, setQuestionSubmitting] = useState(false)
 
   const directories = useMemo(() => {
     const u = uniqueDirectoriesFromSessions(sessions)
@@ -88,9 +103,16 @@ function App() {
 
   const linkAreaRef = useRef<HTMLDivElement>(null)
   const messageScrollRef = useRef<HTMLDivElement>(null)
+  const todoPanelScrollRef = useRef<HTMLDivElement>(null)
   const subtaskScrollRef = useRef<HTMLDivElement>(null)
   const sessionsRef = useRef(sessions)
   sessionsRef.current = sessions
+
+  const selectedSessionIdRef = useRef(selectedSessionId)
+  selectedSessionIdRef.current = selectedSessionId
+
+  const pendingQuestionsRef = useRef(pendingQuestions)
+  pendingQuestionsRef.current = pendingQuestions
 
   const activeSessionDirectory = useMemo(
     () => sessions.find(s => s.id === selectedSessionId)?.directory,
@@ -140,6 +162,49 @@ function App() {
       const payload = event?.payload || event
       const eventType = payload?.type
       if (!eventType) return
+
+      if (eventType === 'question.asked') {
+        const props = payload.properties as Partial<OcPendingQuestionRequest> | undefined
+        if (props?.id && props.sessionID && Array.isArray(props.questions)) {
+          const root = event as { directory?: string }
+          const dir = typeof root.directory === 'string' ? root.directory : undefined
+          setPendingQuestions((prev) => ({
+            ...prev,
+            [props.sessionID!]: {
+              id: props.id!,
+              sessionID: props.sessionID!,
+              questions: props.questions as OcPendingQuestionRequest['questions'],
+              tool: props.tool,
+              directory: dir,
+            },
+          }))
+        }
+      }
+
+      if (eventType === 'question.replied' || eventType === 'question.rejected') {
+        const props = payload.properties as { sessionID?: string; requestID?: string } | undefined
+        if (props?.sessionID && props?.requestID) {
+          setPendingQuestions((prev) => {
+            const cur = prev[props.sessionID!]
+            if (cur?.id === props.requestID) {
+              const { [props.sessionID!]: _, ...rest } = prev
+              return rest
+            }
+            return prev
+          })
+        }
+      }
+
+      if (eventType.startsWith('question')) {
+        const props = payload.properties as { sessionID?: string } | undefined
+        const sid = props?.sessionID
+        if (sid && sid === selectedSessionIdRef.current) {
+          const dir = sessionsRef.current.find((s) => s.id === sid)?.directory
+          getMessages(sid, `SSE:${eventType}`, dir)
+            .then(setMessages)
+            .catch((err) => console.warn('[SSE] Failed to refresh messages:', err))
+        }
+      }
 
       if (eventType.startsWith('message') || eventType.startsWith('session')) {
         console.log('[OpenCode · App] SSE 事件触发刷新消息列表', eventType)
@@ -214,15 +279,68 @@ function App() {
     }))
   }, [messages, todos, selectedSessionId, loading])
 
+  const sessionTodoModel = useMemo(
+    () => buildSessionTodoModel(messages, todos, todosSnapshotAtMessageIndex),
+    [messages, todos, todosSnapshotAtMessageIndex],
+  )
+
+  const archivedForPanel = useMemo(
+    () => archivedCompletedList(sessionTodoModel.completedArchive),
+    [sessionTodoModel.completedArchive],
+  )
+
+  const latestTodowriteBatchProgress = useMemo(
+    () => getLatestTodowriteBatchProgress(sessionTodoModel, archivedForPanel),
+    [sessionTodoModel, archivedForPanel],
+  )
+
   const assistantSubtasks = useMemo(() => {
+    const fb =
+      sessionTodoModel.latestActive.length > 0 ? sessionTodoModel.latestActive : todos
     return groupAssistantSubtasks(messages, {
+      canonicalTodosAtMessageIndex(i) {
+        const c = sessionTodoModel.canonicalAtMessageIndex.get(i)
+        return c !== undefined && c.length > 0 ? c : undefined
+      },
       todosAfterMessageIndex(i) {
         const snap = todosSnapshotAtMessageIndex[String(i)]
         return snap !== undefined ? snap : undefined
       },
-      fallbackSessionTodos: todos,
+      fallbackSessionTodos: fb,
     })
-  }, [messages, todosSnapshotAtMessageIndex, todos])
+  }, [messages, todosSnapshotAtMessageIndex, todos, sessionTodoModel])
+
+  /**
+   * 右栏子任务面板展示规则：
+   * - 第一次 todowrite 之前（前期调研）隐藏；
+   * - 一旦出现 todowrite（即 todo 已生成），该段及其后的子任务段持续展示并累计动作；
+   * - 因此 pending -> in_progress 也会继续显示为进行中的子任务（不会被丢弃）。
+   */
+  const visibleSubtasks = useMemo(
+    () => {
+      let todoStarted = false
+      return assistantSubtasks
+        .map((subtask, sourceIndex) => ({ subtask, sourceIndex }))
+        .filter(({ subtask }) => {
+          const hasTodowrite = subtask.assistantMessageIndices.some((i) => {
+            const msg = messages[i]
+            return msg ? isTodoWriteMessage(msg) : false
+          })
+          if (hasTodowrite) todoStarted = true
+          if (todoStarted) return true
+          return subtask.linkedTodoIds.length > 0
+        })
+    },
+    [assistantSubtasks, messages],
+  )
+
+  /** execution 子任务：用 todo id 高亮 */
+  const linkedTodoIds = useMemo(() => {
+    if (linkedSubtaskIndex === null) return null
+    const st = assistantSubtasks[linkedSubtaskIndex]
+    if (!st || !subtaskShouldUseTodoLink(st)) return null
+    return new Set(st.linkedTodoIds)
+  }, [linkedSubtaskIndex, assistantSubtasks])
 
   useEffect(() => {
     if (messages.length === 0) return
@@ -236,6 +354,7 @@ function App() {
         subtask_id: st.subtask_id,
         todos: st.todos,
         todosNewlyCompleted: st.todosNewlyCompleted,
+        linkedTodoIds: st.linkedTodoIds,
         assistantMessageIndices: st.assistantMessageIndices,
         messages: st.assistantMessageIndices.map(i => formatMessageForConsole(messages[i], i)),
         flowActions: buildMappedActionsFromMessages(segmentMsgs),
@@ -244,29 +363,40 @@ function App() {
     console.log('[AssistantSubtasks]', payload)
   }, [assistantSubtasks, messages])
 
-  const highlightMessageIndices = useMemo(() => {
-    if (linkedSubtaskIndex === null) return null
-    const st = assistantSubtasks[linkedSubtaskIndex]
-    if (!st) return null
-    return buildMessageHighlightSet(st, messages)
-  }, [linkedSubtaskIndex, assistantSubtasks, messages])
-
   const toggleSubtaskLink = useCallback((si: number) => {
     setLinkedSubtaskIndex(prev => (prev === si ? null : si))
   }, [])
 
   const handleTodoClick = useCallback(
     (todo: OcTodo) => {
-      const si = findSubtaskIndexForTodo(assistantSubtasks, todo)
-      if (si === null) return
-      setLinkedSubtaskIndex(si)
+      const preferred = findSubtaskIndexForTodo(assistantSubtasks, todo)
+      if (
+        preferred !== null &&
+        subtaskShouldUseTodoLink(assistantSubtasks[preferred]!)
+      ) {
+        setLinkedSubtaskIndex(preferred)
+        return
+      }
+      const id = todo.id?.trim()
+      if (!id) return
+      const fallback = visibleSubtasks.find(({ subtask }) =>
+        subtask.linkedTodoIds.includes(id)
+      )
+      if (fallback) setLinkedSubtaskIndex(fallback.sourceIndex)
     },
-    [assistantSubtasks]
+    [assistantSubtasks, visibleSubtasks]
   )
 
   useEffect(() => {
     setLinkedSubtaskIndex(null)
+    setTodoPanelRevealGeneration(0)
   }, [selectedSessionId])
+
+  useEffect(() => {
+    if (linkedSubtaskIndex !== null) {
+      setTodoPanelRevealGeneration(g => g + 1)
+    }
+  }, [linkedSubtaskIndex])
 
   useEffect(() => {
     if (linkedSubtaskIndex !== null && linkedSubtaskIndex >= assistantSubtasks.length) {
@@ -275,14 +405,39 @@ function App() {
   }, [linkedSubtaskIndex, assistantSubtasks.length])
 
   useEffect(() => {
-    if (highlightMessageIndices === null || highlightMessageIndices.size === 0) return
-    const first = Math.min(...highlightMessageIndices)
+    if (linkedTodoIds && linkedTodoIds.size > 0) {
+      let inner = 0
+      const outer = requestAnimationFrame(() => {
+        inner = requestAnimationFrame(() => {
+          const scroll = todoPanelScrollRef.current
+          if (!scroll) return
+          for (const el of scroll.querySelectorAll('[data-todo-link-id]')) {
+            const k = el.getAttribute('data-todo-link-id')?.trim() ?? ''
+            if (k && linkedTodoIds.has(k)) {
+              el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+              break
+            }
+          }
+        })
+      })
+      return () => {
+        cancelAnimationFrame(outer)
+        cancelAnimationFrame(inner)
+      }
+    }
+  }, [linkedSubtaskIndex, linkedTodoIds, todoPanelRevealGeneration])
+
+  useEffect(() => {
+    if (linkedSubtaskIndex === null) return
+    const st = assistantSubtasks[linkedSubtaskIndex]
+    if (!st || st.assistantMessageIndices.length === 0) return
+    const first = Math.min(...st.assistantMessageIndices)
     requestAnimationFrame(() => {
       messageScrollRef.current
         ?.querySelector(`[data-message-index="${first}"]`)
         ?.scrollIntoView({ block: 'center', behavior: 'smooth' })
     })
-  }, [linkedSubtaskIndex, highlightMessageIndices])
+  }, [linkedSubtaskIndex, assistantSubtasks])
 
   useEffect(() => {
     if (linkedSubtaskIndex === null) return
@@ -303,6 +458,67 @@ function App() {
     },
     [selectedSessionId, sessions],
   )
+
+  const handleQuestionReply = useCallback(async (answers: string[][]) => {
+    const pq = pendingQuestionsRef.current[selectedSessionId]
+    if (!pq) return
+    setQuestionSubmitting(true)
+    try {
+      await replyToQuestion(pq.id, answers, pq.directory)
+      setPendingQuestions((prev) => {
+        const { [pq.sessionID]: _, ...rest } = prev
+        return rest
+      })
+      const dir = sessionsRef.current.find((s) => s.id === selectedSessionId)?.directory
+      const msgs = await getMessages(selectedSessionId, 'question 回复后', dir)
+      setMessages(msgs)
+    } catch (e) {
+      console.error('[question reply]', e)
+      window.alert(
+        '提交答案失败。请确认 OpenCode 已支持 POST /question/{requestID}/reply（OpenCode SDK v2 与 opencode serve 新版本提供该路由）。',
+      )
+    } finally {
+      setQuestionSubmitting(false)
+    }
+  }, [selectedSessionId])
+
+  const handleQuestionReject = useCallback(async () => {
+    const pq = pendingQuestionsRef.current[selectedSessionId]
+    if (!pq) return
+    setQuestionSubmitting(true)
+    try {
+      await rejectQuestion(pq.id, pq.directory)
+      setPendingQuestions((prev) => {
+        const { [pq.sessionID]: _, ...rest } = prev
+        return rest
+      })
+      const dir = sessionsRef.current.find((s) => s.id === selectedSessionId)?.directory
+      const msgs = await getMessages(selectedSessionId, 'question 拒绝后', dir)
+      setMessages(msgs)
+    } catch (e) {
+      console.error('[question reject]', e)
+      window.alert('操作失败。')
+    } finally {
+      setQuestionSubmitting(false)
+    }
+  }, [selectedSessionId])
+
+  /** 消息气泡内联 question 提交/跳过后，与底部面板一致：刷新消息并清掉同会话的 SSE pending */
+  const handleQuestionAnswered = useCallback(async () => {
+    if (!selectedSessionId) return
+    const dir = sessionsRef.current.find((s) => s.id === selectedSessionId)?.directory
+    try {
+      const msgs = await getMessages(selectedSessionId, '内联 question 提交后', dir)
+      setMessages(msgs)
+    } catch (e) {
+      console.error('[handleQuestionAnswered]', e)
+    }
+    setPendingQuestions((prev) => {
+      const next = { ...prev }
+      delete next[selectedSessionId]
+      return next
+    })
+  }, [selectedSessionId])
 
   const handleSendMessage = useCallback(async (payload: MessageSendPayload) => {
     if (!selectedSessionId) return
@@ -407,16 +623,29 @@ function App() {
           >
             <MessagePanel
               messages={messages}
-              todos={todos}
+              latestTodos={sessionTodoModel.latestActive}
+              archivedTodos={archivedForPanel}
+              latestTodowriteBatchProgress={latestTodowriteBatchProgress}
               loading={loading}
               sessionId={selectedSessionId}
               sessionTitle={selectedSession?.title}
               onRefresh={() => loadSessionData(selectedSessionId, activeSessionDirectory)}
               onSendMessage={handleSendMessage}
               messageListScrollRef={messageScrollRef}
-              highlightMessageIndices={highlightMessageIndices}
+              todoPanelScrollRef={todoPanelScrollRef}
+              highlightMessageIndices={null}
+              highlightTodoIds={linkedTodoIds}
+              todoPanelRevealGeneration={todoPanelRevealGeneration}
               onTodoClick={handleTodoClick}
               onSessionTitleCommit={handleSessionTitleCommit}
+              pendingQuestion={
+                selectedSessionId ? pendingQuestions[selectedSessionId] ?? null : null
+              }
+              onQuestionReply={handleQuestionReply}
+              onQuestionReject={handleQuestionReject}
+              questionSubmitting={questionSubmitting}
+              sessionDirectory={activeSessionDirectory}
+              onQuestionAnswered={handleQuestionAnswered}
             />
           </div>
         </div>
@@ -457,7 +686,7 @@ function App() {
           >
             <SubtaskDebugPanel
               messages={messages}
-              assistantSubtasks={assistantSubtasks}
+              visibleSubtasks={visibleSubtasks}
               linkedSubtaskIndex={linkedSubtaskIndex}
               onSelectSubtask={toggleSubtaskLink}
               listScrollRef={subtaskScrollRef}
@@ -467,10 +696,10 @@ function App() {
 
         <SubtaskMessageConnector
           containerRef={linkAreaRef}
-          messageScrollRef={messageScrollRef}
+          todoPanelScrollRef={todoPanelScrollRef}
           subtaskScrollRef={subtaskScrollRef}
           subtaskIndex={linkedSubtaskIndex}
-          messageIndices={highlightMessageIndices}
+          linkedTodoIds={linkedTodoIds}
         />
       </div>
     </div>

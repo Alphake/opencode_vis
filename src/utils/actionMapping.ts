@@ -51,6 +51,11 @@ function durationForReasoning(part: { time?: { start?: number; end?: number }; t
 function durationForTool(part: ToolPart, message: OcMessage): number {
   const st = part.state?.status
   if (st === 'running') return 0
+  const start = part.state?.time?.start
+  const end = part.state?.time?.end
+  if (typeof start === 'number' && typeof end === 'number' && end >= start) {
+    return Math.min(120_000, end - start)
+  }
   const created = message.info.time?.created ?? 0
   const completed = message.info.time?.completed
   if (typeof completed === 'number' && completed > created) {
@@ -60,6 +65,19 @@ function durationForTool(part: ToolPart, message: OcMessage): number {
   const inp = part.state?.input
   const inpStr = inp ? JSON.stringify(inp) : ''
   return Math.min(60_000, 80 + estimateTokensFromStrings(out, inpStr) * 30)
+}
+
+function parseToolError(errorRaw?: string): { name?: string; message?: string } {
+  const text = (errorRaw ?? '').trim()
+  if (!text) return {}
+  const firstColon = text.indexOf(':')
+  if (firstColon <= 0) return { name: text, message: text }
+  const name = text.slice(0, firstColon).trim()
+  const message = text.slice(firstColon + 1).trim()
+  return {
+    name: name || text,
+    message: message || text,
+  }
 }
 
 function durationForText(text: string): number {
@@ -172,17 +190,21 @@ function partToMappedAction(
       const inp = part.state?.input
       const inpStr = inp ? JSON.stringify(inp) : ''
       const outStr = part.state?.output ?? ''
+      const errStr = part.state?.error ?? ''
+      const parsedErr = parseToolError(errStr)
       return {
         actionType: mappedType,
         status: toolStatusToActionStatus(part.state?.status),
         durationMs: durationForTool(part, message),
-        tokenEstimate: estimateTokensFromStrings(inpStr, outStr),
+        tokenEstimate: estimateTokensFromStrings(inpStr, outStr, errStr),
         sortTime,
         source: 'part',
         messageID,
         partIndex,
         messageIndex,
         detail: part.tool,
+        errorName: parsedErr.name,
+        errorMessage: parsedErr.message,
       }
     }
     default:

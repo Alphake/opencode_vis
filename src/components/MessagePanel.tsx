@@ -1,13 +1,19 @@
 import { useState, useEffect, type RefObject } from 'react'
-import type { OcMessage, OcTodo } from '../types/opencode'
+import type { OcMessage, OcPendingQuestionRequest, OcTodo } from '../types/opencode'
+import type { CanonicalTodo, LatestTodowriteBatchProgress } from '../utils/todoRegistry'
 import MessageBubble from './MessageBubble'
 import TodoPanel from './TodoPanel'
 import MessageInput, { type MessageSendPayload } from './MessageInput'
+import QuestionPromptPanel from './QuestionPromptPanel'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
+import { messagesHaveOpenQuestionWithInput } from '../utils/questionPart'
 
 interface MessagePanelProps {
   messages: OcMessage[]
-  todos: OcTodo[]
+  latestTodos: CanonicalTodo[]
+  archivedTodos: CanonicalTodo[]
+  /** 最近一条 todowrite 快照对应的「本批」进度；无快照时 null */
+  latestTodowriteBatchProgress: LatestTodowriteBatchProgress | null
   loading: boolean
   sessionId: string
   sessionTitle?: string
@@ -15,25 +21,56 @@ interface MessagePanelProps {
   onSendMessage: (payload: MessageSendPayload) => Promise<void>
   /** 可滚动消息列表容器 ref（供联动连线计算） */
   messageListScrollRef?: RefObject<HTMLDivElement | null>
-  /** 与高亮子任务关联的消息下标 */
+  /** Todo 列表面板滚动容器（与子任务连线时定位高亮行） */
+  todoPanelScrollRef?: RefObject<HTMLDivElement | null>
+  /** 与高亮子任务关联的消息下标（planning / wrap_up 等） */
   highlightMessageIndices?: Set<number> | null
+  /** 与高亮子任务关联的 todo id（execution 时优先于消息高亮） */
+  highlightTodoIds?: Set<string> | null
+  /** 选中子任务时递增，驱动待办面板自动展开到对应分区 */
+  todoPanelRevealGeneration?: number
   onTodoClick?: (todo: OcTodo) => void
   /** 重命名当前会话标题（PATCH OpenCode） */
   onSessionTitleCommit?: (title: string) => Promise<void>
+  /** OpenCode question 工具：待作答请求（来自 SSE question.asked） */
+  pendingQuestion?: OcPendingQuestionRequest | null
+  onQuestionReply?: (answers: string[][]) => Promise<void>
+  onQuestionReject?: () => Promise<void>
+  questionSubmitting?: boolean
+  /** 当前会话工作区目录（x-opencode-directory），question 内联提交需要 */
+  sessionDirectory?: string
+  /** 消息内 question 工具提交成功后刷新列表 */
+  onQuestionAnswered?: () => Promise<void>
 }
 
 export default function MessagePanel({
   messages,
-  todos,
+  latestTodos,
+  archivedTodos,
+  latestTodowriteBatchProgress,
   loading,
   sessionId,
   sessionTitle,
   onSendMessage,
   messageListScrollRef,
+  todoPanelScrollRef,
   highlightMessageIndices,
+  highlightTodoIds,
+  todoPanelRevealGeneration,
   onTodoClick,
   onSessionTitleCommit,
+  pendingQuestion,
+  onQuestionReply,
+  onQuestionReject,
+  questionSubmitting,
+  sessionDirectory,
+  onQuestionAnswered,
 }: MessagePanelProps) {
+  const hasInlineQuestion = messagesHaveOpenQuestionWithInput(messages)
+  const blockComposerForQuestion =
+    hasInlineQuestion ||
+    Boolean(pendingQuestion && pendingQuestion.sessionID === sessionId)
+
   // 获取当前 agent 和模型信息（从最后一条 assistant message）
   const lastAssistantMsg = [...messages].reverse().find(m => m.info.role === 'assistant')
   const agentName = lastAssistantMsg?.info.agent || null
@@ -107,25 +144,51 @@ export default function MessagePanel({
                   transition: 'background 0.15s ease, outline 0.15s ease',
                 }}
               >
-                <MessageBubble message={msg} isLastInTurn={isLastMessageInTurn(messages, idx)} />
+                <MessageBubble
+                  message={msg}
+                  isLastInTurn={isLastMessageInTurn(messages, idx)}
+                  sessionDirectory={sessionDirectory}
+                  onQuestionAnswered={onQuestionAnswered}
+                />
               </div>
             )
           })
         )}
       </div>
 
-      {/* Todo Panel (紧贴消息区域) */}
-      {todos.length > 0 && (
+      {/* Todo Panel：历次快照 + 当前 API 兜底 */}
+      {(latestTodos.length > 0 || archivedTodos.length > 0) && (
         <div style={{ flexShrink: 0 }}>
-          <TodoPanel todos={todos} onTodoClick={onTodoClick} />
+          <TodoPanel
+            latestActive={latestTodos}
+            archivedCompleted={archivedTodos}
+            latestTodowriteBatchProgress={latestTodowriteBatchProgress}
+            highlightTodoIds={highlightTodoIds}
+            todoPanelRevealGeneration={todoPanelRevealGeneration}
+            onTodoClick={onTodoClick}
+            listScrollRef={todoPanelScrollRef}
+          />
         </div>
+      )}
+
+      {pendingQuestion &&
+        pendingQuestion.sessionID === sessionId &&
+        onQuestionReply &&
+        !hasInlineQuestion && (
+        <QuestionPromptPanel
+          request={pendingQuestion}
+          disabled={loading}
+          submitting={questionSubmitting}
+          onReply={onQuestionReply}
+          onReject={onQuestionReject}
+        />
       )}
 
       {/* Message Input (直接贴着 todo 或消息) */}
       <div style={{ flexShrink: 0 }}>
         <MessageInput
           onSend={onSendMessage}
-          disabled={!sessionId || loading}
+          disabled={!sessionId || loading || questionSubmitting || blockComposerForQuestion}
           sessionId={sessionId}
           agentName={agentName}
           modelName={modelName}

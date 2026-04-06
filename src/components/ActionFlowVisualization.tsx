@@ -99,6 +99,12 @@ function buildActionTooltipHtml(act: MappedAction & { row: number }): string {
   if (act.detail?.trim()) {
     lines.push(`<strong>Detail</strong>: ${escapeHtml(act.detail.trim())}`)
   }
+  if (act.errorName?.trim()) {
+    lines.push(`<strong>Error Name</strong>: ${escapeHtml(act.errorName.trim())}`)
+  }
+  if (act.errorMessage?.trim()) {
+    lines.push(`<strong>Error</strong>: ${escapeHtml(act.errorMessage.trim())}`)
+  }
   return lines.join('<br/>')
 }
 
