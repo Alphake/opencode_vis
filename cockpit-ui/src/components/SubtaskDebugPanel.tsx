@@ -5,7 +5,7 @@ import SubtaskCard from './SubtaskCard'
 
 interface SubtaskDebugPanelProps {
   messages: OcMessage[]
-  assistantSubtasks: AssistantSubtask[]
+  visibleSubtasks: Array<{ subtask: AssistantSubtask; sourceIndex: number }>
   linkedSubtaskIndex: number | null
   onSelectSubtask: (index: number) => void
   listScrollRef?: RefObject<HTMLDivElement | null>
@@ -13,7 +13,7 @@ interface SubtaskDebugPanelProps {
 
 export default function SubtaskDebugPanel({
   messages,
-  assistantSubtasks,
+  visibleSubtasks,
   linkedSubtaskIndex,
   onSelectSubtask,
   listScrollRef,
@@ -38,17 +38,18 @@ export default function SubtaskDebugPanel({
           lineHeight: 1.45,
         }}
       >
-        {assistantSubtasks.length === 0 ? (
-          <span style={{ color: '#AAA', fontSize: 11 }}>暂无 assistant 消息</span>
+        {visibleSubtasks.length === 0 ? (
+          <span style={{ color: '#AAA', fontSize: 11 }}>暂无已进入 Todo 阶段的子任务</span>
         ) : (
-          assistantSubtasks.map((st, si) => (
+          visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => (
             <SubtaskCard
               key={st.subtask_id}
               subtask={st}
               messages={messages}
               displayIndex={si}
-              isLinked={linkedSubtaskIndex === si}
-              onSelectSubtask={() => onSelectSubtask(si)}
+              cardIndex={sourceIndex}
+              isLinked={linkedSubtaskIndex === sourceIndex}
+              onSelectSubtask={() => onSelectSubtask(sourceIndex)}
             />
           ))
         )}

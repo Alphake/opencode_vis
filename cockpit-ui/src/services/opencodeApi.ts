@@ -191,6 +191,68 @@ export async function getDiff(sessionId: string): Promise<any[]> {
   return res.json()
 }
 
+/**
+ * 回复 OpenCode `question` 工具（SDK v2：`POST /question/{requestID}/reply`，body: `{ answers }`）。
+ * `answers` 与 `questions` 数组顺序一致；每题为所选 option 的 `label` 组成的数组。
+ */
+export async function replyToQuestion(
+  requestId: string,
+  answers: string[][],
+  directory?: string,
+): Promise<void> {
+  const url = `${BASE}/question/${encodeURIComponent(requestId)}/reply`
+  console.log(`${LOG.http} POST 回答问题`, url, { answersCount: answers.length }, directory ? { directory } : '')
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: withDirectoryHeaders({ 'Content-Type': 'application/json' }, directory),
+    body: JSON.stringify({ answers }),
+  })
+  const bodyText = await res.text()
+  if (!res.ok) {
+    throw new Error(`replyToQuestion failed: ${res.status} ${bodyText}`)
+  }
+  console.log(`${LOG.http} POST /question/.../reply`, clip(bodyText, 200))
+}
+
+/** OpenCode SDK v2：`GET /question`，列出待处理的 question 请求（用于根据 messageID/callID 解析 requestID） */
+export async function getPendingQuestions(directory?: string): Promise<
+  Array<{
+    id: string
+    sessionID: string
+    questions: unknown[]
+    tool?: { messageID: string; callID: string }
+  }>
+> {
+  const params = new URLSearchParams()
+  if (directory) params.set('directory', directory)
+  const qs = params.toString()
+  const url = qs ? `${BASE}/question?${qs}` : `${BASE}/question`
+  console.log(`${LOG.http} GET 待处理 question 列表`, url, directory ? { directory } : '')
+  const res = await fetch(url, { headers: withDirectoryHeaders({}, directory) })
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error(`getPendingQuestions failed: ${res.status} ${t}`)
+  }
+  const data = await res.json()
+  const list = Array.isArray(data) ? data : []
+  console.log(`${LOG.http} GET /question`, list.length, '条')
+  return list
+}
+
+/** `POST /question/{requestID}/reject` */
+export async function rejectQuestion(requestId: string, directory?: string): Promise<void> {
+  const url = `${BASE}/question/${encodeURIComponent(requestId)}/reject`
+  console.log(`${LOG.http} POST 拒绝回答问题`, url, directory ? { directory } : '')
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: withDirectoryHeaders({}, directory),
+  })
+  const bodyText = await res.text()
+  if (!res.ok) {
+    throw new Error(`rejectQuestion failed: ${res.status} ${bodyText}`)
+  }
+}
+
 // ===== SSE (real-time events) =====
 
 // 说明：

@@ -16,27 +16,46 @@ export const HARNESS_GUIDANCE_ENABLED = true
  * 每条用户消息前附加的引导（可按需改写）。
  * 建议保留「先计划、再执行」的结构，便于与子任务 / Todo 可视化对齐。
  */
-export const HARNESS_USER_GUIDANCE = `[计划优先]回答用户输入前，总是先列出计划，使用todowrite工具生成todo,然后再执行。还需要提前确定任务过程中可能的风险点，执行风险点时需要主动向用户确认。`
+export const HARNESS_USER_GUIDANCE = `[计划优先]回答用户输入前，总是先列出计划，使用todowrite工具生成todo,然后再执行。如果当前已有进行中的todo，不要新建todo,而是保留已有的已完成然后根据实际需要决定是修改未完成待办还是按照计划执行。`
 
-const SEP = '\n\n---\n【用户输入】\n'
+/**
+ * 引导与真实用户输入之间的固定分隔（须与发送逻辑一致；展示侧也用它识别截断点）。
+ */
+export const HARNESS_USER_INPUT_MARKER = '\n\n---\n【用户输入】\n'
 
 export function buildUserMessageWithGuidance(rawUserText: string): string {
   const t = rawUserText.trimEnd()
   if (!HARNESS_GUIDANCE_ENABLED) return rawUserText
-  return `${HARNESS_USER_GUIDANCE}${SEP}${t}`
+  return `${HARNESS_USER_GUIDANCE}${HARNESS_USER_INPUT_MARKER}${t}`
 }
 
 /**
- * 从 OpenCode 拉回的 user 消息全文里去掉 harness 引导前缀，供界面展示 / 复制，避免用户看到计划类注入文案。
- * 若未匹配到当前前缀（旧会话或引导已改），原样返回。
+ * 从存盘的 user 全文得到「仅用户输入」：所有对话里展示 / 复制用户消息前都应走此函数。
+ *
+ * 顺序：① 与当前 `HARNESS_USER_GUIDANCE + HARNESS_USER_INPUT_MARKER` 整段前缀；② 文中出现标准 `---` + `【用户输入】` 分隔时取其后（兼容引导文案改过、旧会话仍带 `[计划优先]…` 段落）。
  */
 export function stripHarnessGuidanceForDisplay(storedText: string): string {
   if (!storedText) return storedText
-  if (!HARNESS_GUIDANCE_ENABLED) return storedText
   const normalized = storedText.replace(/\r\n/g, '\n')
-  const prefix = `${HARNESS_USER_GUIDANCE}${SEP}`.replace(/\r\n/g, '\n')
-  if (normalized.startsWith(prefix)) {
-    return normalized.slice(prefix.length)
+
+  if (HARNESS_GUIDANCE_ENABLED) {
+    const exactPrefix = `${HARNESS_USER_GUIDANCE}${HARNESS_USER_INPUT_MARKER}`
+    if (normalized.startsWith(exactPrefix)) {
+      return normalized.slice(exactPrefix.length).trimStart()
+    }
   }
+
+  const markerNeedles = ['\n\n---\n【用户输入】\n', '\n---\n【用户输入】\n']
+  for (const m of markerNeedles) {
+    const idx = normalized.indexOf(m)
+    if (idx >= 0) return normalized.slice(idx + m.length).trimStart()
+  }
+
+  const relaxed = /\n---\s*\n【用户输入】\s*\n/
+  const match = normalized.match(relaxed)
+  if (match?.index !== undefined) {
+    return normalized.slice(match.index + match[0].length).trimStart()
+  }
+
   return storedText
 }

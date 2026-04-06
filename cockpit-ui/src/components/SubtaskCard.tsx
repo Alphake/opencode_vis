@@ -16,6 +16,8 @@ interface SubtaskCardProps {
   subtask: AssistantSubtask
   messages: OcMessage[]
   displayIndex: number
+  /** DOM 定位索引：用于连线/滚动，需与 App 中 linkedSubtaskIndex 使用同一坐标系 */
+  cardIndex?: number
   isLinked?: boolean
   onSelectSubtask?: () => void
 }
@@ -74,6 +76,7 @@ export default function SubtaskCard({
   subtask,
   messages,
   displayIndex,
+  cardIndex,
   isLinked = false,
   onSelectSubtask,
 }: SubtaskCardProps) {
@@ -98,7 +101,7 @@ export default function SubtaskCard({
 
   return (
     <div
-      data-subtask-card-index={displayIndex}
+      data-subtask-card-index={cardIndex ?? displayIndex}
       onClick={() => onSelectSubtask?.()}
       style={{
         boxSizing: 'border-box',

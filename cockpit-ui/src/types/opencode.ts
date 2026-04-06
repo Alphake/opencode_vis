@@ -25,6 +25,8 @@ export interface OcSession {
 }
 
 export interface OcTodo {
+  /** OpenCode 若下发则使用；否则由 cockpit 会话内分配稳定 id */
+  id?: string
   content: string
   status: 'pending' | 'in_progress' | 'completed'
   priority: 'high' | 'medium' | 'low'
@@ -93,9 +95,13 @@ export type ToolPart = {
   callID: string
   tool: string
   state: {
-    status: 'running' | 'completed' | 'error'
+    /** OpenCode question 等工具在交互完成前可能为 pending */
+    status: 'pending' | 'running' | 'completed' | 'error'
     input?: Record<string, unknown>
     output?: string
+    /** 工具失败时的错误（常见形态：`ProviderModelNotFoundError: ...`） */
+    error?: string
+    time?: { start?: number; end?: number }
   }
   id: string
   sessionID: string
@@ -199,11 +205,39 @@ export interface MappedAction {
   partIndex?: number
   messageIndex?: number
   detail?: string
+  errorName?: string
+  errorMessage?: string
 }
 
 export interface OcMessage {
   info: OcMessageInfo
   parts: OcMessagePart[]
+}
+
+// ===== Question 工具（SSE `question.asked` / POST `/question/{id}/reply`）=====
+// 服务端契约见 OpenCode SDK v2：`QuestionRequest`、`QuestionReplyData`（answers 为按题目顺序的 label 数组）
+
+export type OcQuestionOption = {
+  label: string
+  description: string
+}
+
+export type OcQuestionInfo = {
+  question: string
+  header: string
+  options: OcQuestionOption[]
+  multiple?: boolean
+  custom?: boolean
+}
+
+/** 待用户作答的一条请求（来自 SSE question.asked） */
+export type OcPendingQuestionRequest = {
+  id: string
+  sessionID: string
+  questions: OcQuestionInfo[]
+  tool?: { messageID: string; callID: string }
+  /** SSE 根字段，回复时必须带 x-opencode-directory */
+  directory?: string
 }
 
 // ===== D3 Event types =====
