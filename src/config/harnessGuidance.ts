@@ -4,7 +4,7 @@
  * 说明：
  * - OpenCode 内置的 system prompt 由本地 OpenCode 配置，HTTP `POST /session/:id/message`
  *   通常只接受用户消息的 parts，本面板无法直接覆盖服务端 system。
- * - 因此这里通过「用户消息前缀」实现同等引导效果；你在会话里会看到完整拼接后的文本。
+ * - 因此这里通过「用户消息前缀」实现同等引导效果；OpenCode 存的是完整拼接文本，界面展示时用 stripHarnessGuidanceForDisplay 只显示用户输入。
  *
  * 修改方式：直接改下面常量，或把 HARNESS_GUIDANCE_ENABLED 设为 false 关闭注入。
  */
@@ -24,4 +24,19 @@ export function buildUserMessageWithGuidance(rawUserText: string): string {
   const t = rawUserText.trimEnd()
   if (!HARNESS_GUIDANCE_ENABLED) return rawUserText
   return `${HARNESS_USER_GUIDANCE}${SEP}${t}`
+}
+
+/**
+ * 从 OpenCode 拉回的 user 消息全文里去掉 harness 引导前缀，供界面展示 / 复制，避免用户看到计划类注入文案。
+ * 若未匹配到当前前缀（旧会话或引导已改），原样返回。
+ */
+export function stripHarnessGuidanceForDisplay(storedText: string): string {
+  if (!storedText) return storedText
+  if (!HARNESS_GUIDANCE_ENABLED) return storedText
+  const normalized = storedText.replace(/\r\n/g, '\n')
+  const prefix = `${HARNESS_USER_GUIDANCE}${SEP}`.replace(/\r\n/g, '\n')
+  if (normalized.startsWith(prefix)) {
+    return normalized.slice(prefix.length)
+  }
+  return storedText
 }

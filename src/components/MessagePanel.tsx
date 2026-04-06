@@ -1,8 +1,8 @@
-import type { RefObject } from 'react'
+import { useState, useEffect, type RefObject } from 'react'
 import type { OcMessage, OcTodo } from '../types/opencode'
 import MessageBubble from './MessageBubble'
 import TodoPanel from './TodoPanel'
-import MessageInput from './MessageInput'
+import MessageInput, { type MessageSendPayload } from './MessageInput'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 
 interface MessagePanelProps {
@@ -12,12 +12,14 @@ interface MessagePanelProps {
   sessionId: string
   sessionTitle?: string
   onRefresh: () => void
-  onSendMessage: (text: string) => Promise<void>
+  onSendMessage: (payload: MessageSendPayload) => Promise<void>
   /** 可滚动消息列表容器 ref（供联动连线计算） */
   messageListScrollRef?: RefObject<HTMLDivElement | null>
   /** 与高亮子任务关联的消息下标 */
   highlightMessageIndices?: Set<number> | null
   onTodoClick?: (todo: OcTodo) => void
+  /** 重命名当前会话标题（PATCH OpenCode） */
+  onSessionTitleCommit?: (title: string) => Promise<void>
 }
 
 export default function MessagePanel({
@@ -30,6 +32,7 @@ export default function MessagePanel({
   messageListScrollRef,
   highlightMessageIndices,
   onTodoClick,
+  onSessionTitleCommit,
 }: MessagePanelProps) {
   // 获取当前 agent 和模型信息（从最后一条 assistant message）
   const lastAssistantMsg = [...messages].reverse().find(m => m.info.role === 'assistant')
@@ -58,9 +61,12 @@ export default function MessagePanel({
           flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: 13, fontWeight: 500, color: '#171717' }}>
-          {sessionTitle || '未命名 Session'}
-        </span>
+        <EditableSessionTitle
+          sessionId={sessionId}
+          title={sessionTitle}
+          loading={loading}
+          onCommit={onSessionTitleCommit}
+        />
       </div>
 
       {/* Messages (scrollable) */}
@@ -126,6 +132,127 @@ export default function MessagePanel({
         />
       </div>
     </div>
+  )
+}
+
+function EditableSessionTitle({
+  sessionId,
+  title,
+  loading,
+  onCommit,
+}: {
+  sessionId: string
+  title?: string
+  loading: boolean
+  onCommit?: (next: string) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(title ?? '')
+  const [saving, setSaving] = useState(false)
+
+  const canEdit = Boolean(sessionId && onCommit && !loading)
+
+  useEffect(() => {
+    if (!editing) setDraft(title ?? '')
+  }, [title, editing])
+
+  const display = title?.trim() ? title : '未命名 Session'
+
+  const startEdit = () => {
+    if (!canEdit) return
+    setDraft(title ?? '')
+    setEditing(true)
+  }
+
+  const cancel = () => {
+    setDraft(title ?? '')
+    setEditing(false)
+  }
+
+  const commit = async () => {
+    if (!onCommit) return
+    const next = draft.trim()
+    if (!next) {
+      cancel()
+      return
+    }
+    if (next === (title ?? '').trim()) {
+      setEditing(false)
+      return
+    }
+    setSaving(true)
+    try {
+      await onCommit(next)
+      setEditing(false)
+    } catch (e) {
+      console.error('[EditableSessionTitle]', e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!canEdit) {
+    return (
+      <span style={{ fontSize: 13, fontWeight: 500, color: '#171717' }}>{display}</span>
+    )
+  }
+
+  if (editing) {
+    return (
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            void commit()
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            cancel()
+          }
+        }}
+        autoFocus
+        disabled={saving}
+        style={{
+          fontSize: 13,
+          fontWeight: 500,
+          color: '#171717',
+          border: '1px solid #8445BC',
+          borderRadius: 6,
+          padding: '4px 8px',
+          minWidth: 200,
+          maxWidth: 'min(480px, 70vw)',
+          outline: 'none',
+          fontFamily: 'inherit',
+        }}
+      />
+    )
+  }
+
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={startEdit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          startEdit()
+        }
+      }}
+      style={{
+        fontSize: 13,
+        fontWeight: 500,
+        color: '#171717',
+        cursor: 'pointer',
+      }}
+      title="点击修改标题"
+    >
+      {display}
+    </span>
   )
 }
 

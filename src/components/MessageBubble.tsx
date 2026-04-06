@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { OcMessage, OcMessagePart, OcMessageInfo } from '../types/opencode'
+import { stripHarnessGuidanceForDisplay } from '../config/harnessGuidance'
 
 interface MessageBubbleProps {
   message: OcMessage
@@ -76,7 +77,7 @@ export default function MessageBubble({ message, isLastInTurn }: MessageBubblePr
 }
 
 function UserMessage({ message }: { message: OcMessage }) {
-  const content = userMessageDisplayText(message)
+  const content = stripHarnessGuidanceForDisplay(userMessageDisplayText(message))
   const [showCopy, setShowCopy] = useState(false)
   const [copied, setCopied] = useState(false)
 
