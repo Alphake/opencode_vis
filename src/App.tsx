@@ -690,6 +690,7 @@ function App() {
               linkedSubtaskIndex={linkedSubtaskIndex}
               onSelectSubtask={toggleSubtaskLink}
               listScrollRef={subtaskScrollRef}
+              sessionDirectory={activeSessionDirectory}
             />
           </div>
         </div>

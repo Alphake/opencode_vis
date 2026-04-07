@@ -12,21 +12,19 @@ type FlowNode =
 const MARGIN_LEFT = 24
 const GAP = 12
 /**
- * 垂直布局（与 `actionMapping.actionRow` 一致：row 只有 0 / 1 / 2）：
- * - 每行方块顶边 y = TOP_PAD + row * ROW_H（逻辑坐标，绘制时再整体 translate 居中）
- * - 每个 rect 高度固定为 BLOCK_H（用户单位 = 屏幕 px，与 SVG 总高一致时）
- * - 画布总高固定为三行容量：TOP_PAD + MAX_ROW * ROW_H + BLOCK_H + BOTTOM_PAD
- * - ROW_H ≥ BLOCK_H，否则上下两行 rect 重叠
- * - 按当前序列实际用到的 min/max row 计算竖直居中偏移，两行时上下留白对称；用到第三行时整段仍居中
+ * 垂直布局（与 `actionMapping` 一致：父段 row 0–2；子会话分支为第 4 轨 row=3）：
+ * - 画布总高 = TOP_PAD + maxRowIndex * ROW_H + BLOCK_H + BOTTOM_PAD
  */
 const BLOCK_H = 28
 const ROW_H = 32
 const TOP_PAD = 4
-/** `buildMappedActionsFromMessages` 中 row 最大为 2 */
-const MAX_ROW = 2
+/** 无子会话时父段 row 最大为 2 */
+const DEFAULT_MAX_ROW_INDEX = 2
 const MIN_W = 28
 const MAX_W = 220
 const BOTTOM_PAD = 6
+/** 视口上限：约 4 行（含上下 padding） */
+const MAX_VISIBLE_ROWS = 4
 
 function blockWidth(durationMode: boolean, durationMs: number): number {
   if (!durationMode) return MIN_W
@@ -96,6 +94,21 @@ function buildActionTooltipHtml(act: MappedAction & { row: number }): string {
   if (act.messageID) {
     lines.push(`<strong>Message ID</strong>: ${escapeHtml(act.messageID)}`)
   }
+  if (act.callID) {
+    lines.push(`<strong>Call ID</strong>: ${escapeHtml(act.callID)}`)
+  }
+  if (act.childSessionID) {
+    lines.push(`<strong>Child Session</strong>: ${escapeHtml(act.childSessionID)}`)
+  }
+  if (act.parallelKey) {
+    lines.push(`<strong>Parallel Key</strong>: ${escapeHtml(act.parallelKey)}`)
+  }
+  if (act.branchChildSessionID) {
+    lines.push(`<strong>Branch Session</strong>: ${escapeHtml(act.branchChildSessionID)}`)
+  }
+  if (act.parentTaskCallID) {
+    lines.push(`<strong>Parent Task Call</strong>: ${escapeHtml(act.parentTaskCallID)}`)
+  }
   if (act.detail?.trim()) {
     lines.push(`<strong>Detail</strong>: ${escapeHtml(act.detail.trim())}`)
   }
@@ -162,7 +175,9 @@ function computeLayout(
   }
 
   const totalW = Math.max(x + MARGIN_LEFT, 360)
-  const totalH = TOP_PAD + MAX_ROW * ROW_H + BLOCK_H + BOTTOM_PAD
+  const maxActionRow = sorted.length === 0 ? 0 : Math.max(...sorted.map((a) => a.row))
+  const maxRowIndex = Math.max(maxActionRow, 1) // 含 end(row=1)
+  const totalH = TOP_PAD + maxRowIndex * ROW_H + BLOCK_H + BOTTOM_PAD
   return { layout, totalW, totalH }
 }
 
@@ -170,12 +185,15 @@ interface Props {
   actions: (MappedAction & { row: number })[]
   durationMode: boolean
   colorMode: 'status' | 'tokens'
+  /** 仅用于 UI 假数据演示：在某个 action 位置视觉分叉 */
+  mockBranchForkActionIndex?: number
 }
 
 export default function ActionFlowVisualization({
   actions,
   durationMode,
   colorMode,
+  mockBranchForkActionIndex,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const reactId = useId().replace(/:/g, '')
@@ -209,12 +227,33 @@ export default function ActionFlowVisualization({
       .attr('fill', actionFlowPalette.arrow)
 
     const markerUrl = `url(#${markerId})`
-    const content = root.append('g').attr('transform', `translate(0, ${offsetY})`)
+    const canMockFork =
+      typeof mockBranchForkActionIndex === 'number' &&
+      mockBranchForkActionIndex >= 0 &&
+      mockBranchForkActionIndex < actions.length
+    const extraTopRows = canMockFork ? 1 : 0
+    const topOffset = extraTopRows * ROW_H
+
+    const content = root.append('g').attr('transform', `translate(0, ${offsetY + topOffset})`)
     const contentNode = content.node() as SVGGElement | null
 
     for (let i = 0; i < layout.length - 1; i++) {
       const a = layout[i]!
       const b = layout[i + 1]!
+      if (a.node.kind === 'action' && b.node.kind === 'action') {
+        const pa = a.node as MappedAction & { row: number }
+        const pb = b.node as MappedAction & { row: number }
+        if (
+          pa.actionType === 'Subagent' &&
+          pa.childSessionID &&
+          pa.callID &&
+          pb.source === 'child-session' &&
+          pb.parentTaskCallID === pa.callID &&
+          pb.branchChildSessionID === pa.childSessionID
+        ) {
+          continue
+        }
+      }
       const x1 = a.x + a.w
       const y1 = a.cy
       const x2 = b.x
@@ -251,9 +290,12 @@ export default function ActionFlowVisualization({
       const act = node as MappedAction & { row: number }
       const tc = tokenColor(colorScale, act.tokenEstimate)
       const sc = statusColors(act.status)
+      const isChildBranch = act.source === 'child-session'
       const fill = colorMode === 'status' ? sc.fill : tc.fill
-      const stroke = colorMode === 'status' ? sc.stroke : tc.stroke
-      const iconFill = colorMode === 'status' ? sc.icon : actionFlowPalette.green.icon
+      let stroke = colorMode === 'status' ? sc.stroke : tc.stroke
+      if (isChildBranch && colorMode === 'status') stroke = '#8445BC'
+      let iconFill = colorMode === 'status' ? sc.icon : actionFlowPalette.green.icon
+      if (isChildBranch && colorMode === 'status') iconFill = '#6E38A0'
 
       const rect = content
         .append('rect')
@@ -262,9 +304,9 @@ export default function ActionFlowVisualization({
         .attr('width', w)
         .attr('height', h)
         .attr('rx', 4)
-        .attr('fill', fill)
+        .attr('fill', isChildBranch && colorMode === 'status' ? '#F3ECFA' : fill)
         .attr('stroke', stroke)
-        .attr('stroke-width', 1.5)
+        .attr('stroke-width', isChildBranch ? 1.65 : 1.5)
         .style('cursor', 'pointer')
         .attr('data-tooltip-id', tooltipId)
         .attr('data-tooltip-html', buildActionTooltipHtml(act))
@@ -286,11 +328,140 @@ export default function ActionFlowVisualization({
       }
     })
 
-    root.attr('width', totalW).attr('height', totalH)
-    svg.setAttribute('viewBox', `0 0 ${totalW} ${totalH}`)
-  }, [actions, durationMode, colorMode, markerId, tooltipId])
+    /** 父 Subagent(task) → 子会话首节点 的紫色分叉 */
+    for (let i = 0; i < layout.length - 1; i++) {
+      const item = layout[i]!
+      const node = item.node
+      if (node.kind !== 'action') continue
+      if (node.actionType !== 'Subagent' || !node.childSessionID || !node.callID) continue
+      let firstChild: (typeof layout)[0] | undefined
+      for (let j = i + 1; j < layout.length - 1; j++) {
+        const it = layout[j]!
+        if (it.node.kind !== 'action') continue
+        const a = it.node as MappedAction & { row: number }
+        if (
+          a.source === 'child-session' &&
+          a.parentTaskCallID === node.callID &&
+          a.branchChildSessionID === node.childSessionID
+        ) {
+          firstChild = it
+          break
+        }
+      }
+      if (!firstChild) continue
+      const x1 = item.x + item.w
+      const y1 = item.cy
+      const x2 = firstChild.x
+      const y2 = firstChild.cy
+      const mid = (x1 + x2) / 2
+      const branchPath = d3.path()
+      branchPath.moveTo(x1, y1)
+      branchPath.lineTo(mid, y1)
+      branchPath.lineTo(mid, y2)
+      branchPath.lineTo(x2, y2)
+      content
+        .append('path')
+        .attr('d', branchPath.toString())
+        .attr('fill', 'none')
+        .attr('stroke', '#8445BC')
+        .attr('stroke-width', 1.75)
+        .attr('marker-end', markerUrl)
+    }
 
-  const minSvgH = TOP_PAD + MAX_ROW * ROW_H + BLOCK_H + BOTTOM_PAD
+    if (canMockFork) {
+      const forkItem = layout[mockBranchForkActionIndex as number]
+      if (forkItem) {
+        const historyTemplates = [
+          { actionType: 'Think', status: 'completed', durationMs: 420, tokenEstimate: 24 },
+          { actionType: 'Read', status: 'completed', durationMs: 560, tokenEstimate: 40 },
+          { actionType: 'Response', status: 'completed', durationMs: 380, tokenEstimate: 28 },
+        ] as const
+        const historyY = rowTopY(0) - ROW_H + BLOCK_H / 2
+
+        const historyWidths = historyTemplates.map(h => blockWidth(durationMode, h.durationMs))
+        const historyStartX = forkItem.x + forkItem.w + GAP
+
+        let hx = historyStartX
+        historyTemplates.forEach((h, i) => {
+          const hw = historyWidths[i]!
+          content
+            .append('rect')
+            .attr('x', hx)
+            .attr('y', historyY - BLOCK_H / 2)
+            .attr('width', hw)
+            .attr('height', BLOCK_H)
+            .attr('rx', 4)
+            .attr('fill', '#ECECEC')
+            .attr('stroke', '#CFCFCF')
+            .attr('stroke-width', 1.5)
+            .style('cursor', 'default')
+
+          if (contentNode) {
+            appendActionFlowIcon(
+              contentNode,
+              getActionFlowIconSvg(h.actionType),
+              hx + hw / 2,
+              historyY,
+              '#B5B5B5',
+              `${reactId}-mock-history-${i}-`
+            )
+          }
+
+          if (i < historyTemplates.length - 1) {
+            const link = d3.path()
+            link.moveTo(hx + hw, historyY)
+            link.lineTo(hx + hw + GAP, historyY)
+            content
+              .append('path')
+              .attr('d', link.toString())
+              .attr('fill', 'none')
+              .attr('stroke', '#C8C8C8')
+              .attr('stroke-width', 1.2)
+              .attr('marker-end', markerUrl)
+          }
+          hx += hw + GAP
+        })
+
+        const firstHistoryX = historyStartX
+        // 与主流程边一致：水平 → 竖直 → 水平（中点取两端 x 的中点，避免出现斜线）
+        const x1 = forkItem.x + forkItem.w
+        const y1 = forkItem.cy
+        const x2 = firstHistoryX
+        const y2 = historyY
+        const mid = (x1 + x2) / 2
+        const connect = d3.path()
+        connect.moveTo(x1, y1)
+        connect.lineTo(mid, y1)
+        connect.lineTo(mid, y2)
+        connect.lineTo(x2, y2)
+        content
+          .append('path')
+          .attr('d', connect.toString())
+          .attr('fill', 'none')
+          .attr('stroke', '#C8C8C8')
+          .attr('stroke-width', 1.2)
+          .attr('marker-end', markerUrl)
+      }
+    }
+
+    const desiredH = totalH + topOffset
+    // 关键：使用像素级固定画布，不用 viewBox 缩放，避免不同行数时 action 尺寸变化
+    root.attr('width', totalW).attr('height', desiredH)
+    svg.removeAttribute('viewBox')
+  }, [actions, durationMode, colorMode, markerId, tooltipId, mockBranchForkActionIndex])
+
+  const maxRowForEstimate =
+    actions.length === 0
+      ? DEFAULT_MAX_ROW_INDEX
+      : Math.max(DEFAULT_MAX_ROW_INDEX, ...actions.map((a) => a.row), 1)
+  const contentHeight =
+    TOP_PAD +
+    maxRowForEstimate * ROW_H +
+    BLOCK_H +
+    BOTTOM_PAD +
+    (mockBranchForkActionIndex !== undefined ? ROW_H : 0)
+  const maxVisibleHeight = TOP_PAD + MAX_VISIBLE_ROWS * ROW_H + BLOCK_H + BOTTOM_PAD
+  const viewportHeight = Math.min(contentHeight, maxVisibleHeight)
 
   return (
     <div
@@ -307,25 +478,21 @@ export default function ActionFlowVisualization({
         style={{
           boxSizing: 'border-box',
           overflowX: 'auto',
-          overflowY: 'hidden',
+          overflowY: 'auto',
           border: '1px solid #E8E8E8',
           borderRadius: 8,
           background: '#FCFCFC',
           width: '100%',
-          height: minSvgH,
-          maxHeight: minSvgH,
+          height: viewportHeight,
+          maxHeight: viewportHeight,
+          minHeight: viewportHeight,
           flexShrink: 0,
         }}
       >
         <svg
           ref={svgRef}
-          preserveAspectRatio="xMinYMin meet"
           style={{
             display: 'block',
-            height: minSvgH,
-            maxHeight: minSvgH,
-            width: 'auto',
-            maxWidth: 'none',
             verticalAlign: 'top',
           }}
         />

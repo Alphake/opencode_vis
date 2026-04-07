@@ -80,6 +80,61 @@ function parseToolError(errorRaw?: string): { name?: string; message?: string } 
   }
 }
 
+function pickFirstString(values: unknown[]): string | undefined {
+  for (const v of values) {
+    if (typeof v === 'string' && v.trim()) return v.trim()
+  }
+  return undefined
+}
+
+function parseJsonRecord(raw?: string): Record<string, unknown> | null {
+  if (!raw || !raw.trim()) return null
+  try {
+    const v = JSON.parse(raw) as unknown
+    if (v && typeof v === 'object') return v as Record<string, unknown>
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
+/**
+ * 统一提取 task/subagent 的子会话 id。
+ * 兼容 running/completed 两阶段里可能出现的字段：
+ * - state.metadata.sessionId / sessionID / task_id
+ * - state.output 文本中的 task_id: xxx
+ * - state.output JSON 的 metadata.sessionId / sessionId
+ */
+export function extractChildSessionIdFromToolPart(part: ToolPart): string | undefined {
+  const input = part.state?.input ?? {}
+  const meta = (part.state?.metadata ?? {}) as Record<string, unknown>
+  const out = part.state?.output ?? ''
+  const outJson = parseJsonRecord(out)
+  const outMeta =
+    outJson && typeof outJson.metadata === 'object' && outJson.metadata
+      ? (outJson.metadata as Record<string, unknown>)
+      : {}
+
+  const direct = pickFirstString([
+    meta.sessionId,
+    meta.sessionID,
+    meta.task_id,
+    outMeta.sessionId,
+    outMeta.sessionID,
+    outMeta.task_id,
+    outJson?.sessionId,
+    outJson?.sessionID,
+    outJson?.task_id,
+    input.sessionId,
+    input.sessionID,
+  ])
+  if (direct) return direct
+
+  const m = out.match(/task_id:\s*([A-Za-z0-9_-]+)/i)
+  if (m?.[1]) return m[1]
+  return undefined
+}
+
 function durationForText(text: string): number {
   return Math.min(120_000, 50 + text.length * 15)
 }
@@ -102,6 +157,73 @@ function actionRow(
  * 规则：Think/Response 恒为第 0 行；其余在 depth===0 时为第 1 行；在子智能体内部为第 2 行。
  * 子智能体工具：非 completed/error 视为进入（depth++）；completed/error 视为退出（depth--）。
  */
+/** 子会话动作在 ActionFlow 中占用的行（第 4 条横轨，0-based = 3） */
+export const ACTION_FLOW_CHILD_BRANCH_ROW = 3
+
+export type TaskChildDescriptor = {
+  callID: string
+  childSessionID: string
+  /** 与父段 `buildMappedActionsFromMessages` 中该 task part 的 sortTime 对齐 */
+  anchorSortTime: number
+  description?: string
+}
+
+/**
+ * 从父会话消息中收集「已能解析出子 session」的 task/subagent 工具（去重 callID+child）。
+ */
+export function collectTaskChildDescriptors(messages: OcMessage[]): TaskChildDescriptor[] {
+  const out: TaskChildDescriptor[] = []
+  const seen = new Set<string>()
+  messages.forEach((message) => {
+    if (message.info.role !== 'assistant') return
+    const baseTime = message.info.time?.created ?? 0
+    message.parts.forEach((part, partIndex) => {
+      if (part.type !== 'tool' || !isSubagentToolName(part.tool)) return
+      const sid = extractChildSessionIdFromToolPart(part)
+      if (!sid) return
+      const key = `${part.callID}__${sid}`
+      if (seen.has(key)) return
+      seen.add(key)
+      const input = part.state?.input
+      const description =
+        input && typeof input === 'object' && typeof (input as { description?: unknown }).description === 'string'
+          ? String((input as { description: string }).description)
+          : undefined
+      out.push({
+        callID: part.callID,
+        childSessionID: sid,
+        anchorSortTime: baseTime + partIndex * 0.001,
+        description,
+      })
+    })
+  })
+  return out
+}
+
+/**
+ * 将子会话 GET /message 的结果压平到父时间轴上一行（`ACTION_FLOW_CHILD_BRANCH_ROW`），便于与父 Subagent 节点分叉绘制。
+ */
+export function buildChildSessionBranchActions(
+  childMessages: OcMessage[],
+  opts: {
+    branchChildSessionID: string
+    parentTaskCallID: string
+    anchorSortTime: number
+  },
+): (MappedAction & { row: number })[] {
+  const inner = buildMappedActionsFromMessages(childMessages)
+  if (inner.length === 0) return []
+  const minT = Math.min(...inner.map((a) => a.sortTime))
+  return inner.map((a, i) => ({
+    ...a,
+    row: ACTION_FLOW_CHILD_BRANCH_ROW,
+    sortTime: opts.anchorSortTime + 0.002 + (a.sortTime - minT) + i * 1e-9,
+    source: 'child-session' as const,
+    branchChildSessionID: opts.branchChildSessionID,
+    parentTaskCallID: opts.parentTaskCallID,
+  }))
+}
+
 export function buildMappedActionsFromMessages(messages: OcMessage[]): (MappedAction & { row: number })[] {
   const out: (MappedAction & { row: number })[] = []
   let depth = 0
@@ -192,6 +314,10 @@ function partToMappedAction(
       const outStr = part.state?.output ?? ''
       const errStr = part.state?.error ?? ''
       const parsedErr = parseToolError(errStr)
+      const childSessionID = isSubagentToolName(part.tool)
+        ? extractChildSessionIdFromToolPart(part)
+        : undefined
+      const parallelKey = part.callID || childSessionID
       return {
         actionType: mappedType,
         status: toolStatusToActionStatus(part.state?.status),
@@ -200,6 +326,9 @@ function partToMappedAction(
         sortTime,
         source: 'part',
         messageID,
+        callID: part.callID,
+        childSessionID,
+        parallelKey,
         partIndex,
         messageIndex,
         detail: part.tool,

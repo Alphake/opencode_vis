@@ -1,16 +1,23 @@
-import { useMemo, useState } from 'react'
-import type { OcMessage } from '../types/opencode'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
-import { buildMappedActionsFromMessages } from '../utils/actionMapping'
+import {
+  buildChildSessionBranchActions,
+  buildMappedActionsFromMessages,
+  collectTaskChildDescriptors,
+  extractChildSessionIdFromToolPart,
+  isSubagentToolName,
+} from '../utils/actionMapping'
 import ActionFlowVisualization from './ActionFlowVisualization'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
+import { getMessages } from '../services/opencodeApi'
 
 const fontSans =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
 
-/** 子任务卡片固定总高；要改高度只调这一处即可 */
-const CARD_HEIGHT = 220
+/** 子任务卡片最小高度；内容（如分叉可视化）变高时卡片随内容增高 */
+const CARD_MIN_HEIGHT = 220
 
 interface SubtaskCardProps {
   subtask: AssistantSubtask
@@ -20,6 +27,8 @@ interface SubtaskCardProps {
   cardIndex?: number
   isLinked?: boolean
   onSelectSubtask?: () => void
+  /** 与 OpenCode 多目录一致，拉取子会话消息时必带 */
+  sessionDirectory?: string
 }
 
 type ColorByMode = 'status' | 'tokens'
@@ -79,10 +88,12 @@ export default function SubtaskCard({
   cardIndex,
   isLinked = false,
   onSelectSubtask,
+  sessionDirectory,
 }: SubtaskCardProps) {
   const m = buildSubtaskCardMetrics(subtask, messages, displayIndex)
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [colorBy, setColorBy] = useState<ColorByMode>('status')
+  const [childBranchActions, setChildBranchActions] = useState<(MappedAction & { row: number })[]>([])
 
   /** 本子任务段内的 assistant 消息（顺序与全局 timeline 一致） */
   const segmentMessages = useMemo((): OcMessage[] => {
@@ -91,10 +102,68 @@ export default function SubtaskCard({
       .filter((msg): msg is OcMessage => msg != null)
   }, [subtask.assistantMessageIndices, messages])
 
-  const flowActions = useMemo(
+  const parentFlowActions = useMemo(
     () => buildMappedActionsFromMessages(segmentMessages),
     [segmentMessages]
   )
+
+  const taskDescriptors = useMemo(
+    () => collectTaskChildDescriptors(segmentMessages),
+    [segmentMessages]
+  )
+
+  const hasRunningTaskWithChild = useMemo(() => {
+    return segmentMessages.some((msg) => {
+      if (msg.info.role !== 'assistant') return false
+      return msg.parts.some((p) => {
+        if (p.type !== 'tool' || !isSubagentToolName(p.tool)) return false
+        if (p.state?.status !== 'running') return false
+        return Boolean(extractChildSessionIdFromToolPart(p))
+      })
+    })
+  }, [segmentMessages])
+
+  const loadChildBranches = useCallback(async () => {
+    if (taskDescriptors.length === 0) {
+      setChildBranchActions([])
+      return
+    }
+    const results = await Promise.all(
+      taskDescriptors.map(async (d) => {
+        try {
+          const msgs = await getMessages(
+            d.childSessionID,
+            `子会话 branch · ${d.callID.slice(0, 12)}`,
+            sessionDirectory,
+          )
+          return buildChildSessionBranchActions(msgs, {
+            branchChildSessionID: d.childSessionID,
+            parentTaskCallID: d.callID,
+            anchorSortTime: d.anchorSortTime,
+          })
+        } catch {
+          return [] as (MappedAction & { row: number })[]
+        }
+      }),
+    )
+    setChildBranchActions(results.flat())
+  }, [taskDescriptors, sessionDirectory])
+
+  useEffect(() => {
+    void loadChildBranches()
+  }, [loadChildBranches])
+
+  useEffect(() => {
+    if (!hasRunningTaskWithChild) return
+    const id = window.setInterval(() => {
+      void loadChildBranches()
+    }, 3200)
+    return () => window.clearInterval(id)
+  }, [hasRunningTaskWithChild, loadChildBranches])
+
+  const flowActions = useMemo(() => {
+    return [...parentFlowActions, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
+  }, [parentFlowActions, childBranchActions])
 
   const durationLabel = formatDurationMs(m.durationMs)
   const changesLabel = String(m.mutatedFileCount)
@@ -108,7 +177,8 @@ export default function SubtaskCard({
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'stretch',
-        height: CARD_HEIGHT,
+        minHeight: CARD_MIN_HEIGHT,
+        height: 'auto',
         flexShrink: 0,
         padding: '12px 14px',
         gap: 4,
@@ -118,7 +188,7 @@ export default function SubtaskCard({
         borderRadius: 14,
         marginBottom: 8,
         fontFamily: fontSans,
-        overflow: 'hidden',
+        overflow: 'visible',
         boxShadow: isLinked ? `0 0 0 3px rgba(145, 163, 123, 0.22)` : 'none',
         cursor: onSelectSubtask ? 'pointer' : 'default',
         transition: 'box-shadow 0.15s ease, border-color 0.15s ease',
@@ -294,8 +364,6 @@ export default function SubtaskCard({
         <MetricBox label="Total Tokens" value={String(m.tokensSegmentSum)} />
         <MetricBox label="Cost" value={formatSubtaskCostDisplay(m)} />
       </div>
-
-      <div style={{ flex: 1, minHeight: 0 }} aria-hidden />
     </div>
   )
 }

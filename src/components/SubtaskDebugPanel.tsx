@@ -9,6 +9,7 @@ interface SubtaskDebugPanelProps {
   linkedSubtaskIndex: number | null
   onSelectSubtask: (index: number) => void
   listScrollRef?: RefObject<HTMLDivElement | null>
+  sessionDirectory?: string
 }
 
 export default function SubtaskDebugPanel({
@@ -17,6 +18,7 @@ export default function SubtaskDebugPanel({
   linkedSubtaskIndex,
   onSelectSubtask,
   listScrollRef,
+  sessionDirectory,
 }: SubtaskDebugPanelProps) {
   return (
     <div
@@ -50,6 +52,7 @@ export default function SubtaskDebugPanel({
               cardIndex={sourceIndex}
               isLinked={linkedSubtaskIndex === sourceIndex}
               onSelectSubtask={() => onSelectSubtask(sourceIndex)}
+              sessionDirectory={sessionDirectory}
             />
           ))
         )}

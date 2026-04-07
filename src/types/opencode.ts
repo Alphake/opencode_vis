@@ -99,6 +99,8 @@ export type ToolPart = {
     status: 'pending' | 'running' | 'completed' | 'error'
     input?: Record<string, unknown>
     output?: string
+    /** 部分工具（如 task）会把子会话信息放在 metadata（running/completed 都可能出现） */
+    metadata?: Record<string, unknown>
     /** 工具失败时的错误（常见形态：`ProviderModelNotFoundError: ...`） */
     error?: string
     time?: { start?: number; end?: number }
@@ -200,8 +202,17 @@ export interface MappedAction {
   tokenEstimate: number
   /** 排序与时间轴 */
   sortTime: number
-  source: 'part' | 'sse-permission' | 'sse-session'
+  source: 'part' | 'sse-permission' | 'sse-session' | 'child-session'
   messageID?: string
+  callID?: string
+  /** task/subagent 工具对应的子会话 id（若可解析） */
+  childSessionID?: string
+  /** 并行区分键：优先 callID，其次 childSessionID */
+  parallelKey?: string
+  /** 来自子会话拉取的动作：对应子 session id */
+  branchChildSessionID?: string
+  /** 父消息里触发 task 的 callID，用于分叉连线对齐 */
+  parentTaskCallID?: string
   partIndex?: number
   messageIndex?: number
   detail?: string
