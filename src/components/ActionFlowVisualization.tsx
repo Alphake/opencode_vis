@@ -1,9 +1,10 @@
-import { useLayoutEffect, useRef, useId } from 'react'
+import { useLayoutEffect, useRef, useId, useMemo, useState } from 'react'
 import * as d3 from 'd3'
 import { Tooltip } from 'react-tooltip'
 import type { ActionStatus, MappedAction } from '../types/opencode'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
+import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './ActionFlowContextMenu'
 
 type FlowNode =
   | { kind: 'end'; row: number }
@@ -12,24 +13,34 @@ type FlowNode =
 const MARGIN_LEFT = 24
 const GAP = 12
 /**
- * 垂直布局（与 `actionMapping` 一致：父段 row 0–2；子会话分支为第 4 轨 row=3）：
+ * 垂直布局（与 `actionMapping` 一致）：
+ * - 每个 agent 进程占 2 条横轨：偶数 row = LLM 内层，奇数 row = 外部资源；
+ * - 新 session（子 agent）在下方再占 2 条轨：row = processBand*2 + layer。
  * - 画布总高 = TOP_PAD + maxRowIndex * ROW_H + BLOCK_H + BOTTOM_PAD
  */
 const BLOCK_H = 28
 const ROW_H = 32
+/** 同一 row 上并行 lane 的垂直错开（与主 row 间距一致） */
+const PARALLEL_LANE_DY = ROW_H
+const SESSION_REGION_GAP = 10
 const TOP_PAD = 4
-/** 无子会话时父段 row 最大为 2 */
-const DEFAULT_MAX_ROW_INDEX = 2
 const MIN_W = 28
-const MAX_W = 220
 const BOTTOM_PAD = 6
+/** 至少两行泳道 + 两块 action 时的最小画布高度，避免空数据时 SVG 塌成几十像素 */
+const MIN_SVG_CONTENT_HEIGHT = TOP_PAD + 2 * ROW_H + 2 * BLOCK_H + BOTTOM_PAD
 /** 视口上限：约 4 行（含上下 padding） */
 const MAX_VISIBLE_ROWS = 4
+const LONG_RUNNING_MS = 60_000
+/** 与右键菜单一致，用于 ⋯ 等 SVG 文字 */
+const SVG_FONT_SANS =
+  "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
+/** 块太窄时右上角 ⋯ 会与居中图标重叠，仅宽块显示 */
+const MORE_BTN_MIN_W = 44
 
 function blockWidth(durationMode: boolean, durationMs: number): number {
   if (!durationMode) return MIN_W
   const w = 8 + durationMs / 40
-  return Math.max(MIN_W, Math.min(MAX_W, Number.isFinite(w) ? w : MIN_W))
+  return Math.max(MIN_W, Number.isFinite(w) ? w : MIN_W)
 }
 
 function statusColors(status: ActionStatus): { fill: string; stroke: string; icon: string } {
@@ -46,6 +57,21 @@ function statusColors(status: ActionStatus): { fill: string; stroke: string; ico
   }
 }
 
+function effectiveStatusColors(
+  status: ActionStatus,
+  durationMs: number
+): { fill: string; stroke: string; icon: string; isLongRunning: boolean } {
+  const base = statusColors(status)
+  const isLongRunning = (status === 'running' || status === 'pending') && durationMs >= LONG_RUNNING_MS
+  if (!isLongRunning) return { ...base, isLongRunning: false }
+  return {
+    fill: '#FFE9E9',
+    stroke: '#FF7A7A',
+    icon: '#E24F4F',
+    isLongRunning: true,
+  }
+}
+
 function tokenColor(scale: d3.ScaleSequential<string>, tok: number): { fill: string; stroke: string } {
   const c = scale(tok)
   const base = d3.color(c)
@@ -59,9 +85,26 @@ function rowTopY(row: number): number {
   return TOP_PAD + row * ROW_H
 }
 
-function flowNodeRow(node: FlowNode): number {
-  if (node.kind === 'end') return 1
-  return node.row
+function laneOffsetY(parallelLaneIndex?: number): number {
+  return (parallelLaneIndex ?? 0) * PARALLEL_LANE_DY
+}
+
+/**
+ * 子 task 会话区域：父消息里的 Subagent(task) 与对应子 session 拉取的动作共用同一 key，
+ * 这样并行 task 的整块（task rect + 子 session 多行）上下堆叠，lane1 永远在 lane0 整块之下。
+ */
+function actionSessionKey(a: MappedAction & { row: number }): string {
+  if (a.source === 'child-session' && a.parentTaskCallID) {
+    return `session:task:${a.parentTaskCallID}`
+  }
+  if (a.actionType === 'Subagent' && a.callID) {
+    return `session:task:${a.callID}`
+  }
+  return 'session:main'
+}
+
+function actionLocalRow(a: MappedAction & { row: number }): number {
+  return Math.max(0, a.row % 2)
 }
 
 /** 把「当前用到的行」在固定总高 totalH 内竖直居中（整体 translate 到 content <g>） */
@@ -76,7 +119,11 @@ function escapeHtml(s: string): string {
 function buildActionTooltipHtml(act: MappedAction & { row: number }): string {
   const lines: string[] = []
   lines.push(`<strong>Action</strong>: ${escapeHtml(String(act.actionType))}`)
-  lines.push(`<strong>Row</strong>: ${act.row}`)
+  {
+    const band = Math.floor(act.row / 2)
+    const layerLabel = act.row % 2 === 0 ? 'LLM 内' : '外部'
+    lines.push(`<strong>Row</strong>: ${act.row} · <strong>进程带</strong> ${band} · <strong>层</strong> ${layerLabel}`)
+  }
   lines.push(`<strong>Status</strong>: ${escapeHtml(String(act.status))}`)
   if (Number.isFinite(act.durationMs) && act.durationMs > 0) {
     lines.push(`<strong>Duration</strong>: ${(act.durationMs / 1000).toFixed(2)}s`)
@@ -103,6 +150,12 @@ function buildActionTooltipHtml(act: MappedAction & { row: number }): string {
   if (act.parallelKey) {
     lines.push(`<strong>Parallel Key</strong>: ${escapeHtml(act.parallelKey)}`)
   }
+  if (act.parallelGroupId) {
+    lines.push(`<strong>Parallel Group</strong>: ${escapeHtml(act.parallelGroupId)}`)
+  }
+  if (act.parallelLaneIndex !== undefined) {
+    lines.push(`<strong>Parallel Lane</strong>: ${act.parallelLaneIndex}`)
+  }
   if (act.branchChildSessionID) {
     lines.push(`<strong>Branch Session</strong>: ${escapeHtml(act.branchChildSessionID)}`)
   }
@@ -121,17 +174,27 @@ function buildActionTooltipHtml(act: MappedAction & { row: number }): string {
   return lines.join('<br/>')
 }
 
-function verticalCenterOffsetY(layout: { node: FlowNode }[], totalH: number): number {
+function buildCompactActionTooltipHtml(act: MappedAction & { row: number }): string {
+  const band = Math.floor(act.row / 2)
+  const layerLabel = act.row % 2 === 0 ? 'LLM 内' : '外部'
+  const dur =
+    Number.isFinite(act.durationMs) && act.durationMs > 0
+      ? `${(act.durationMs / 1000).toFixed(2)}s`
+      : '—'
+  return `<strong>${escapeHtml(String(act.actionType))}</strong> · ${escapeHtml(String(act.status))} · ${dur}<br/>进程 ${band} · ${layerLabel} · tok ${act.tokenEstimate}`
+}
+
+function verticalCenterOffsetY(
+  layout: { node: FlowNode; y: number; h: number }[],
+  totalH: number
+): number {
   if (layout.length === 0) return 0
-  let minR = Infinity
-  let maxR = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
   for (const item of layout) {
-    const r = flowNodeRow(item.node)
-    if (r < minR) minR = r
-    if (r > maxR) maxR = r
+    if (item.y < minY) minY = item.y
+    if (item.y + item.h > maxY) maxY = item.y + item.h
   }
-  const minY = TOP_PAD + minR * ROW_H
-  const maxY = TOP_PAD + maxR * ROW_H + BLOCK_H
   const centerY = (minY + maxY) / 2
   return totalH / 2 - centerY
 }
@@ -144,7 +207,90 @@ function computeLayout(
   const seq: FlowNode[] = sorted.map(a => ({ ...a, kind: 'action' as const }))
   seq.push({ kind: 'end', row: 1 })
 
+  const actionColumns = new Map<number, number>()
+  const groupStepToColumn = new Map<string, Map<number, number>>()
+  const groupLaneStepCounter = new Map<string, Map<number, number>>()
+  let nextColumn = 0
+  sorted.forEach((a, idx) => {
+    if (!a.parallelGroupId) {
+      actionColumns.set(idx, nextColumn++)
+      return
+    }
+    const gid = a.parallelGroupId
+    const lane = a.parallelLaneIndex ?? 0
+    let laneCounter = groupLaneStepCounter.get(gid)
+    if (!laneCounter) {
+      laneCounter = new Map<number, number>()
+      groupLaneStepCounter.set(gid, laneCounter)
+    }
+    const step = laneCounter.get(lane) ?? 0
+    laneCounter.set(lane, step + 1)
+
+    let stepCols = groupStepToColumn.get(gid)
+    if (!stepCols) {
+      stepCols = new Map<number, number>()
+      groupStepToColumn.set(gid, stepCols)
+    }
+    if (!stepCols.has(step)) stepCols.set(step, nextColumn++)
+    actionColumns.set(idx, stepCols.get(step)!)
+  })
+  const endColumn = nextColumn
+
+  const colMaxWidth = new Map<number, number>()
+  sorted.forEach((a, idx) => {
+    const c = actionColumns.get(idx)
+    if (c === undefined) return
+    const w = blockWidth(durationMode, a.durationMs)
+    colMaxWidth.set(c, Math.max(colMaxWidth.get(c) ?? 0, w))
+  })
+  colMaxWidth.set(endColumn, Math.max(colMaxWidth.get(endColumn) ?? 0, MIN_W))
+
+  const colStartX = new Map<number, number>()
   let x = MARGIN_LEFT
+  for (let c = 0; c <= endColumn; c++) {
+    colStartX.set(c, x)
+    x += (colMaxWidth.get(c) ?? MIN_W) + GAP
+  }
+
+  const sessionKeySet = new Set<string>()
+  sorted.forEach((a) => sessionKeySet.add(actionSessionKey(a)))
+  const sessionOrder: string[] = []
+  if (sessionKeySet.has('session:main')) sessionOrder.push('session:main')
+  const childKeys = [...sessionKeySet].filter((k) => k !== 'session:main')
+  childKeys.sort((ka, kb) => {
+    const actionsA = sorted.filter((a) => actionSessionKey(a) === ka)
+    const actionsB = sorted.filter((a) => actionSessionKey(a) === kb)
+    const ga = actionsA[0]?.parallelGroupId ?? ''
+    const gb = actionsB[0]?.parallelGroupId ?? ''
+    if (ga !== gb) return ga.localeCompare(gb)
+    const la = actionsA[0]?.parallelLaneIndex ?? 0
+    const lb = actionsB[0]?.parallelLaneIndex ?? 0
+    if (la !== lb) return la - lb
+    const minA = Math.min(...actionsA.map((x) => x.sortTime))
+    const minB = Math.min(...actionsB.map((x) => x.sortTime))
+    return minA - minB
+  })
+  sessionOrder.push(...childKeys)
+  if (sessionOrder.length === 0) sessionOrder.push('session:main')
+
+  const sessionTopY = new Map<string, number>()
+  let sessionY = TOP_PAD
+  for (const session of sessionOrder) {
+    sessionTopY.set(session, sessionY)
+    const local = sorted.filter((a) => actionSessionKey(a) === session)
+    let maxBottom = BLOCK_H
+    for (const a of local) {
+      const yInSession = actionLocalRow(a) * ROW_H + laneOffsetY(a.parallelLaneIndex)
+      maxBottom = Math.max(maxBottom, yInSession + BLOCK_H)
+    }
+    sessionY += maxBottom + SESSION_REGION_GAP
+  }
+  const totalH = Math.max(
+    sessionY - SESSION_REGION_GAP + BOTTOM_PAD,
+    TOP_PAD + BLOCK_H + BOTTOM_PAD,
+    MIN_SVG_CONTENT_HEIGHT
+  )
+
   const layout: {
     node: FlowNode
     x: number
@@ -155,36 +301,82 @@ function computeLayout(
     cy: number
   }[] = []
 
-  for (const node of seq) {
+  for (let i = 0; i < seq.length; i++) {
+    const node = seq[i]!
     if (node.kind === 'end') {
       const w = MIN_W
-      const row = 1
-      const y = rowTopY(row)
+      const c = endColumn
+      const x0 = colStartX.get(c) ?? MARGIN_LEFT
+      const cw = colMaxWidth.get(c) ?? MIN_W
+      const xNode = x0 + (cw - w) / 2
+      const lastAction = sorted.length > 0 ? sorted[sorted.length - 1]! : null
+      let y: number
+      if (lastAction) {
+        const sk = actionSessionKey(lastAction)
+        const yBase = sessionTopY.get(sk) ?? TOP_PAD
+        y = yBase + actionLocalRow(lastAction) * ROW_H + laneOffsetY(lastAction.parallelLaneIndex)
+      } else {
+        y = (sessionTopY.get('session:main') ?? TOP_PAD) + ROW_H
+      }
       const cy = y + BLOCK_H / 2
-      layout.push({ node, x, y, w, h: BLOCK_H, cx: x + w / 2, cy })
-      x += w + GAP
+      layout.push({ node, x: xNode, y, w, h: BLOCK_H, cx: xNode + w / 2, cy })
     } else {
       const a = node as MappedAction & { row: number }
       const w = blockWidth(durationMode, a.durationMs)
-      const row = a.row
-      const y = rowTopY(row)
+      const c = actionColumns.get(i) ?? i
+      const x0 = colStartX.get(c) ?? MARGIN_LEFT
+      const cw = colMaxWidth.get(c) ?? w
+      const xNode = x0 + (cw - w) / 2
+      const session = actionSessionKey(a)
+      const yBase = sessionTopY.get(session) ?? TOP_PAD
+      const y = yBase + actionLocalRow(a) * ROW_H + laneOffsetY(a.parallelLaneIndex)
       const cy = y + BLOCK_H / 2
-      layout.push({ node, x, y, w, h: BLOCK_H, cx: x + w / 2, cy })
-      x += w + GAP
+      layout.push({ node, x: xNode, y, w, h: BLOCK_H, cx: xNode + w / 2, cy })
     }
   }
 
   const totalW = Math.max(x + MARGIN_LEFT, 360)
-  const maxActionRow = sorted.length === 0 ? 0 : Math.max(...sorted.map((a) => a.row))
-  const maxRowIndex = Math.max(maxActionRow, 1) // 含 end(row=1)
-  const totalH = TOP_PAD + maxRowIndex * ROW_H + BLOCK_H + BOTTOM_PAD
   return { layout, totalW, totalH }
+}
+
+function parallelSiblingSkip(pa: MappedAction, pb: MappedAction): boolean {
+  if (!pa.parallelGroupId || !pb.parallelGroupId) return false
+  if (pa.parallelGroupId !== pb.parallelGroupId) return false
+  if (pa.parallelLaneIndex === undefined || pb.parallelLaneIndex === undefined) return false
+  return pa.parallelLaneIndex !== pb.parallelLaneIndex
+}
+
+function appendOrthoEdge(
+  content: d3.Selection<SVGGElement, unknown, null, undefined>,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  markerUrl: string,
+  stroke: string,
+  strokeWidth: number
+) {
+  const mid = (x1 + x2) / 2
+  const path = d3.path()
+  path.moveTo(x1, y1)
+  path.lineTo(mid, y1)
+  path.lineTo(mid, y2)
+  path.lineTo(x2, y2)
+  content
+    .append('path')
+    .attr('d', path.toString())
+    .attr('fill', 'none')
+    .attr('stroke', stroke)
+    .attr('stroke-width', strokeWidth)
+    .attr('marker-end', markerUrl)
 }
 
 interface Props {
   actions: (MappedAction & { row: number })[]
   durationMode: boolean
   colorMode: 'status' | 'tokens'
+  onForkFromAction?: (action: MappedAction & { row: number }) => void
+  onAnalyzeFromAction?: (action: MappedAction & { row: number }) => void
   /** 仅用于 UI 假数据演示：在某个 action 位置视觉分叉 */
   mockBranchForkActionIndex?: number
 }
@@ -193,12 +385,19 @@ export default function ActionFlowVisualization({
   actions,
   durationMode,
   colorMode,
+  onForkFromAction,
+  onAnalyzeFromAction,
   mockBranchForkActionIndex,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const [contextMenu, setContextMenu] = useState<ActionFlowContextMenuState | null>(null)
   const reactId = useId().replace(/:/g, '')
   const markerId = `action-flow-arrow-${reactId}`
   const tooltipId = `action-flow-tip-${reactId}`
+  const layoutEstimate = useMemo(
+    () => computeLayout(actions, durationMode),
+    [actions, durationMode]
+  )
 
   useLayoutEffect(() => {
     const svg = svgRef.current
@@ -253,6 +452,7 @@ export default function ActionFlowVisualization({
         ) {
           continue
         }
+        if (parallelSiblingSkip(pa, pb)) continue
       }
       const x1 = a.x + a.w
       const y1 = a.cy
@@ -273,6 +473,130 @@ export default function ActionFlowVisualization({
         .attr('marker-end', markerUrl)
     }
 
+    /** 并行组：前驱分叉到各 lane 首节点、各 lane 末节点汇合到后继 */
+    const groupIdToIndices = new Map<string, number[]>()
+    for (let i = 0; i < layout.length; i++) {
+      const item = layout[i]!
+      if (item.node.kind !== 'action') continue
+      const act = item.node as MappedAction & { row: number }
+      const gid = act.parallelGroupId
+      if (!gid) continue
+      let arr = groupIdToIndices.get(gid)
+      if (!arr) {
+        arr = []
+        groupIdToIndices.set(gid, arr)
+      }
+      arr.push(i)
+    }
+    for (const indices of groupIdToIndices.values()) {
+      if (indices.length < 2) continue
+      const groupActions = indices.map((idx) => ({
+        idx,
+        node: layout[idx]!.node as MappedAction & { row: number },
+      }))
+      const groupMinT = Math.min(...groupActions.map((g) => g.node.sortTime))
+      const groupMaxT = Math.max(...groupActions.map((g) => g.node.sortTime))
+      const indexSet = new Set(indices)
+
+      let predItem: (typeof layout)[0] | undefined
+      let predIdx = -1
+      for (let i = 0; i < layout.length - 1; i++) {
+        const it = layout[i]!
+        if (it.node.kind !== 'action') continue
+        const na = it.node as MappedAction & { row: number }
+        if (na.sortTime < groupMinT) {
+          predItem = it
+          predIdx = i
+        }
+      }
+
+      let succItem: (typeof layout)[0] | undefined
+      let succIdx = -1
+      for (let i = 0; i < layout.length; i++) {
+        if (indexSet.has(i)) continue
+        const it = layout[i]!
+        if (it.node.kind !== 'action') continue
+        const na = it.node as MappedAction & { row: number }
+        if (na.sortTime > groupMaxT) {
+          succItem = it
+          succIdx = i
+          break
+        }
+      }
+      if (succIdx < 0) {
+        for (let i = 0; i < layout.length; i++) {
+          if (indexSet.has(i)) continue
+          const it = layout[i]!
+          if (it.node.kind === 'end') {
+            succItem = it
+            succIdx = i
+            break
+          }
+        }
+      }
+
+      const byLane = new Map<number, number[]>()
+      for (const idx of indices) {
+        const act = layout[idx]!.node as MappedAction & { row: number }
+        const lane = act.parallelLaneIndex ?? 0
+        let list = byLane.get(lane)
+        if (!list) {
+          list = []
+          byLane.set(lane, list)
+        }
+        list.push(idx)
+      }
+      const forkStroke = actionFlowPalette.arrow
+      for (const laneIndices of byLane.values()) {
+        const sortedIdx = [...laneIndices].sort((a, b) => {
+          const ta = (layout[a]!.node as MappedAction & { row: number }).sortTime
+          const tb = (layout[b]!.node as MappedAction & { row: number }).sortTime
+          return ta - tb
+        })
+        // 同一并行 lane 内部必须保持连续连线，避免因全局相邻关系被打断而出现“中间断线”。
+        for (let i = 0; i < sortedIdx.length - 1; i++) {
+          const fromIdx = sortedIdx[i]!
+          const toIdx = sortedIdx[i + 1]!
+          appendOrthoEdge(
+            content,
+            layout[fromIdx]!.x + layout[fromIdx]!.w,
+            layout[fromIdx]!.cy,
+            layout[toIdx]!.x,
+            layout[toIdx]!.cy,
+            markerUrl,
+            forkStroke,
+            1.2
+          )
+        }
+        const firstIdx = sortedIdx[0]!
+        if (predItem && predIdx >= 0 && predIdx + 1 !== firstIdx) {
+          appendOrthoEdge(
+            content,
+            predItem.x + predItem.w,
+            predItem.cy,
+            layout[firstIdx]!.x,
+            layout[firstIdx]!.cy,
+            markerUrl,
+            forkStroke,
+            1.2
+          )
+        }
+        const lastIdx = sortedIdx[sortedIdx.length - 1]!
+        if (succItem && succIdx >= 0 && lastIdx + 1 !== succIdx) {
+          appendOrthoEdge(
+            content,
+            layout[lastIdx]!.x + layout[lastIdx]!.w,
+            layout[lastIdx]!.cy,
+            succItem.x,
+            succItem.cy,
+            markerUrl,
+            forkStroke,
+            1.2
+          )
+        }
+      }
+    }
+
     layout.forEach((item, layoutIndex) => {
       const { node, x: nx, y: ny, w, h } = item
       if (node.kind === 'end') {
@@ -289,7 +613,7 @@ export default function ActionFlowVisualization({
 
       const act = node as MappedAction & { row: number }
       const tc = tokenColor(colorScale, act.tokenEstimate)
-      const sc = statusColors(act.status)
+      const sc = effectiveStatusColors(act.status, act.durationMs)
       const isChildBranch = act.source === 'child-session'
       const fill = colorMode === 'status' ? sc.fill : tc.fill
       let stroke = colorMode === 'status' ? sc.stroke : tc.stroke
@@ -309,11 +633,20 @@ export default function ActionFlowVisualization({
         .attr('stroke-width', isChildBranch ? 1.65 : 1.5)
         .style('cursor', 'pointer')
         .attr('data-tooltip-id', tooltipId)
-        .attr('data-tooltip-html', buildActionTooltipHtml(act))
+        .attr('data-tooltip-html', buildCompactActionTooltipHtml(act))
         .attr('data-tooltip-place', 'top')
+      const canContext = act.messageID && (onForkFromAction || onAnalyzeFromAction)
+      const rectEl = rect.node() as SVGRectElement
+      if (canContext) {
+        rect.on('contextmenu', (ev: Event) => {
+          ev.preventDefault()
+          ev.stopPropagation()
+          setContextMenu({ anchorRect: rectEl.getBoundingClientRect(), action: act })
+        })
+      }
 
-      if (act.status === 'running' && colorMode === 'status') {
-        rect.attr('class', 'action-flow-running')
+      if ((act.status === 'running' || act.status === 'pending') && colorMode === 'status') {
+        rect.attr('class', sc.isLongRunning ? 'action-flow-running-long' : 'action-flow-running')
       }
 
       if (contentNode) {
@@ -325,6 +658,44 @@ export default function ActionFlowVisualization({
           iconFill,
           `${reactId}-${layoutIndex}-`
         )
+      }
+
+      if (canContext && w >= MORE_BTN_MIN_W) {
+        const moreG = content
+          .append('g')
+          .attr('class', 'action-flow-more')
+          .style('cursor', 'pointer')
+          .attr('data-tooltip-id', tooltipId)
+          .attr('data-tooltip-html', buildActionTooltipHtml(act))
+          .attr('data-tooltip-place', 'top')
+        moreG
+          .append('rect')
+          .attr('x', nx + w - 20)
+          .attr('y', ny + 2)
+          .attr('width', 18)
+          .attr('height', h - 4)
+          .attr('fill', 'transparent')
+          .attr('rx', 2)
+        moreG
+          .append('text')
+          .attr('x', nx + w - 11)
+          .attr('y', ny + h / 2 + 4)
+          .attr('text-anchor', 'middle')
+          .attr('font-size', 12)
+          .attr('font-weight', 700)
+          .attr('fill', '#64748B')
+          .attr('font-family', SVG_FONT_SANS)
+          .text('⋯')
+        moreG.on('click', (ev: MouseEvent) => {
+          ev.stopPropagation()
+          ev.preventDefault()
+          setContextMenu({ anchorRect: rectEl.getBoundingClientRect(), action: act })
+        })
+        moreG.on('contextmenu', (ev: Event) => {
+          ev.preventDefault()
+          ev.stopPropagation()
+          setContextMenu({ anchorRect: rectEl.getBoundingClientRect(), action: act })
+        })
       }
     })
 
@@ -448,22 +819,28 @@ export default function ActionFlowVisualization({
     // 关键：使用像素级固定画布，不用 viewBox 缩放，避免不同行数时 action 尺寸变化
     root.attr('width', totalW).attr('height', desiredH)
     svg.removeAttribute('viewBox')
-  }, [actions, durationMode, colorMode, markerId, tooltipId, mockBranchForkActionIndex])
+  }, [
+    actions,
+    durationMode,
+    colorMode,
+    markerId,
+    tooltipId,
+    mockBranchForkActionIndex,
+    onForkFromAction,
+    onAnalyzeFromAction,
+  ])
 
-  const maxRowForEstimate =
-    actions.length === 0
-      ? DEFAULT_MAX_ROW_INDEX
-      : Math.max(DEFAULT_MAX_ROW_INDEX, ...actions.map((a) => a.row), 1)
-  const contentHeight =
-    TOP_PAD +
-    maxRowForEstimate * ROW_H +
-    BLOCK_H +
-    BOTTOM_PAD +
-    (mockBranchForkActionIndex !== undefined ? ROW_H : 0)
-  const maxVisibleHeight = TOP_PAD + MAX_VISIBLE_ROWS * ROW_H + BLOCK_H + BOTTOM_PAD
-  const viewportHeight = Math.min(contentHeight, maxVisibleHeight)
+  const mockOffset = mockBranchForkActionIndex !== undefined ? ROW_H : 0
+  const contentHeight = layoutEstimate.totalH + mockOffset
+  /** 可视区域下限至少能容纳两行泳道，避免高度塌缩；上限仍限制最大可视高度，超出则内部滚动 */
+  const maxVisibleHeight = Math.max(
+    TOP_PAD + MAX_VISIBLE_ROWS * ROW_H + BLOCK_H + BOTTOM_PAD,
+    MIN_SVG_CONTENT_HEIGHT
+  )
+  const viewportHeight = Math.min(Math.max(contentHeight, MIN_SVG_CONTENT_HEIGHT), maxVisibleHeight)
 
   return (
+    <>
     <div
       style={{
         display: 'flex',
@@ -502,7 +879,15 @@ export default function ActionFlowVisualization({
         className="action-flow-react-tooltip"
         delayShow={150}
         opacity={1}
+        clickable
       />
     </div>
+    <ActionFlowContextMenu
+      menu={contextMenu}
+      onClose={() => setContextMenu(null)}
+      onFork={onForkFromAction}
+      onAnalysis={onAnalyzeFromAction}
+    />
+    </>
   )
 }

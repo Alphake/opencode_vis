@@ -5,6 +5,8 @@ import {
   getTodos,
   getMessages,
   sendMessage,
+  abortSession,
+  forkSession,
   createSession,
   updateSessionTitle,
   replyToQuestion,
@@ -13,11 +15,12 @@ import {
   subscribeWorkspaceEvents,
 } from './services/opencodeApi'
 import { normalizeSessionDirectory, uniqueDirectoriesFromSessions } from './utils/sessionFolders'
-import type { OcMessage, OcPendingQuestionRequest, OcTodo } from './types/opencode'
+import type { MappedAction, OcMessage, OcPendingQuestionRequest, OcTodo } from './types/opencode'
 import type { MessageSendPayload } from './components/MessageInput'
 import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
 import SubtaskDebugPanel from './components/SubtaskDebugPanel'
+import ActionAnalysisModal from './components/ActionAnalysisModal'
 import SubtaskMessageConnector from './components/SubtaskMessageConnector'
 import { groupAssistantSubtasks, isTodoWriteMessage } from './utils/subtaskGrouping'
 import { buildMappedActionsFromMessages } from './utils/actionMapping'
@@ -34,6 +37,7 @@ import { buildUserMessageWithGuidance } from './config/harnessGuidance'
 
 /** 每条「含 todo 写入」的 message 下标 → 当时同步到的 todos（用于重放 diff） */
 type TodosSnapshotMap = Record<string, OcTodo[]>
+const AUTO_ABORT_STUCK_RUNNING_AFTER_MS = 24 * 60 * 60 * 1000
 
 function formatMessageForConsole(msg: OcMessage | undefined, index: number) {
   if (!msg) {
@@ -89,6 +93,8 @@ function App() {
   /** 按 sessionID 保存待作答的 question 请求（SSE `question.asked`） */
   const [pendingQuestions, setPendingQuestions] = useState<Record<string, OcPendingQuestionRequest>>({})
   const [questionSubmitting, setQuestionSubmitting] = useState(false)
+  const [aborting, setAborting] = useState(false)
+  const [analysisAction, setAnalysisAction] = useState<(MappedAction & { row: number }) | null>(null)
 
   const directories = useMemo(() => {
     const u = uniqueDirectoriesFromSessions(sessions)
@@ -113,6 +119,7 @@ function App() {
 
   const pendingQuestionsRef = useRef(pendingQuestions)
   pendingQuestionsRef.current = pendingQuestions
+  const autoAbortedRunningKeysRef = useRef<Set<string>>(new Set())
 
   const activeSessionDirectory = useMemo(
     () => sessions.find(s => s.id === selectedSessionId)?.directory,
@@ -258,6 +265,54 @@ function App() {
   useEffect(() => {
     void loadSessionData(selectedSessionId, activeSessionDirectory)
   }, [selectedSessionId, activeSessionDirectory, loadSessionData])
+
+  /** 对于超过 24h 且无后续 assistant 消息收口的 running/pending tool，自动 abort 会话（每条 call 只触发一次）。 */
+  useEffect(() => {
+    if (!selectedSessionId || aborting) return
+    const now = Date.now()
+    let stuckCallId: string | undefined
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]
+      if (!msg || msg.info.role !== 'assistant') continue
+      const hasLaterAssistant = messages.slice(i + 1).some((m) => m?.info.role === 'assistant')
+      if (hasLaterAssistant) continue
+      for (const p of msg.parts) {
+        if (p.type !== 'tool') continue
+        const st = p.state?.status
+        if (st !== 'running' && st !== 'pending') continue
+        const start = p.state?.time?.start ?? msg.info.time?.created
+        if (typeof start !== 'number' || !Number.isFinite(start)) continue
+        if (now - start < AUTO_ABORT_STUCK_RUNNING_AFTER_MS) continue
+        stuckCallId = p.callID
+        break
+      }
+      if (stuckCallId) break
+    }
+    if (!stuckCallId) return
+
+    const runKey = `${selectedSessionId}:${stuckCallId}`
+    if (autoAbortedRunningKeysRef.current.has(runKey)) return
+    autoAbortedRunningKeysRef.current.add(runKey)
+
+    const dir = sessionsRef.current.find((s) => s.id === selectedSessionId)?.directory
+    setAborting(true)
+    void (async () => {
+      try {
+        await abortSession(selectedSessionId, dir)
+        const [list, msgs] = await Promise.all([
+          getSessions(),
+          getMessages(selectedSessionId, 'auto abort stuck running >24h', dir),
+        ])
+        setSessions(list)
+        setMessages(msgs)
+      } catch (err) {
+        console.warn('[auto-abort stuck running] failed:', err)
+        autoAbortedRunningKeysRef.current.delete(runKey)
+      } finally {
+        setAborting(false)
+      }
+    })()
+  }, [messages, selectedSessionId, aborting])
 
   useEffect(() => {
     setTodosSnapshotAtMessageIndex({})
@@ -531,6 +586,23 @@ function App() {
     setMessages(msgs)
   }, [selectedSessionId, sessions])
 
+  const handleAbortMessage = useCallback(async () => {
+    if (!selectedSessionId) return
+    const dir = sessions.find(s => s.id === selectedSessionId)?.directory
+    setAborting(true)
+    try {
+      await abortSession(selectedSessionId, dir)
+      const [list, msgs] = await Promise.all([
+        getSessions(),
+        getMessages(selectedSessionId, 'abort 后刷新', dir),
+      ])
+      setSessions(list)
+      setMessages(msgs)
+    } finally {
+      setAborting(false)
+    }
+  }, [selectedSessionId, sessions])
+
   const selectedSession = sessions.find(s => s.id === selectedSessionId)
 
   const handleSelectDirectory = useCallback(
@@ -565,6 +637,38 @@ function App() {
       setCreatingSession(false)
     }
   }, [selectedDirectory])
+
+  const handleForkFromAction = useCallback(async (action: MappedAction & { row: number }) => {
+    const targetSessionId = action.sessionID || selectedSessionId
+    if (!targetSessionId || !action.messageID) return
+    const dir = sessions.find((s) => s.id === targetSessionId)?.directory ?? activeSessionDirectory
+    setCreatingSession(true)
+    try {
+      const forked = await forkSession(targetSessionId, {
+        messageID: action.messageID,
+        directory: dir,
+      })
+      const list = await getSessions()
+      setSessions(list)
+      setApiConnected(true)
+      setSelectedDirectory(normalizeSessionDirectory(forked.directory))
+      setSelectedSessionId(forked.id)
+      const [msgs, td] = await Promise.all([
+        getMessages(forked.id, 'fork 后加载会话', forked.directory),
+        getTodos(forked.id, forked.directory),
+      ])
+      setMessages(msgs)
+      setTodos(td)
+    } catch (e) {
+      console.error('Failed to fork session from action:', e)
+    } finally {
+      setCreatingSession(false)
+    }
+  }, [sessions, selectedSessionId, activeSessionDirectory])
+
+  const handleAnalyzeFromAction = useCallback((action: MappedAction & { row: number }) => {
+    setAnalysisAction(action)
+  }, [])
 
   return (
     <div
@@ -631,6 +735,8 @@ function App() {
               sessionTitle={selectedSession?.title}
               onRefresh={() => loadSessionData(selectedSessionId, activeSessionDirectory)}
               onSendMessage={handleSendMessage}
+              onAbortMessage={handleAbortMessage}
+              aborting={aborting}
               messageListScrollRef={messageScrollRef}
               todoPanelScrollRef={todoPanelScrollRef}
               highlightMessageIndices={null}
@@ -689,6 +795,8 @@ function App() {
               visibleSubtasks={visibleSubtasks}
               linkedSubtaskIndex={linkedSubtaskIndex}
               onSelectSubtask={toggleSubtaskLink}
+              onForkFromAction={handleForkFromAction}
+              onAnalyzeFromAction={handleAnalyzeFromAction}
               listScrollRef={subtaskScrollRef}
               sessionDirectory={activeSessionDirectory}
             />
@@ -702,6 +810,9 @@ function App() {
           subtaskIndex={linkedSubtaskIndex}
           linkedTodoIds={linkedTodoIds}
         />
+        {analysisAction ? (
+          <ActionAnalysisModal action={analysisAction} onClose={() => setAnalysisAction(null)} />
+        ) : null}
       </div>
     </div>
   )

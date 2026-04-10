@@ -19,6 +19,8 @@ interface MessagePanelProps {
   sessionTitle?: string
   onRefresh: () => void
   onSendMessage: (payload: MessageSendPayload) => Promise<void>
+  onAbortMessage?: () => Promise<void>
+  aborting?: boolean
   /** 可滚动消息列表容器 ref（供联动连线计算） */
   messageListScrollRef?: RefObject<HTMLDivElement | null>
   /** Todo 列表面板滚动容器（与子任务连线时定位高亮行） */
@@ -52,6 +54,8 @@ export default function MessagePanel({
   sessionId,
   sessionTitle,
   onSendMessage,
+  onAbortMessage,
+  aborting,
   messageListScrollRef,
   todoPanelScrollRef,
   highlightMessageIndices,
@@ -75,6 +79,21 @@ export default function MessagePanel({
   const lastAssistantMsg = [...messages].reverse().find(m => m.info.role === 'assistant')
   const agentName = lastAssistantMsg?.info.agent || null
   const modelName = lastAssistantMsg?.info.model?.modelID || null
+  const assistantIndices = messages
+    .map((m, i) => (m.info.role === 'assistant' ? i : -1))
+    .filter((i) => i >= 0)
+  const hasRunningTool = messages.some((m, idx) => {
+    if (m.info.role !== 'assistant') return false
+    const assistantPos = assistantIndices.indexOf(idx)
+    const hasLaterAssistant = assistantPos >= 0 && assistantPos < assistantIndices.length - 1
+    return m.parts.some((p) => {
+      if (p.type !== 'tool') return false
+      const s = p.state?.status
+      if (s !== 'running' && s !== 'pending') return false
+      // 若已进入后续 assistant turn，该 running/pending 视为失效，不再显示终止按钮
+      return !hasLaterAssistant
+    })
+  })
 
   return (
     <div
@@ -189,6 +208,9 @@ export default function MessagePanel({
         <MessageInput
           onSend={onSendMessage}
           disabled={!sessionId || loading || questionSubmitting || blockComposerForQuestion}
+          onAbort={onAbortMessage}
+          isRunning={hasRunningTool}
+          aborting={aborting}
           sessionId={sessionId}
           agentName={agentName}
           modelName={modelName}

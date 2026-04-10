@@ -3,9 +3,12 @@ import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
 import {
+  applyParallelLayoutFromCalls,
+  buildChildSessionBandMap,
   buildChildSessionBranchActions,
   buildMappedActionsFromMessages,
   collectTaskChildDescriptors,
+  detectParallelCallMapping,
   extractChildSessionIdFromToolPart,
   isSubagentToolName,
 } from '../utils/actionMapping'
@@ -18,6 +21,7 @@ const fontSans =
 
 /** 子任务卡片最小高度；内容（如分叉可视化）变高时卡片随内容增高 */
 const CARD_MIN_HEIGHT = 220
+const LONG_RUNNING_MS = 60_000
 
 interface SubtaskCardProps {
   subtask: AssistantSubtask
@@ -27,13 +31,15 @@ interface SubtaskCardProps {
   cardIndex?: number
   isLinked?: boolean
   onSelectSubtask?: () => void
+  onForkFromAction?: (action: MappedAction & { row: number }) => void
+  onAnalyzeFromAction?: (action: MappedAction & { row: number }) => void
   /** 与 OpenCode 多目录一致，拉取子会话消息时必带 */
   sessionDirectory?: string
 }
 
 type ColorByMode = 'status' | 'tokens'
 
-function MetricBox({ label, value }: { label: string; value: string }) {
+function MetricBox({ label, value, alert }: { label: string; value: string; alert?: boolean }) {
   return (
     <div
       style={{
@@ -52,6 +58,7 @@ function MetricBox({ label, value }: { label: string; value: string }) {
       }}
     >
       <div
+        className={alert ? 'subtask-time-alert' : undefined}
         style={{
           fontFamily: fontSans,
           fontWeight: 600,
@@ -88,9 +95,12 @@ export default function SubtaskCard({
   cardIndex,
   isLinked = false,
   onSelectSubtask,
+  onForkFromAction,
+  onAnalyzeFromAction,
   sessionDirectory,
 }: SubtaskCardProps) {
-  const m = buildSubtaskCardMetrics(subtask, messages, displayIndex)
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  const m = buildSubtaskCardMetrics(subtask, messages, displayIndex, { nowMs: nowTick })
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [colorBy, setColorBy] = useState<ColorByMode>('status')
   const [childBranchActions, setChildBranchActions] = useState<(MappedAction & { row: number })[]>([])
@@ -103,13 +113,22 @@ export default function SubtaskCard({
   }, [subtask.assistantMessageIndices, messages])
 
   const parentFlowActions = useMemo(
-    () => buildMappedActionsFromMessages(segmentMessages),
-    [segmentMessages]
+    () => buildMappedActionsFromMessages(segmentMessages, { nowMs: nowTick }),
+    [segmentMessages, nowTick]
   )
 
   const taskDescriptors = useMemo(
     () => collectTaskChildDescriptors(segmentMessages),
     [segmentMessages]
+  )
+  const parallelByCallId = useMemo(
+    () => detectParallelCallMapping(segmentMessages, nowTick),
+    [segmentMessages, nowTick]
+  )
+  /** 并行子会话共享同一 band；非并行仍按唯一 childSessionID 递增。 */
+  const childSessionBandMap = useMemo(
+    () => buildChildSessionBandMap(taskDescriptors, parallelByCallId),
+    [taskDescriptors, parallelByCallId]
   )
 
   const hasRunningTaskWithChild = useMemo(() => {
@@ -140,6 +159,9 @@ export default function SubtaskCard({
             branchChildSessionID: d.childSessionID,
             parentTaskCallID: d.callID,
             anchorSortTime: d.anchorSortTime,
+            /** 按 session 固定分配进程带：第 1 个唯一子 session=1，第 2 个=2 ... */
+            sessionBandIndex: childSessionBandMap.get(d.childSessionID) ?? 1,
+            nowMs: nowTick,
           })
         } catch {
           return [] as (MappedAction & { row: number })[]
@@ -147,7 +169,7 @@ export default function SubtaskCard({
       }),
     )
     setChildBranchActions(results.flat())
-  }, [taskDescriptors, sessionDirectory])
+  }, [taskDescriptors, sessionDirectory, childSessionBandMap, nowTick])
 
   useEffect(() => {
     void loadChildBranches()
@@ -162,8 +184,23 @@ export default function SubtaskCard({
   }, [hasRunningTaskWithChild, loadChildBranches])
 
   const flowActions = useMemo(() => {
-    return [...parentFlowActions, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
-  }, [parentFlowActions, childBranchActions])
+    const merged = [...parentFlowActions, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
+    return applyParallelLayoutFromCalls(merged, parallelByCallId)
+  }, [parentFlowActions, childBranchActions, parallelByCallId])
+  const hasActiveRunningAction = useMemo(
+    () => flowActions.some((a) => a.status === 'running' || a.status === 'pending'),
+    [flowActions],
+  )
+  const hasLongRunningAction = useMemo(
+    () => flowActions.some((a) => (a.status === 'running' || a.status === 'pending') && a.durationMs >= LONG_RUNNING_MS),
+    [flowActions],
+  )
+
+  useEffect(() => {
+    if (!hasActiveRunningAction) return
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [hasActiveRunningAction])
 
   const durationLabel = formatDurationMs(m.durationMs)
   const changesLabel = String(m.mutatedFileCount)
@@ -184,14 +221,18 @@ export default function SubtaskCard({
         gap: 4,
         width: '100%',
         background: '#FCFCFC',
-        border: isLinked ? `2px solid ${actionFlowPalette.green.stroke}` : '1px solid #DBDBDB',
         borderRadius: 14,
         marginBottom: 8,
         fontFamily: fontSans,
         overflow: 'visible',
-        boxShadow: isLinked ? `0 0 0 3px rgba(145, 163, 123, 0.22)` : 'none',
         cursor: onSelectSubtask ? 'pointer' : 'default',
         transition: 'box-shadow 0.15s ease, border-color 0.15s ease',
+        border: hasLongRunningAction
+          ? (isLinked ? '2px solid #FF6B6B' : '1px solid #FF6B6B')
+          : (isLinked ? `2px solid ${actionFlowPalette.green.stroke}` : '1px solid #DBDBDB'),
+        boxShadow: isLinked
+          ? `0 0 0 3px rgba(145, 163, 123, 0.22)`
+          : 'none',
       }}
     >
       <h3
@@ -344,6 +385,8 @@ export default function SubtaskCard({
           actions={flowActions}
           durationMode={actionsDurationOn}
           colorMode={colorBy === 'status' ? 'status' : 'tokens'}
+          onForkFromAction={onForkFromAction}
+          onAnalyzeFromAction={onAnalyzeFromAction}
         />
       </div>
 
@@ -360,7 +403,7 @@ export default function SubtaskCard({
       >
         <MetricBox label="Agent Msg" value={String(m.llmCallCount)} />
         <MetricBox label="Changes" value={changesLabel} />
-        <MetricBox label="Time" value={durationLabel} />
+        <MetricBox label="Time" value={durationLabel} alert={hasLongRunningAction} />
         <MetricBox label="Total Tokens" value={String(m.tokensSegmentSum)} />
         <MetricBox label="Cost" value={formatSubtaskCostDisplay(m)} />
       </div>

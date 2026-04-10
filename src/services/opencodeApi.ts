@@ -185,6 +185,46 @@ export async function sendMessage(
   }
 }
 
+/** 中止当前会话正在运行的本轮执行（OpenCode: POST /session/:id/abort） */
+export async function abortSession(sessionId: string, directory?: string): Promise<void> {
+  const url = `${BASE}/session/${sessionId}/abort`
+  console.log(`${LOG.http} POST 中止会话执行`, url, directory ? { directory } : '')
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: withDirectoryHeaders({}, directory),
+  })
+  const bodyText = await res.text()
+  if (!res.ok) {
+    throw new Error(`abortSession failed: ${res.status} ${bodyText}`)
+  }
+}
+
+/** 原生分叉会话（OpenCode: POST /session/:id/fork，可选 messageID 锚点） */
+export async function forkSession(
+  sessionId: string,
+  options?: { messageID?: string; directory?: string }
+): Promise<OcSession> {
+  const url = `${BASE}/session/${sessionId}/fork`
+  const body = options?.messageID ? { messageID: options.messageID } : {}
+  console.log(
+    `${LOG.http} POST 分叉会话`,
+    url,
+    options?.messageID ? { messageID: options.messageID } : {},
+    options?.directory ? { directory: options.directory } : ''
+  )
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: withDirectoryHeaders({ 'Content-Type': 'application/json' }, options?.directory),
+    body: JSON.stringify(body),
+  })
+  const bodyText = await res.text()
+  if (!res.ok) {
+    throw new Error(`forkSession failed: ${res.status} ${bodyText}`)
+  }
+  const data = JSON.parse(bodyText) as OcSession
+  return data
+}
+
 export async function getDiff(sessionId: string): Promise<any[]> {
   const res = await fetch(`${BASE}/session/${sessionId}/diff`)
   if (!res.ok) throw new Error(`Failed to fetch diff: ${res.status}`)

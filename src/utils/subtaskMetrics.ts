@@ -181,7 +181,8 @@ export function formatDurationMs(ms: number | null | undefined): string {
 export function buildSubtaskCardMetrics(
   st: AssistantSubtask,
   messages: OcMessage[],
-  displayIndex: number
+  displayIndex: number,
+  options?: { nowMs?: number }
 ): SubtaskCardMetrics {
   const indices = st.assistantMessageIndices
   const msgs = indices.map(i => messages[i]).filter((m): m is OcMessage => !!m)
@@ -228,11 +229,22 @@ export function buildSubtaskCardMetrics(
   }
   const mutatedFilePaths = [...paths].sort()
 
+  const nowMs = options?.nowMs ?? Date.now()
   let minCreated = Infinity
   let maxEnd = -Infinity
   for (const m of msgs) {
     const c = m.info.time.created
-    const e = m.info.time.completed ?? c
+    let e = m.info.time.completed ?? c
+    // 若消息里含 running/pending 工具，按 tool.start→now 计入进行中时长
+    for (const p of m.parts) {
+      if (p.type !== 'tool') continue
+      const st = p.state?.status
+      if (st !== 'running' && st !== 'pending') continue
+      const start = p.state?.time?.start ?? c
+      if (typeof start === 'number' && Number.isFinite(start)) {
+        e = Math.max(e, nowMs)
+      }
+    }
     minCreated = Math.min(minCreated, c)
     maxEnd = Math.max(maxEnd, e)
   }

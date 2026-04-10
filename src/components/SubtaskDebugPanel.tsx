@@ -1,5 +1,5 @@
 import type { RefObject } from 'react'
-import type { OcMessage } from '../types/opencode'
+import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import SubtaskCard from './SubtaskCard'
 
@@ -8,6 +8,8 @@ interface SubtaskDebugPanelProps {
   visibleSubtasks: Array<{ subtask: AssistantSubtask; sourceIndex: number }>
   linkedSubtaskIndex: number | null
   onSelectSubtask: (index: number) => void
+  onForkFromAction?: (action: MappedAction & { row: number }) => void
+  onAnalyzeFromAction?: (action: MappedAction & { row: number }) => void
   listScrollRef?: RefObject<HTMLDivElement | null>
   sessionDirectory?: string
 }
@@ -17,6 +19,8 @@ export default function SubtaskDebugPanel({
   visibleSubtasks,
   linkedSubtaskIndex,
   onSelectSubtask,
+  onForkFromAction,
+  onAnalyzeFromAction,
   listScrollRef,
   sessionDirectory,
 }: SubtaskDebugPanelProps) {
@@ -52,6 +56,8 @@ export default function SubtaskDebugPanel({
               cardIndex={sourceIndex}
               isLinked={linkedSubtaskIndex === sourceIndex}
               onSelectSubtask={() => onSelectSubtask(sourceIndex)}
+              onForkFromAction={onForkFromAction}
+              onAnalyzeFromAction={onAnalyzeFromAction}
               sessionDirectory={sessionDirectory}
             />
           ))

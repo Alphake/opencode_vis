@@ -8,7 +8,10 @@ export type MessageSendPayload = {
 
 interface MessageInputProps {
   onSend: (payload: MessageSendPayload) => Promise<void>
+  onAbort?: () => Promise<void>
   disabled?: boolean
+  isRunning?: boolean
+  aborting?: boolean
   sessionId?: string
   agentName?: string | null
   modelName?: string | null
@@ -22,7 +25,7 @@ const MAX_ROWS = 6
 const MIN_H = MIN_ROWS * LINE_PX
 const MAX_H = MAX_ROWS * LINE_PX
 
-export default function MessageInput({ onSend, disabled, agentName, modelName }: MessageInputProps) {
+export default function MessageInput({ onSend, onAbort, disabled, isRunning, aborting, agentName, modelName }: MessageInputProps) {
   const [text, setText] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [sending, setSending] = useState(false)
@@ -40,22 +43,40 @@ export default function MessageInput({ onSend, disabled, agentName, modelName }:
 
   const canSend =
     (text.trim().length > 0 || files.length > 0) && !sending && !disabled
+  const canAbort = Boolean(isRunning && onAbort && !aborting && !disabled)
 
   const handleSend = async () => {
     if (!canSend) return
+    const prevText = text
+    const prevFiles = files
+    // 发送即清空，避免长请求期间仍残留输入
+    setText('')
+    setFiles([])
     setSending(true)
     setAttachError(null)
     try {
-      const { combinedText, images } = await prepareOutgoingFromFiles(files, text)
+      const { combinedText, images } = await prepareOutgoingFromFiles(prevFiles, prevText)
       await onSend({ combinedText, imageParts: images })
-      setText('')
-      setFiles([])
     } catch (err) {
+      // 失败时回填用户草稿
+      setText(prevText)
+      setFiles(prevFiles)
       const msg = err instanceof Error ? err.message : String(err)
       setAttachError(msg)
       console.error('[MessageInput]', err)
     } finally {
       setSending(false)
+    }
+  }
+
+  const handleAbort = async () => {
+    if (!canAbort || !onAbort) return
+    try {
+      await onAbort()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setAttachError(msg)
+      console.error('[MessageInput abort]', err)
     }
   }
 
@@ -211,25 +232,31 @@ export default function MessageInput({ onSend, disabled, agentName, modelName }:
 
           <button
             type="button"
-            onClick={() => void handleSend()}
-            disabled={!canSend}
+            onClick={() => void (canAbort ? handleAbort() : handleSend())}
+            disabled={canAbort ? false : !canSend}
             style={{
               width: 32,
               height: 32,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              background: canSend ? '#8B5CF6' : '#F5F5F5',
+              background: canAbort ? '#FFECEC' : (canSend ? '#8B5CF6' : '#F5F5F5'),
               border: 'none',
               borderRadius: 6,
-              cursor: canSend ? 'pointer' : 'not-allowed',
+              cursor: canAbort || canSend ? 'pointer' : 'not-allowed',
               opacity: sending ? 0.7 : 1,
             }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={canSend ? 'white' : '#CCC'} strokeWidth="2">
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
+            {canAbort ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#D94A4A" strokeWidth="2">
+                <rect x="6" y="6" width="12" height="12" rx="1.5" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={canSend ? 'white' : '#CCC'} strokeWidth="2">
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            )}
           </button>
         </div>
       </div>

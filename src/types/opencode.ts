@@ -203,6 +203,8 @@ export interface MappedAction {
   /** 排序与时间轴 */
   sortTime: number
   source: 'part' | 'sse-permission' | 'sse-session' | 'child-session'
+  /** 该动作所属会话 id（用于从任意 action 触发 fork） */
+  sessionID?: string
   messageID?: string
   callID?: string
   /** task/subagent 工具对应的子会话 id（若可解析） */
@@ -213,6 +215,12 @@ export interface MappedAction {
   branchChildSessionID?: string
   /** 父消息里触发 task 的 callID，用于分叉连线对齐 */
   parentTaskCallID?: string
+  /** 工具 wall-clock 区间（用于并行重叠判定）；仅 part 工具有值 */
+  toolWindow?: { startMs: number; endMs: number }
+  /** 同一 message 内时间重叠且 callID 同 stem 的并行组 */
+  parallelGroupId?: string
+  /** 并行组内 lane（0..n-1），子会话动作继承父 task 的 lane */
+  parallelLaneIndex?: number
   partIndex?: number
   messageIndex?: number
   detail?: string

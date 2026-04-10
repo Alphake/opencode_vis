@@ -155,3 +155,35 @@ body {
 .action-flow-running {
   animation: actionFlowRunningPulse 0.9s ease-in-out infinite;
 }
+
+@keyframes actionFlowRunningLongPulse {
+  0%,
+  100% {
+    opacity: 1;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 0.75;
+    filter: brightness(1.2) drop-shadow(0 0 2px rgba(255, 80, 80, 0.65));
+  }
+}
+
+.action-flow-running-long {
+  animation: actionFlowRunningLongPulse 0.65s ease-in-out infinite;
+}
+
+@keyframes subtaskTimeAlertPulse {
+  0%,
+  100% {
+    color: #C13C3C;
+    opacity: 1;
+  }
+  50% {
+    color: #E24F4F;
+    opacity: 0.65;
+  }
+}
+
+.subtask-time-alert {
+  animation: subtaskTimeAlertPulse 0.75s ease-in-out infinite;
+}
