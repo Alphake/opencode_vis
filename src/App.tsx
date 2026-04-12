@@ -642,6 +642,7 @@ function App() {
     const targetSessionId = action.sessionID || selectedSessionId
     if (!targetSessionId || !action.messageID) return
     const dir = sessions.find((s) => s.id === targetSessionId)?.directory ?? activeSessionDirectory
+
     setCreatingSession(true)
     try {
       const forked = await forkSession(targetSessionId, {

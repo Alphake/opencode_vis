@@ -226,22 +226,16 @@ function resolveSnapshotForSegment(
   return fallback.map(shallowCloneTodo)
 }
 
-function assistantRangesSplitByUser(messages: OcMessage[]): number[][] {
-  const ranges: number[][] = []
-  let cur: number[] = []
+/**
+ * 全部 assistant 消息下标（按时间顺序），**不按 user 切段**。
+ * 子任务应按 todo 快照的完成关系连续积累；user 仅表示新一轮对话，不应单独重置 execution 分段。
+ */
+function assistantIndicesAll(messages: OcMessage[]): number[] {
+  const out: number[] = []
   for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!
-    if (msg.info.role === 'user') {
-      if (cur.length > 0) ranges.push(cur)
-      cur = []
-      continue
-    }
-    if (msg.info.role === 'assistant') {
-      cur.push(i)
-    }
+    if (messages[i]!.info.role === 'assistant') out.push(i)
   }
-  if (cur.length > 0) ranges.push(cur)
-  return ranges
+  return out
 }
 
 function collectIndicesInclusive(range: number[], lo: number, hi: number): number[] {
@@ -267,7 +261,10 @@ export function groupAssistantSubtasks(
 
   const subtasks: AssistantSubtask[] = []
 
-  for (const range of assistantRangesSplitByUser(messages)) {
+  const globalRange = assistantIndicesAll(messages)
+  if (globalRange.length === 0) return subtasks
+
+  for (const range of [globalRange]) {
     const rangeSubtasks: AssistantSubtask[] = []
 
     const push = (
@@ -324,6 +321,14 @@ export function groupAssistantSubtasks(
     }
 
     let segmentStart = twIndices[0]!
+    const firstAssistant = range[0]!
+    if (segmentStart > firstAssistant) {
+      const leading = collectIndicesInclusive(range, firstAssistant, segmentStart - 1)
+      if (leading.length > 0) {
+        push(leading, 'planning', fallback, [])
+      }
+    }
+
     for (let k = 1; k < twIndices.length; k++) {
       const prevTw = twIndices[k - 1]!
       const curTw = twIndices[k]!

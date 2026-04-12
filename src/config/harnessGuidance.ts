@@ -16,7 +16,7 @@ export const HARNESS_GUIDANCE_ENABLED = true
  * 每条用户消息前附加的引导（可按需改写）。
  * 建议保留「先计划、再执行」的结构，便于与子任务 / Todo 可视化对齐。
  */
-export const HARNESS_USER_GUIDANCE = `[计划优先]回答用户输入前，总是先列出计划，使用todowrite工具生成todo,然后再执行。如果当前已有进行中的todo，不要新建todo,而是保留已有的已完成然后根据实际需要决定是修改未完成待办还是按照计划执行。`
+export const HARNESS_USER_GUIDANCE = `[计划优先]回答用户输入前，总是先列出计划，使用todowrite工具生成todo,然后再执行。如果当前已有进行中的或部分完成的todo，不要完全新建todo,而是完全原样保留已有的已完成项，然后根据实际需要决定是修改未完成待办还是按照计划执行。`
 
 /**
  * 引导与真实用户输入之间的固定分隔（须与发送逻辑一致；展示侧也用它识别截断点）。
