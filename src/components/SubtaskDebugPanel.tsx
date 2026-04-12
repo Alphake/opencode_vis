@@ -45,7 +45,7 @@ export default function SubtaskDebugPanel({
         }}
       >
         {visibleSubtasks.length === 0 ? (
-          <span style={{ color: '#AAA', fontSize: 11 }}>暂无已进入 Todo 阶段的子任务</span>
+          <span style={{ color: '#AAA', fontSize: 11 }}>暂无子任务</span>
         ) : (
           visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => (
             <SubtaskCard

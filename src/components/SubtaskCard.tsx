@@ -12,6 +12,7 @@ import {
   extractChildSessionIdFromToolPart,
   isSubagentToolName,
 } from '../utils/actionMapping'
+import { mergeMessagesForActionTooltipLookup } from '../utils/actionTooltipMapping'
 import ActionFlowVisualization from './ActionFlowVisualization'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import { getMessages } from '../services/opencodeApi'
@@ -100,10 +101,20 @@ export default function SubtaskCard({
   sessionDirectory,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
-  const m = buildSubtaskCardMetrics(subtask, messages, displayIndex, { nowMs: nowTick })
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [colorBy, setColorBy] = useState<ColorByMode>('status')
   const [childBranchActions, setChildBranchActions] = useState<(MappedAction & { row: number })[]>([])
+  /** task 子会话原文，用于 Changes 合并统计 write/edit 路径 */
+  const [childBranchMessages, setChildBranchMessages] = useState<OcMessage[]>([])
+
+  const m = useMemo(
+    () =>
+      buildSubtaskCardMetrics(subtask, messages, displayIndex, {
+        nowMs: nowTick,
+        additionalMessages: childBranchMessages,
+      }),
+    [subtask, messages, displayIndex, nowTick, childBranchMessages],
+  )
 
   /** 本子任务段内的 assistant 消息（顺序与全局 timeline 一致） */
   const segmentMessages = useMemo((): OcMessage[] => {
@@ -145,6 +156,7 @@ export default function SubtaskCard({
   const loadChildBranches = useCallback(async () => {
     if (taskDescriptors.length === 0) {
       setChildBranchActions([])
+      setChildBranchMessages([])
       return
     }
     const results = await Promise.all(
@@ -155,7 +167,7 @@ export default function SubtaskCard({
             `子会话 branch · ${d.callID.slice(0, 12)}`,
             sessionDirectory,
           )
-          return buildChildSessionBranchActions(msgs, {
+          const actions = buildChildSessionBranchActions(msgs, {
             branchChildSessionID: d.childSessionID,
             parentTaskCallID: d.callID,
             anchorSortTime: d.anchorSortTime,
@@ -163,12 +175,17 @@ export default function SubtaskCard({
             sessionBandIndex: childSessionBandMap.get(d.childSessionID) ?? 1,
             nowMs: nowTick,
           })
+          return { msgs, actions }
         } catch {
-          return [] as (MappedAction & { row: number })[]
+          return {
+            msgs: [] as OcMessage[],
+            actions: [] as (MappedAction & { row: number })[],
+          }
         }
       }),
     )
-    setChildBranchActions(results.flat())
+    setChildBranchActions(results.flatMap((r) => r.actions))
+    setChildBranchMessages(results.flatMap((r) => r.msgs))
   }, [taskDescriptors, sessionDirectory, childSessionBandMap, nowTick])
 
   useEffect(() => {
@@ -187,6 +204,12 @@ export default function SubtaskCard({
     const merged = [...parentFlowActions, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
     return applyParallelLayoutFromCalls(merged, parallelByCallId)
   }, [parentFlowActions, childBranchActions, parallelByCallId])
+
+  /** 与 `flowActions` 中 `partId` 查找一致：父段消息 + 子会话拉取消息 */
+  const tooltipLookupMessages = useMemo(
+    () => mergeMessagesForActionTooltipLookup(segmentMessages, childBranchMessages),
+    [segmentMessages, childBranchMessages]
+  )
   const hasActiveRunningAction = useMemo(
     () => flowActions.some((a) => a.status === 'running' || a.status === 'pending'),
     [flowActions],
@@ -385,6 +408,7 @@ export default function SubtaskCard({
           actions={flowActions}
           durationMode={actionsDurationOn}
           colorMode={colorBy === 'status' ? 'status' : 'tokens'}
+          tooltipMessages={tooltipLookupMessages}
           onForkFromAction={onForkFromAction}
           onAnalyzeFromAction={onAnalyzeFromAction}
         />

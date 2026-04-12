@@ -99,6 +99,8 @@ export type ToolPart = {
     status: 'pending' | 'running' | 'completed' | 'error'
     input?: Record<string, unknown>
     output?: string
+    /** 服务端生成的可读标题（如 read 路径、websearch 查询摘要、bash 说明） */
+    title?: string
     /** 部分工具（如 task）会把子会话信息放在 metadata（running/completed 都可能出现） */
     metadata?: Record<string, unknown>
     /** 工具失败时的错误（常见形态：`ProviderModelNotFoundError: ...`） */
@@ -223,6 +225,8 @@ export interface MappedAction {
   parallelLaneIndex?: number
   partIndex?: number
   messageIndex?: number
+  /** 对应 `OcMessagePart.id`，用于在合并后的消息列表中唯一定位 part（避免 messageIndex 与数组不一致） */
+  partId?: string
   detail?: string
   errorName?: string
   errorMessage?: string

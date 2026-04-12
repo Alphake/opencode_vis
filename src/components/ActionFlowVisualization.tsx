@@ -1,7 +1,14 @@
 import { useLayoutEffect, useRef, useId, useMemo, useState } from 'react'
 import * as d3 from 'd3'
 import { Tooltip } from 'react-tooltip'
-import type { ActionStatus, MappedAction } from '../types/opencode'
+import type { ActionStatus, MappedAction, OcMessage } from '../types/opencode'
+import {
+  type TooltipKeyValue,
+  buildEnglishTooltipContent,
+  formatEnglishTooltipContentHtml,
+  formatTooltipKeyValuesAsHtml,
+  resolvePartForAction,
+} from '../utils/actionTooltipMapping'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './ActionFlowContextMenu'
@@ -116,72 +123,64 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;')
 }
 
-function buildActionTooltipHtml(act: MappedAction & { row: number }): string {
-  const lines: string[] = []
-  lines.push(`<strong>Action</strong>: ${escapeHtml(String(act.actionType))}`)
-  {
-    const band = Math.floor(act.row / 2)
-    const layerLabel = act.row % 2 === 0 ? 'LLM 内' : '外部'
-    lines.push(`<strong>Row</strong>: ${act.row} · <strong>进程带</strong> ${band} · <strong>层</strong> ${layerLabel}`)
-  }
-  lines.push(`<strong>Status</strong>: ${escapeHtml(String(act.status))}`)
-  if (Number.isFinite(act.durationMs) && act.durationMs > 0) {
-    lines.push(`<strong>Duration</strong>: ${(act.durationMs / 1000).toFixed(2)}s`)
-  } else {
-    lines.push(`<strong>Duration</strong>: —`)
-  }
-  lines.push(`<strong>Tokens (est.)</strong>: ${act.tokenEstimate}`)
-  lines.push(`<strong>Source</strong>: ${escapeHtml(act.source)}`)
-  if (act.messageIndex !== undefined) {
-    lines.push(`<strong>Message</strong> #${act.messageIndex}`)
-  }
-  if (act.partIndex !== undefined) {
-    lines.push(`<strong>Part</strong> #${act.partIndex}`)
-  }
-  if (act.messageID) {
-    lines.push(`<strong>Message ID</strong>: ${escapeHtml(act.messageID)}`)
-  }
-  if (act.callID) {
-    lines.push(`<strong>Call ID</strong>: ${escapeHtml(act.callID)}`)
-  }
-  if (act.childSessionID) {
-    lines.push(`<strong>Child Session</strong>: ${escapeHtml(act.childSessionID)}`)
-  }
-  if (act.parallelKey) {
-    lines.push(`<strong>Parallel Key</strong>: ${escapeHtml(act.parallelKey)}`)
-  }
-  if (act.parallelGroupId) {
-    lines.push(`<strong>Parallel Group</strong>: ${escapeHtml(act.parallelGroupId)}`)
-  }
-  if (act.parallelLaneIndex !== undefined) {
-    lines.push(`<strong>Parallel Lane</strong>: ${act.parallelLaneIndex}`)
-  }
-  if (act.branchChildSessionID) {
-    lines.push(`<strong>Branch Session</strong>: ${escapeHtml(act.branchChildSessionID)}`)
-  }
-  if (act.parentTaskCallID) {
-    lines.push(`<strong>Parent Task Call</strong>: ${escapeHtml(act.parentTaskCallID)}`)
-  }
-  if (act.detail?.trim()) {
-    lines.push(`<strong>Detail</strong>: ${escapeHtml(act.detail.trim())}`)
-  }
-  if (act.errorName?.trim()) {
-    lines.push(`<strong>Error Name</strong>: ${escapeHtml(act.errorName.trim())}`)
-  }
-  if (act.errorMessage?.trim()) {
-    lines.push(`<strong>Error</strong>: ${escapeHtml(act.errorMessage.trim())}`)
-  }
-  return lines.join('<br/>')
+/** English semantic block: message `type` / tool name + status, then tool-specific KV (see `actionTooltipMapping`) */
+function buildSemanticTooltipBlockHtml(act: MappedAction & { row: number }, tooltipMessages?: OcMessage[]): string {
+  if (!tooltipMessages?.length) return ''
+  const part = resolvePartForAction(tooltipMessages, act)
+  if (!part) return ''
+  const content = buildEnglishTooltipContent(part, { allMessages: tooltipMessages })
+  return formatEnglishTooltipContentHtml(content, escapeHtml)
 }
 
-function buildCompactActionTooltipHtml(act: MappedAction & { row: number }): string {
-  const band = Math.floor(act.row / 2)
-  const layerLabel = act.row % 2 === 0 ? 'LLM 内' : '外部'
+/** Region 3: duration + coarse token estimate from `actionMapping` (chars/4) */
+function buildTooltipFooterHtml(act: MappedAction & { row: number }): string {
   const dur =
     Number.isFinite(act.durationMs) && act.durationMs > 0
       ? `${(act.durationMs / 1000).toFixed(2)}s`
       : '—'
-  return `<strong>${escapeHtml(String(act.actionType))}</strong> · ${escapeHtml(String(act.status))} · ${dur}<br/>进程 ${band} · ${layerLabel} · tok ${act.tokenEstimate}`
+  const rows: TooltipKeyValue[] = [{ key: 'Duration', value: dur }]
+  if (act.tokenEstimate > 0) {
+    rows.push({ key: 'Tokens (est.)', value: String(act.tokenEstimate) })
+  }
+  return formatTooltipKeyValuesAsHtml(rows, escapeHtml)
+}
+
+function buildActionTooltipHtml(act: MappedAction & { row: number }, tooltipMessages?: OcMessage[]): string {
+  const semantic = buildSemanticTooltipBlockHtml(act, tooltipMessages)
+  const footer = buildTooltipFooterHtml(act)
+  if (!semantic) {
+    return `<div class="action-tip-root"><div class="action-tip-footer">${footer}</div></div>`
+  }
+  return `<div class="action-tip-root"><div class="action-tip-main">${semantic}</div><div class="action-tip-sep" role="presentation"></div><div class="action-tip-footer">${footer}</div></div>`
+}
+
+function buildCompactActionTooltipHtml(act: MappedAction & { row: number }, tooltipMessages?: OcMessage[]): string {
+  const dur =
+    Number.isFinite(act.durationMs) && act.durationMs > 0
+      ? `${(act.durationMs / 1000).toFixed(2)}s`
+      : '—'
+  const tok = act.tokenEstimate > 0 ? String(act.tokenEstimate) : ''
+  let main = ''
+  if (tooltipMessages?.length) {
+    const part = resolvePartForAction(tooltipMessages, act)
+    if (part) {
+      const kv = buildEnglishTooltipContent(part, { allMessages: tooltipMessages })
+      const lines = kv.body.slice(0, 4).map((row) => {
+        if (row.kind === 'kv') return `${row.key}: ${truncatePlain(row.value, 52)}`
+        if (row.kind === 'error') return truncatePlain(row.value, 100)
+        return truncatePlain(row.value, 56)
+      })
+      main = `<div class="action-tip-compact-main"><div class="action-tip-compact-head"><strong>${escapeHtml(kv.primaryLabel)}</strong> <span class="action-tip-compact-status">${escapeHtml(kv.statusLabel)}</span></div>${lines.length ? `<div class="action-tip-compact-lines">${lines.map((l) => `<div class="action-tip-compact-line">${escapeHtml(l)}</div>`).join('')}</div>` : ''}</div>`
+    }
+  }
+  const foot = `<div class="action-tip-compact-footer">${escapeHtml(dur)}${tok ? ` · Tokens (est.) ${escapeHtml(tok)}` : ''}</div>`
+  return `<div class="action-tip-root action-tip-root--compact">${main}${foot}</div>`
+}
+
+function truncatePlain(s: string, max: number): string {
+  const t = s.trim()
+  if (t.length <= max) return t
+  return `${t.slice(0, max - 1)}…`
 }
 
 function verticalCenterOffsetY(
@@ -375,6 +374,11 @@ interface Props {
   actions: (MappedAction & { row: number })[]
   durationMode: boolean
   colorMode: 'status' | 'tokens'
+  /**
+   * 与 action 对应的原文查找表：须为 `segmentMessages` 与 `childBranchMessages` 的合并
+   *（见 `mergeMessagesForActionTooltipLookup`），以便用 `partId` 对齐 rect 与 `OcMessagePart`。
+   */
+  tooltipMessages?: OcMessage[]
   onForkFromAction?: (action: MappedAction & { row: number }) => void
   onAnalyzeFromAction?: (action: MappedAction & { row: number }) => void
   /** 仅用于 UI 假数据演示：在某个 action 位置视觉分叉 */
@@ -385,6 +389,7 @@ export default function ActionFlowVisualization({
   actions,
   durationMode,
   colorMode,
+  tooltipMessages,
   onForkFromAction,
   onAnalyzeFromAction,
   mockBranchForkActionIndex,
@@ -633,7 +638,7 @@ export default function ActionFlowVisualization({
         .attr('stroke-width', isChildBranch ? 1.65 : 1.5)
         .style('cursor', 'pointer')
         .attr('data-tooltip-id', tooltipId)
-        .attr('data-tooltip-html', buildCompactActionTooltipHtml(act))
+        .attr('data-tooltip-html', buildCompactActionTooltipHtml(act, tooltipMessages))
         .attr('data-tooltip-place', 'top')
       const canContext = act.messageID && (onForkFromAction || onAnalyzeFromAction)
       const rectEl = rect.node() as SVGRectElement
@@ -666,7 +671,7 @@ export default function ActionFlowVisualization({
           .attr('class', 'action-flow-more')
           .style('cursor', 'pointer')
           .attr('data-tooltip-id', tooltipId)
-          .attr('data-tooltip-html', buildActionTooltipHtml(act))
+          .attr('data-tooltip-html', buildActionTooltipHtml(act, tooltipMessages))
           .attr('data-tooltip-place', 'top')
         moreG
           .append('rect')
@@ -823,6 +828,7 @@ export default function ActionFlowVisualization({
     actions,
     durationMode,
     colorMode,
+    tooltipMessages,
     markerId,
     tooltipId,
     mockBranchForkActionIndex,
@@ -877,9 +883,11 @@ export default function ActionFlowVisualization({
       <Tooltip
         id={tooltipId}
         className="action-flow-react-tooltip"
+        variant="light"
         delayShow={150}
         opacity={1}
         clickable
+        arrowColor="#f8fafc"
       />
     </div>
     <ActionFlowContextMenu

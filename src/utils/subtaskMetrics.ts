@@ -125,6 +125,75 @@ function collectPathsFromToolPart(part: ToolPart, into: Set<string>) {
   if (p) into.add(p)
 }
 
+/** 从多条消息中收集 write/edit 等工具涉及的路径（用于 Changes 与子会话合并） */
+export function collectMutatedPathsFromMessages(msgs: OcMessage[], into: Set<string>): void {
+  for (const m of msgs) {
+    for (const part of m.parts) {
+      if (part.type === 'tool') collectPathsFromToolPart(part, into)
+    }
+  }
+}
+
+/** 单条 assistant 消息的「结束」时间：completed 或 running 工具则延伸到 now */
+function assistantMessageEndMs(msg: OcMessage, nowMs: number): number {
+  const c = msg.info.time.created
+  let e = msg.info.time.completed ?? c
+  for (const p of msg.parts) {
+    if (p.type !== 'tool') continue
+    const st = p.state?.status
+    if (st !== 'running' && st !== 'pending') continue
+    const start = p.state?.time?.start ?? c
+    if (typeof start === 'number' && Number.isFinite(start)) {
+      e = Math.max(e, nowMs)
+    }
+  }
+  return e
+}
+
+/**
+ * 子任务时长：按全局时间轴上 **连续** assistant 下标分段，各段内部「首 created → 末 end」相加；
+ * **不**把 user 消息插在中间时的间隔算进去（等待用户输入的时间）。
+ */
+export function computeSubtaskDurationExcludingUserGaps(
+  assistantIndices: number[],
+  allMessages: OcMessage[],
+  nowMs: number,
+): number | null {
+  if (assistantIndices.length === 0) return null
+  const sorted = [...new Set(assistantIndices)].sort((a, b) => a - b)
+  const chunks: number[][] = []
+  let cur: number[] = [sorted[0]!]
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1]!
+    const idx = sorted[i]!
+    if (idx === prev + 1) {
+      cur.push(idx)
+    } else {
+      chunks.push(cur)
+      cur = [idx]
+    }
+  }
+  chunks.push(cur)
+
+  let sum = 0
+  for (const chunk of chunks) {
+    const msgs = chunk.map((i) => allMessages[i]).filter((m): m is OcMessage => m != null)
+    if (msgs.length === 0) continue
+    let minCreated = Infinity
+    let maxEnd = -Infinity
+    for (const m of msgs) {
+      const c = m.info.time.created
+      const e = assistantMessageEndMs(m, nowMs)
+      minCreated = Math.min(minCreated, c)
+      maxEnd = Math.max(maxEnd, e)
+    }
+    if (Number.isFinite(minCreated) && maxEnd >= minCreated) {
+      sum += maxEnd - minCreated
+    }
+  }
+  return sum > 0 ? sum : null
+}
+
 function countPartsInMessages(messages: OcMessage[]): number {
   let n = 0
   for (const m of messages) {
@@ -182,7 +251,11 @@ export function buildSubtaskCardMetrics(
   st: AssistantSubtask,
   messages: OcMessage[],
   displayIndex: number,
-  options?: { nowMs?: number }
+  options?: {
+    nowMs?: number
+    /** task/subagent 子会话拉取到的消息：合并计入 Changes（write/edit 路径） */
+    additionalMessages?: OcMessage[]
+  },
 ): SubtaskCardMetrics {
   const indices = st.assistantMessageIndices
   const msgs = indices.map(i => messages[i]).filter((m): m is OcMessage => !!m)
@@ -220,38 +293,14 @@ export function buildSubtaskCardMetrics(
   const costEstimatedUsd = estimateCostUsdFromTokenBreakdown(bd)
 
   const paths = new Set<string>()
-  for (const m of msgs) {
-    for (const part of m.parts) {
-      if (part.type === 'tool') {
-        collectPathsFromToolPart(part, paths)
-      }
-    }
+  collectMutatedPathsFromMessages(msgs, paths)
+  if (options?.additionalMessages?.length) {
+    collectMutatedPathsFromMessages(options.additionalMessages, paths)
   }
   const mutatedFilePaths = [...paths].sort()
 
   const nowMs = options?.nowMs ?? Date.now()
-  let minCreated = Infinity
-  let maxEnd = -Infinity
-  for (const m of msgs) {
-    const c = m.info.time.created
-    let e = m.info.time.completed ?? c
-    // 若消息里含 running/pending 工具，按 tool.start→now 计入进行中时长
-    for (const p of m.parts) {
-      if (p.type !== 'tool') continue
-      const st = p.state?.status
-      if (st !== 'running' && st !== 'pending') continue
-      const start = p.state?.time?.start ?? c
-      if (typeof start === 'number' && Number.isFinite(start)) {
-        e = Math.max(e, nowMs)
-      }
-    }
-    minCreated = Math.min(minCreated, c)
-    maxEnd = Math.max(maxEnd, e)
-  }
-  const durationMs =
-    msgs.length > 0 && Number.isFinite(minCreated) && maxEnd >= minCreated
-      ? maxEnd - minCreated
-      : null
+  const durationMs = computeSubtaskDurationExcludingUserGaps(indices, messages, nowMs)
 
   return {
     title: deriveSubtaskTitle(st, messages, displayIndex),

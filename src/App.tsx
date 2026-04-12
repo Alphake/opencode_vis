@@ -366,27 +366,11 @@ function App() {
   }, [messages, todosSnapshotAtMessageIndex, todos, sessionTodoModel])
 
   /**
-   * 右栏子任务面板展示规则：
-   * - 第一次 todowrite 之前（前期调研）隐藏；
-   * - 一旦出现 todowrite（即 todo 已生成），该段及其后的子任务段持续展示并累计动作；
-   * - 因此 pending -> in_progress 也会继续显示为进行中的子任务（不会被丢弃）。
+   * 右栏子任务：与 `groupAssistantSubtasks` 结果一一对应并全部展示（含尚无 todowrite 的前期调研段）。
    */
   const visibleSubtasks = useMemo(
-    () => {
-      let todoStarted = false
-      return assistantSubtasks
-        .map((subtask, sourceIndex) => ({ subtask, sourceIndex }))
-        .filter(({ subtask }) => {
-          const hasTodowrite = subtask.assistantMessageIndices.some((i) => {
-            const msg = messages[i]
-            return msg ? isTodoWriteMessage(msg) : false
-          })
-          if (hasTodowrite) todoStarted = true
-          if (todoStarted) return true
-          return subtask.linkedTodoIds.length > 0
-        })
-    },
-    [assistantSubtasks, messages],
+    () => assistantSubtasks.map((subtask, sourceIndex) => ({ subtask, sourceIndex })),
+    [assistantSubtasks],
   )
 
   /** execution 子任务：用 todo id 高亮 */

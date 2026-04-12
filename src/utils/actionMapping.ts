@@ -337,6 +337,7 @@ function partToMappedAction(
         messageID,
         partIndex,
         messageIndex,
+        partId: part.id,
         detail: text.slice(0, 80),
       }
     }
@@ -353,6 +354,7 @@ function partToMappedAction(
         messageID,
         partIndex,
         messageIndex,
+        partId: part.id,
         detail: text.slice(0, 80),
       }
     }
@@ -368,6 +370,7 @@ function partToMappedAction(
         messageID,
         partIndex,
         messageIndex,
+        partId: part.id,
       }
     case 'tool': {
       const mappedType = mapToolToActionType(part.tool)
@@ -398,6 +401,7 @@ function partToMappedAction(
         toolWindow,
         partIndex,
         messageIndex,
+        partId: part.id,
         detail: part.tool,
         errorName: parsedErr.name,
         errorMessage:

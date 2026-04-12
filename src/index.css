@@ -187,3 +187,178 @@ body {
 .subtask-time-alert {
   animation: subtaskTimeAlertPulse 0.75s ease-in-out infinite;
 }
+
+/* Action 流 react-tooltip：浅色底、随内容增高（不强制滚动） */
+.action-flow-react-tooltip {
+  min-width: 260px;
+  width: max-content;
+  max-width: min(480px, 94vw) !important;
+  min-height: 0;
+  max-height: none !important;
+  overflow: visible !important;
+  white-space: normal !important;
+  padding: 10px 12px !important;
+  border-radius: 8px !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.1) !important;
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+  color: #0f172a !important;
+  background: #f8fafc !important;
+}
+
+.action-flow-react-tooltip .action-tip-root {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+
+.action-flow-react-tooltip .action-tip-main {
+  flex: 0 0 auto;
+}
+
+.action-flow-react-tooltip .action-tip-footer {
+  flex: 0 0 auto;
+  padding-top: 8px;
+  margin-top: 4px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.action-flow-react-tooltip .action-tip-footer .action-tip-kv {
+  padding: 3px 0;
+  border-bottom: none;
+}
+
+.action-flow-react-tooltip .action-tip-root--compact {
+  min-width: 200px;
+  max-width: min(360px, 92vw);
+}
+
+.action-flow-react-tooltip .action-tip-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.action-flow-react-tooltip .action-tip-primary {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.action-flow-react-tooltip .action-tip-status {
+  font-size: 12px;
+  color: #475569;
+  font-weight: 500;
+}
+
+.action-flow-react-tooltip .action-tip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.action-flow-react-tooltip .action-tip-text {
+  font-size: 12px;
+  color: #334155;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #f1f5f9;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.action-flow-react-tooltip .action-tip-sep {
+  height: 1px;
+  background: #e2e8f0;
+  margin: 8px 0;
+}
+
+.action-flow-react-tooltip .action-tip-kv {
+  display: grid;
+  grid-template-columns: minmax(4.5em, 7.5em) minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid #f1f5f9;
+  align-items: start;
+}
+
+.action-flow-react-tooltip .action-tip-kv:last-child {
+  border-bottom: none;
+}
+
+.action-flow-react-tooltip .action-tip-k {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.action-flow-react-tooltip .action-tip-v {
+  color: #0f172a;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.action-flow-react-tooltip .action-tip-error {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #7f1d1d;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 2px;
+  max-width: 100%;
+}
+
+.action-flow-react-tooltip .action-tip-compact-head {
+  color: #334155;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.action-flow-react-tooltip .action-tip-compact-snippet {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 400;
+}
+
+.action-flow-react-tooltip .action-tip-compact-main {
+  margin-bottom: 6px;
+}
+
+.action-flow-react-tooltip .action-tip-compact-status {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.action-flow-react-tooltip .action-tip-compact-lines {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.action-flow-react-tooltip .action-tip-compact-line {
+  font-size: 11px;
+  color: #475569;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.action-flow-react-tooltip .action-tip-compact-footer {
+  padding-top: 6px;
+  margin-top: 4px;
+  border-top: 1px solid #e2e8f0;
+  font-size: 11px;
+  color: #64748b;
+}
