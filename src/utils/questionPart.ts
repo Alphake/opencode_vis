@@ -1,4 +1,10 @@
-import type { OcMessage, OcQuestionInfo, ToolPart } from '../types/opencode'
+import type {
+  OcMessage,
+  OcPendingQuestionItem,
+  OcPendingQuestionRequest,
+  OcQuestionInfo,
+  ToolPart,
+} from '../types/opencode'
 
 /** 从 tool part 的 state.input 解析 question 工具的题干与选项（与 GET /message 一致） */
 export function parseQuestionInputQuestions(input: Record<string, unknown> | undefined): OcQuestionInfo[] {
@@ -20,14 +26,39 @@ export function messagesHaveOpenQuestionWithInput(messages: OcMessage[]): boolea
   return false
 }
 
-/** 供与 GET /question 列表匹配 */
-export function findQuestionRequestIdForToolPart(
-  list: Array<{ id: string; sessionID: string; tool?: { messageID: string; callID: string } }>,
+function toolPartMatchesPending(
+  tool: OcPendingQuestionItem['tool'],
+  part: ToolPart,
+): boolean {
+  if (!tool) return false
+  const mid = tool.messageID ?? tool.messageId
+  const cid = tool.callID ?? tool.callId
+  return mid === part.messageID && cid === part.callID
+}
+
+/**
+ * 优先使用全局 SSE `question.asked` 写入的待答对象（含官方 `id` = request id），
+ * 与当前 tool part 的 messageID/callID 对齐。比单独依赖 GET /question 更可靠。
+ */
+export function findRequestIdFromSsePending(
+  pending: OcPendingQuestionRequest | null | undefined,
   part: ToolPart,
 ): string | undefined {
-  const hit = list.find(
-    (q) => q.tool?.messageID === part.messageID && q.tool?.callID === part.callID,
-  )
+  if (!pending || pending.sessionID !== part.sessionID) return undefined
+  const t = pending.tool
+  if (!t) return pending.id
+  const mid = t.messageID ?? (t as { messageId?: string }).messageId
+  const cid = t.callID ?? (t as { callId?: string }).callId
+  if (mid === part.messageID && cid === part.callID) return pending.id
+  return undefined
+}
+
+/** 供与 GET /question 列表匹配（兼容 messageId/callId 等字段名） */
+export function findQuestionRequestIdForToolPart(
+  list: OcPendingQuestionItem[],
+  part: ToolPart,
+): string | undefined {
+  const hit = list.find((q) => toolPartMatchesPending(q.tool, part))
   if (hit) return hit.id
   const sameSession = list.filter((q) => q.sessionID === part.sessionID)
   if (sameSession.length === 1) return sameSession[0]!.id

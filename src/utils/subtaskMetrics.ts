@@ -1,5 +1,6 @@
 import type { OcMessage, OcMessagePart, ToolPart } from '../types/opencode'
 import type { AssistantSubtask } from './subtaskGrouping'
+import { parseWebsearchTitleQuery } from './actionTooltipMapping'
 
 /** 与 OpenCode 上下文面板一致的「单条 message token 合计」：input+output+reasoning+cache（见 opencode-context-panel.md） */
 /**
@@ -53,9 +54,25 @@ export interface SubtaskCardMetrics {
   tokensSegmentSum: number
   tokenBreakdown: SubtaskTokenBreakdown
   llmCallCount: number
-  /** 去重后的路径，来自 write/edit/replace 等 tool 的 input */
+  /**
+   * 本子任务内 **去重后的文件路径数**（来自 write/edit/replace/patch/apply_patch 等），
+   * 按路径 `Set` 去重，**不是**「写操作调用次数」。
+   */
   mutatedFilePaths: string[]
   mutatedFileCount: number
+  /**
+   * 读侧近似：单路径工具（read/grep/list 等 input 路径）去重数 + glob 的 metadata.count 之和（扫到的文件数近似）。
+   * 合并子会话 `additionalMessages`。仅用于流程终点摘要等，**不在**指标栏展示。
+   */
+  readFilesCount: number
+  /** 读工具去重后的路径列表（不含 glob 仅计数的部分） */
+  readFilePaths: string[]
+  /** glob 工具 meta.count 之和（近似匹配文件数） */
+  globMatchFileCount: number
+  /** websearch / webfetch 每次调用的关键词或 URL（顺序保留） */
+  webSearchQueries: string[]
+  /** websearch / webfetch 调用次数（等于 webSearchQueries.length 若每次都能解析出标签） */
+  webSearchCallCount: number
   /** 首条 created → 末条 completed（无则用 created）的跨度 ms */
   durationMs: number | null
   /** 本子任务内各 assistant message 的 `info.cost` 之和（API 未给则为 0） */
@@ -117,6 +134,70 @@ function extractPathFromToolInput(input: Record<string, unknown> | undefined): s
     if (typeof v === 'string' && v.trim()) return v.trim()
   }
   return null
+}
+
+function normalizeToolNameLocal(tool: string): string {
+  return tool.trim().toLowerCase().replace(/-/g, '_')
+}
+
+function strInput(v: unknown): string | undefined {
+  if (typeof v === 'string' && v.trim()) return v.trim()
+  return undefined
+}
+
+/**
+ * 统计「读」相关：路径去重列表 + glob 结果文件数（meta.count）。
+ * grep 的 meta.count 多为匹配行数，不计入「文件数」。
+ */
+function collectReadFileStatsFromMessages(msgs: OcMessage[]): { readPathsSorted: string[]; globFileHits: number } {
+  const paths = new Set<string>()
+  let globFileHits = 0
+  for (const m of msgs) {
+    for (const part of m.parts) {
+      if (part.type !== 'tool') continue
+      const t = normalizeToolNameLocal(part.tool)
+      const meta = part.state?.metadata as Record<string, unknown> | undefined
+      const cnt = meta?.count
+      if (t === 'glob') {
+        if (typeof cnt === 'number' && cnt > 0) {
+          globFileHits += cnt
+        } else {
+          const p = extractPathFromToolInput(part.state?.input as Record<string, unknown> | undefined)
+          if (p) paths.add(p)
+        }
+        continue
+      }
+      if (t === 'grep' || t === 'read' || t === 'read_file' || t === 'list' || t === 'codesearch') {
+        const p = extractPathFromToolInput(part.state?.input as Record<string, unknown> | undefined)
+        if (p) paths.add(p)
+      }
+    }
+  }
+  return { readPathsSorted: [...paths].sort(), globFileHits }
+}
+
+/** websearch 关键词 / webfetch URL，按时间顺序 */
+function collectWebSearchQueriesFromMessages(msgs: OcMessage[]): string[] {
+  const out: string[] = []
+  for (const m of msgs) {
+    for (const part of m.parts) {
+      if (part.type !== 'tool') continue
+      const t = normalizeToolNameLocal(part.tool)
+      if (t !== 'websearch' && t !== 'web_search' && t !== 'webfetch' && t !== 'web_fetch') continue
+      const input = part.state?.input as Record<string, unknown> | undefined
+      const st = part.state as { title?: string } | undefined
+      if (t === 'websearch' || t === 'web_search') {
+        const q = strInput(input?.query) ?? parseWebsearchTitleQuery(st?.title)
+        if (q) out.push(q)
+        else out.push('(empty query)')
+      } else {
+        const url = strInput(input?.url) ?? strInput(st?.title)
+        if (url) out.push(url)
+        else out.push('(empty url)')
+      }
+    }
+  }
+  return out
 }
 
 function collectPathsFromToolPart(part: ToolPart, into: Set<string>) {
@@ -299,6 +380,14 @@ export function buildSubtaskCardMetrics(
   }
   const mutatedFilePaths = [...paths].sort()
 
+  const allForRead: OcMessage[] = [...msgs, ...(options?.additionalMessages ?? [])]
+  const readStats = collectReadFileStatsFromMessages(allForRead)
+  const readFilePaths = readStats.readPathsSorted
+  const globMatchFileCount = readStats.globFileHits
+  const readFilesCount = readFilePaths.length + globMatchFileCount
+  const webSearchQueries = collectWebSearchQueriesFromMessages(allForRead)
+  const webSearchCallCount = webSearchQueries.length
+
   const nowMs = options?.nowMs ?? Date.now()
   const durationMs = computeSubtaskDurationExcludingUserGaps(indices, messages, nowMs)
 
@@ -311,6 +400,11 @@ export function buildSubtaskCardMetrics(
     llmCallCount: msgs.length,
     mutatedFilePaths,
     mutatedFileCount: mutatedFilePaths.length,
+    readFilesCount,
+    readFilePaths,
+    globMatchFileCount,
+    webSearchQueries,
+    webSearchCallCount,
     durationMs,
     costSegmentSum,
     costEstimatedUsd,

@@ -188,6 +188,11 @@ body {
   animation: subtaskTimeAlertPulse 0.75s ease-in-out infinite;
 }
 
+/* 居中图标叠在 rect 之上，须穿透指针事件，否则会挡 tooltip 与 rect 上的 contextmenu */
+.action-flow-action-icon {
+  pointer-events: none;
+}
+
 /* Action 流 react-tooltip：浅色底、随内容增高（不强制滚动） */
 .action-flow-react-tooltip {
   min-width: 260px;
@@ -303,6 +308,28 @@ body {
   white-space: pre-wrap;
 }
 
+.action-flow-react-tooltip .action-tip-about {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.action-flow-react-tooltip .action-tip-about-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
+.action-flow-react-tooltip .action-tip-about-line {
+  font-size: 12px;
+  color: #0f172a;
+  word-break: break-word;
+  white-space: pre-wrap;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
 .action-flow-react-tooltip .action-tip-error {
   white-space: pre-wrap;
   word-break: break-word;
@@ -361,4 +388,19 @@ body {
   border-top: 1px solid #e2e8f0;
   font-size: 11px;
   color: #64748b;
+}
+
+/**
+ * 可选：ActionFlowVisualization 传 hideScrollbar 时加此类，隐藏滚动条但仍可滚轮滑动。
+ * 默认不隐藏，保留系统滚动条。
+ */
+.action-flow-scroll--hide-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.action-flow-scroll--hide-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }

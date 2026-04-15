@@ -227,6 +227,14 @@ export interface MappedAction {
   messageIndex?: number
   /** 对应 `OcMessagePart.id`，用于在合并后的消息列表中唯一定位 part（避免 messageIndex 与数组不一致） */
   partId?: string
+  /**
+   * 分叉会话可视化：来自父支子会话快照、且位于切出点之后的「幽灵」动作（已不在新会话上下文中，仅灰色展示）。
+   */
+  forkGhost?: boolean
+  /**
+   * Fork 对比单面板：0 共享前缀+锚点，1 父会话锚点后旧轨迹（灰），2 fork 后新轨迹。
+   */
+  forkCompareRow?: 0 | 1 | 2
   detail?: string
   errorName?: string
   errorMessage?: string
@@ -251,6 +259,14 @@ export type OcQuestionInfo = {
   options: OcQuestionOption[]
   multiple?: boolean
   custom?: boolean
+}
+
+/** `GET /question` 列表中的单条（用于与 tool part 的 messageID/callID 匹配 request id） */
+export type OcPendingQuestionItem = {
+  id: string
+  sessionID: string
+  questions: unknown[]
+  tool?: { messageID?: string; callID?: string; messageId?: string; callId?: string }
 }
 
 /** 待用户作答的一条请求（来自 SSE question.asked） */

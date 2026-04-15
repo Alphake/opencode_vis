@@ -21,15 +21,17 @@ const MARGIN_LEFT = 24
 const GAP = 12
 /**
  * 垂直布局（与 `actionMapping` 一致）：
- * - 每个 agent 进程占 2 条横轨：偶数 row = LLM 内层，奇数 row = 外部资源；
- * - 新 session（子 agent）在下方再占 2 条轨：row = processBand*2 + layer。
- * - 画布总高 = TOP_PAD + maxRowIndex * ROW_H + BLOCK_H + BOTTOM_PAD
+ * - 每个 session 块内 2 个基础 layer：layer0 = kernel（Think/Response/Plan…），layer1 = 工具与父级 task rect；
+ * - 同一 layer 上并行动作用 parallelLaneIndex 再向下错开，故「行数」随并行度增高；
+ * - 子会话块在 main 下方，内部同样 layer + lane，高度亦非定值。
  */
 const BLOCK_H = 28
 const ROW_H = 32
 /** 同一 row 上并行 lane 的垂直错开（与主 row 间距一致） */
 const PARALLEL_LANE_DY = ROW_H
 const SESSION_REGION_GAP = 10
+/** Fork 对比：锚点后换行 — 父旧轨迹（灰）与新轨迹的垂直间距 */
+const FORK_COMPARE_ROW_GAP = 44
 const TOP_PAD = 4
 const MIN_W = 28
 const BOTTOM_PAD = 6
@@ -43,6 +45,21 @@ const SVG_FONT_SANS =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
 /** 块太窄时右上角 ⋯ 会与居中图标重叠，仅宽块显示 */
 const MORE_BTN_MIN_W = 44
+/** 分叉快照中「已不在上下文」的幽灵段：rect / 连线 */
+const FORK_GHOST_STROKE = '#B8B8B8'
+const FORK_GHOST_MARKER_FILL = '#B8B8B8'
+
+function edgeStrokeAndMarker(
+  a: MappedAction & { row: number },
+  b: MappedAction & { row: number },
+  normalMarkerUrl: string,
+  ghostMarkerUrl: string
+): { stroke: string; markerUrl: string } {
+  if (a.forkGhost || b.forkGhost) {
+    return { stroke: FORK_GHOST_STROKE, markerUrl: ghostMarkerUrl }
+  }
+  return { stroke: actionFlowPalette.arrow, markerUrl: normalMarkerUrl }
+}
 
 function blockWidth(durationMode: boolean, durationMs: number): number {
   if (!durationMode) return MIN_W
@@ -97,15 +114,15 @@ function laneOffsetY(parallelLaneIndex?: number): number {
 }
 
 /**
- * 子 task 会话区域：父消息里的 Subagent(task) 与对应子 session 拉取的动作共用同一 key，
- * 这样并行 task 的整块（task rect + 子 session 多行）上下堆叠，lane1 永远在 lane0 整块之下。
+ * 会话垂直分区：
+ * - `session:main`：主会话内所有「父侧」动作（含 reason/text/todo、工具、以及 **父消息里的 task/Subagent rect**）。
+ *   并行 task 在第二行内用 `parallelLaneIndex` 纵向堆叠，行数不固定。
+ * - `session:task:<parentTaskCallID>`：**仅**子会话拉取的动作（`child-session`），叠在 main 下方；
+ *   每个子 session 块高度由该块内 layer + 并行 lane 决定，可随子会话内并行变高。
  */
 function actionSessionKey(a: MappedAction & { row: number }): string {
   if (a.source === 'child-session' && a.parentTaskCallID) {
     return `session:task:${a.parentTaskCallID}`
-  }
-  if (a.actionType === 'Subagent' && a.callID) {
-    return `session:task:${a.callID}`
   }
   return 'session:main'
 }
@@ -132,16 +149,13 @@ function buildSemanticTooltipBlockHtml(act: MappedAction & { row: number }, tool
   return formatEnglishTooltipContentHtml(content, escapeHtml)
 }
 
-/** Region 3: duration + coarse token estimate from `actionMapping` (chars/4) */
+/** Region 3: duration only (token estimate removed from tooltip) */
 function buildTooltipFooterHtml(act: MappedAction & { row: number }): string {
   const dur =
     Number.isFinite(act.durationMs) && act.durationMs > 0
       ? `${(act.durationMs / 1000).toFixed(2)}s`
       : '—'
   const rows: TooltipKeyValue[] = [{ key: 'Duration', value: dur }]
-  if (act.tokenEstimate > 0) {
-    rows.push({ key: 'Tokens (est.)', value: String(act.tokenEstimate) })
-  }
   return formatTooltipKeyValuesAsHtml(rows, escapeHtml)
 }
 
@@ -159,28 +173,22 @@ function buildCompactActionTooltipHtml(act: MappedAction & { row: number }, tool
     Number.isFinite(act.durationMs) && act.durationMs > 0
       ? `${(act.durationMs / 1000).toFixed(2)}s`
       : '—'
-  const tok = act.tokenEstimate > 0 ? String(act.tokenEstimate) : ''
   let main = ''
   if (tooltipMessages?.length) {
     const part = resolvePartForAction(tooltipMessages, act)
     if (part) {
       const kv = buildEnglishTooltipContent(part, { allMessages: tooltipMessages })
-      const lines = kv.body.slice(0, 4).map((row) => {
-        if (row.kind === 'kv') return `${row.key}: ${truncatePlain(row.value, 52)}`
-        if (row.kind === 'error') return truncatePlain(row.value, 100)
-        return truncatePlain(row.value, 56)
+      const lines = kv.body.flatMap((row) => {
+        if (row.kind === 'kv') return [`${row.key}: ${row.value}`]
+        if (row.kind === 'error') return [row.value]
+        if (row.kind === 'about') return ['About:', ...row.headers]
+        return [row.value]
       })
       main = `<div class="action-tip-compact-main"><div class="action-tip-compact-head"><strong>${escapeHtml(kv.primaryLabel)}</strong> <span class="action-tip-compact-status">${escapeHtml(kv.statusLabel)}</span></div>${lines.length ? `<div class="action-tip-compact-lines">${lines.map((l) => `<div class="action-tip-compact-line">${escapeHtml(l)}</div>`).join('')}</div>` : ''}</div>`
     }
   }
-  const foot = `<div class="action-tip-compact-footer">${escapeHtml(dur)}${tok ? ` · Tokens (est.) ${escapeHtml(tok)}` : ''}</div>`
+  const foot = `<div class="action-tip-compact-footer">${escapeHtml(dur)}</div>`
   return `<div class="action-tip-root action-tip-root--compact">${main}${foot}</div>`
-}
-
-function truncatePlain(s: string, max: number): string {
-  const t = s.trim()
-  if (t.length <= max) return t
-  return `${t.slice(0, max - 1)}…`
 }
 
 function verticalCenterOffsetY(
@@ -198,13 +206,90 @@ function verticalCenterOffsetY(
   return totalH / 2 - centerY
 }
 
+export type FlowEndSummary = {
+  /** read path list count + glob match count */
+  readFileTotalCount: number
+  readFilePaths: string[]
+  globMatchFileCount: number
+  webSearchCount: number
+  webSearchQueries: string[]
+  writeFileCount: number
+  changedFilePaths: string[]
+}
+
+const FLOW_END_MAX_LINES = 12
+const FLOW_END_PATH_MAX_CHARS = 72
+
+function truncatePathForFlowEnd(p: string): string {
+  const t = p.trim()
+  if (t.length <= FLOW_END_PATH_MAX_CHARS) return t
+  return `${t.slice(0, FLOW_END_PATH_MAX_CHARS - 1)}…`
+}
+
+function flowEndListRows(items: string[], esc: (s: string) => string): { html: string; more: number } {
+  const shown = items.slice(0, FLOW_END_MAX_LINES)
+  const more = items.length > shown.length ? items.length - shown.length : 0
+  const html = shown
+    .map(
+      (p) =>
+        `<div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.4;color:#24292f;">${esc(truncatePathForFlowEnd(p))}</div>`,
+    )
+    .join('')
+  return { html, more }
+}
+
+function buildFlowEndTooltipHtml(s: FlowEndSummary): string {
+  const esc = escapeHtml
+  const readPaths = s.readFilePaths ?? []
+  const writePaths = s.changedFilePaths ?? []
+  const queries = s.webSearchQueries ?? []
+
+  const readList = flowEndListRows(readPaths, esc)
+  const readMore =
+    readList.more > 0
+      ? `<div style="font-size:11px;color:#57606a;margin-top:4px;">+ ${readList.more} more</div>`
+      : ''
+  const globLine =
+    s.globMatchFileCount > 0
+      ? `<div style="font-size:11px;color:#57606a;margin-top:6px;">Glob · ~${esc(String(s.globMatchFileCount))} file(s) matched</div>`
+      : ''
+
+  const qList = flowEndListRows(queries, esc)
+  const qMore =
+    qList.more > 0
+      ? `<div style="font-size:11px;color:#57606a;margin-top:4px;">+ ${qList.more} more</div>`
+      : ''
+
+  const writeList = flowEndListRows(writePaths, esc)
+  const writeMore =
+    writeList.more > 0
+      ? `<div style="font-size:11px;color:#57606a;margin-top:4px;">+ ${writeList.more} more</div>`
+      : ''
+
+  return `<div class="action-tip-root action-tip-root--compact" style="text-align:left;max-width:min(440px,92vw);">
+<div style="font-size:12px;font-weight:600;color:#24292f;margin-bottom:4px;">Read</div>
+<div style="font-size:11px;color:#57606a;margin-bottom:6px;">${esc(String(s.readFileTotalCount))} file(s) (paths + glob)</div>
+${readList.html}${readMore}${globLine}
+<div style="font-size:12px;font-weight:600;color:#24292f;margin-top:10px;margin-bottom:4px;">Web search</div>
+<div style="font-size:11px;color:#57606a;margin-bottom:6px;">${esc(String(s.webSearchCount))} call(s) · keywords / URLs</div>
+${qList.html}${qMore}
+<div style="font-size:12px;font-weight:600;color:#24292f;margin-top:10px;margin-bottom:4px;">Write / edit</div>
+<div style="font-size:11px;color:#57606a;margin-bottom:6px;">${esc(String(s.writeFileCount))} file(s)</div>
+${writeList.html}${writeMore}
+</div>`
+}
+
 function computeLayout(
   actions: (MappedAction & { row: number })[],
-  durationMode: boolean
+  durationMode: boolean,
+  layoutOpts?: { includeEndNode?: boolean }
 ) {
+  const includeEndNode = layoutOpts?.includeEndNode !== false
   const sorted = [...actions].sort((a, b) => a.sortTime - b.sortTime)
   const seq: FlowNode[] = sorted.map(a => ({ ...a, kind: 'action' as const }))
-  seq.push({ kind: 'end', row: 1 })
+  if (includeEndNode) {
+    seq.push({ kind: 'end', row: 1 })
+  }
 
   const actionColumns = new Map<number, number>()
   const groupStepToColumn = new Map<string, Map<number, number>>()
@@ -242,11 +327,14 @@ function computeLayout(
     const w = blockWidth(durationMode, a.durationMs)
     colMaxWidth.set(c, Math.max(colMaxWidth.get(c) ?? 0, w))
   })
-  colMaxWidth.set(endColumn, Math.max(colMaxWidth.get(endColumn) ?? 0, MIN_W))
+  if (includeEndNode) {
+    colMaxWidth.set(endColumn, Math.max(colMaxWidth.get(endColumn) ?? 0, MIN_W))
+  }
 
   const colStartX = new Map<number, number>()
   let x = MARGIN_LEFT
-  for (let c = 0; c <= endColumn; c++) {
+  const lastColIndex = includeEndNode ? endColumn : nextColumn - 1
+  for (let c = 0; c <= lastColIndex; c++) {
     colStartX.set(c, x)
     x += (colMaxWidth.get(c) ?? MIN_W) + GAP
   }
@@ -279,7 +367,10 @@ function computeLayout(
     const local = sorted.filter((a) => actionSessionKey(a) === session)
     let maxBottom = BLOCK_H
     for (const a of local) {
-      const yInSession = actionLocalRow(a) * ROW_H + laneOffsetY(a.parallelLaneIndex)
+      const yInSession =
+        actionLocalRow(a) * ROW_H +
+        laneOffsetY(a.parallelLaneIndex) +
+        (a.forkCompareRow ?? 0) * FORK_COMPARE_ROW_GAP
       maxBottom = Math.max(maxBottom, yInSession + BLOCK_H)
     }
     sessionY += maxBottom + SESSION_REGION_GAP
@@ -308,15 +399,8 @@ function computeLayout(
       const x0 = colStartX.get(c) ?? MARGIN_LEFT
       const cw = colMaxWidth.get(c) ?? MIN_W
       const xNode = x0 + (cw - w) / 2
-      const lastAction = sorted.length > 0 ? sorted[sorted.length - 1]! : null
-      let y: number
-      if (lastAction) {
-        const sk = actionSessionKey(lastAction)
-        const yBase = sessionTopY.get(sk) ?? TOP_PAD
-        y = yBase + actionLocalRow(lastAction) * ROW_H + laneOffsetY(lastAction.parallelLaneIndex)
-      } else {
-        y = (sessionTopY.get('session:main') ?? TOP_PAD) + ROW_H
-      }
+      /** 终点黄点固定在主会话第一行（kernel / layer 0） */
+      const y = sessionTopY.get('session:main') ?? TOP_PAD
       const cy = y + BLOCK_H / 2
       layout.push({ node, x: xNode, y, w, h: BLOCK_H, cx: xNode + w / 2, cy })
     } else {
@@ -328,7 +412,11 @@ function computeLayout(
       const xNode = x0 + (cw - w) / 2
       const session = actionSessionKey(a)
       const yBase = sessionTopY.get(session) ?? TOP_PAD
-      const y = yBase + actionLocalRow(a) * ROW_H + laneOffsetY(a.parallelLaneIndex)
+      const y =
+        yBase +
+        actionLocalRow(a) * ROW_H +
+        laneOffsetY(a.parallelLaneIndex) +
+        (a.forkCompareRow ?? 0) * FORK_COMPARE_ROW_GAP
       const cy = y + BLOCK_H / 2
       layout.push({ node, x: xNode, y, w, h: BLOCK_H, cx: xNode + w / 2, cy })
     }
@@ -368,6 +456,8 @@ function appendOrthoEdge(
     .attr('stroke', stroke)
     .attr('stroke-width', strokeWidth)
     .attr('marker-end', markerUrl)
+    /** 避免边线盖住 action rect，否则悬停/右键命中 path 而非 rect */
+    .attr('pointer-events', 'none')
 }
 
 interface Props {
@@ -383,6 +473,21 @@ interface Props {
   onAnalyzeFromAction?: (action: MappedAction & { row: number }) => void
   /** 仅用于 UI 假数据演示：在某个 action 位置视觉分叉 */
   mockBranchForkActionIndex?: number
+  /**
+   * 为 false 时不绘制终点黄点（仍有 running/pending 的 action 时）。
+   * 默认 true。
+   */
+  showFlowEndNode?: boolean
+  /** 终点黄点悬停摘要；建议与 `showFlowEndNode` 同时传入 */
+  flowEndSummary?: FlowEndSummary
+  /** 嵌在父级双栏容器内时去掉内层描边，避免重复边框 */
+  embedded?: boolean
+  /** 限制可视区高度（px），用于上下分栏时每条 lane 固定高度可滚动 */
+  viewportMaxHeight?: number
+  /**
+   * 为 true 时用 CSS 隐藏滚动条（仍可用滚轮滚动）。默认 false，保留系统滚动条以便可见溢出。
+   */
+  hideScrollbar?: boolean
 }
 
 export default function ActionFlowVisualization({
@@ -393,6 +498,11 @@ export default function ActionFlowVisualization({
   onForkFromAction,
   onAnalyzeFromAction,
   mockBranchForkActionIndex,
+  showFlowEndNode = true,
+  flowEndSummary,
+  embedded = false,
+  viewportMaxHeight,
+  hideScrollbar = false,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const [contextMenu, setContextMenu] = useState<ActionFlowContextMenuState | null>(null)
@@ -400,8 +510,8 @@ export default function ActionFlowVisualization({
   const markerId = `action-flow-arrow-${reactId}`
   const tooltipId = `action-flow-tip-${reactId}`
   const layoutEstimate = useMemo(
-    () => computeLayout(actions, durationMode),
-    [actions, durationMode]
+    () => computeLayout(actions, durationMode, { includeEndNode: showFlowEndNode }),
+    [actions, durationMode, showFlowEndNode]
   )
 
   useLayoutEffect(() => {
@@ -413,7 +523,9 @@ export default function ActionFlowVisualization({
     const maxTok = Math.max(1, ...actions.map(a => a.tokenEstimate))
     const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxTok])
 
-    const { layout, totalW, totalH } = computeLayout(actions, durationMode)
+    const { layout, totalW, totalH } = computeLayout(actions, durationMode, {
+      includeEndNode: showFlowEndNode,
+    })
     const offsetY = verticalCenterOffsetY(layout, totalH)
 
     const defs = root.append('defs')
@@ -431,6 +543,21 @@ export default function ActionFlowVisualization({
       .attr('fill', actionFlowPalette.arrow)
 
     const markerUrl = `url(#${markerId})`
+    const ghostMarkerId = `action-flow-arrow-ghost-${reactId}`
+    const ghostMarkerUrl = `url(#${ghostMarkerId})`
+    defs
+      .append('marker')
+      .attr('id', ghostMarkerId)
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 8)
+      .attr('refY', 0)
+      .attr('markerWidth', 5)
+      .attr('markerHeight', 5)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', FORK_GHOST_MARKER_FILL)
+
     const canMockFork =
       typeof mockBranchForkActionIndex === 'number' &&
       mockBranchForkActionIndex >= 0 &&
@@ -447,6 +574,25 @@ export default function ActionFlowVisualization({
       if (a.node.kind === 'action' && b.node.kind === 'action') {
         const pa = a.node as MappedAction & { row: number }
         const pb = b.node as MappedAction & { row: number }
+        const ra = pa.forkCompareRow ?? 0
+        const rb = pb.forkCompareRow ?? 0
+        if (ra !== rb) {
+          const x1 = a.x + a.w
+          const y1 = a.cy
+          const x2 = b.x
+          const y2 = b.cy
+          let segStroke = FORK_GHOST_STROKE
+          let segMarker = ghostMarkerUrl
+          if (ra === 0 && rb === 2) {
+            segStroke = actionFlowPalette.arrow
+            segMarker = markerUrl
+          } else if (ra === 1 && rb === 2) {
+            segStroke = actionFlowPalette.arrow
+            segMarker = markerUrl
+          }
+          appendOrthoEdge(content, x1, y1, x2, y2, segMarker, segStroke, 1.2)
+          continue
+        }
         if (
           pa.actionType === 'Subagent' &&
           pa.childSessionID &&
@@ -469,13 +615,23 @@ export default function ActionFlowVisualization({
       path.lineTo(mid, y1)
       path.lineTo(mid, y2)
       path.lineTo(x2, y2)
+      const { stroke: segStroke, markerUrl: segMarker } =
+        a.node.kind === 'action' && b.node.kind === 'action'
+          ? edgeStrokeAndMarker(
+              a.node as MappedAction & { row: number },
+              b.node as MappedAction & { row: number },
+              markerUrl,
+              ghostMarkerUrl
+            )
+          : { stroke: actionFlowPalette.arrow, markerUrl }
       content
         .append('path')
         .attr('d', path.toString())
         .attr('fill', 'none')
-        .attr('stroke', actionFlowPalette.arrow)
+        .attr('stroke', segStroke)
         .attr('stroke-width', 1.2)
-        .attr('marker-end', markerUrl)
+        .attr('marker-end', segMarker)
+        .attr('pointer-events', 'none')
     }
 
     /** 并行组：前驱分叉到各 lane 首节点、各 lane 末节点汇合到后继 */
@@ -551,7 +707,6 @@ export default function ActionFlowVisualization({
         }
         list.push(idx)
       }
-      const forkStroke = actionFlowPalette.arrow
       for (const laneIndices of byLane.values()) {
         const sortedIdx = [...laneIndices].sort((a, b) => {
           const ta = (layout[a]!.node as MappedAction & { row: number }).sortTime
@@ -562,39 +717,57 @@ export default function ActionFlowVisualization({
         for (let i = 0; i < sortedIdx.length - 1; i++) {
           const fromIdx = sortedIdx[i]!
           const toIdx = sortedIdx[i + 1]!
+          const na = layout[fromIdx]!.node as MappedAction & { row: number }
+          const nb = layout[toIdx]!.node as MappedAction & { row: number }
+          const { stroke: forkStroke, markerUrl: forkMarker } = edgeStrokeAndMarker(na, nb, markerUrl, ghostMarkerUrl)
           appendOrthoEdge(
             content,
             layout[fromIdx]!.x + layout[fromIdx]!.w,
             layout[fromIdx]!.cy,
             layout[toIdx]!.x,
             layout[toIdx]!.cy,
-            markerUrl,
+            forkMarker,
             forkStroke,
             1.2
           )
         }
         const firstIdx = sortedIdx[0]!
         if (predItem && predIdx >= 0 && predIdx + 1 !== firstIdx) {
+          const na = layout[predIdx]!.node as MappedAction & { row: number }
+          const nb = layout[firstIdx]!.node as MappedAction & { row: number }
+          const { stroke: forkStroke, markerUrl: forkMarker } = edgeStrokeAndMarker(na, nb, markerUrl, ghostMarkerUrl)
           appendOrthoEdge(
             content,
             predItem.x + predItem.w,
             predItem.cy,
             layout[firstIdx]!.x,
             layout[firstIdx]!.cy,
-            markerUrl,
+            forkMarker,
             forkStroke,
             1.2
           )
         }
         const lastIdx = sortedIdx[sortedIdx.length - 1]!
         if (succItem && succIdx >= 0 && lastIdx + 1 !== succIdx) {
+          const na = layout[lastIdx]!.node as MappedAction & { row: number }
+          const succNode = layout[succIdx]!.node
+          let forkStroke: string
+          let forkMarker: string
+          if (succNode.kind === 'end') {
+            forkStroke = na.forkGhost ? FORK_GHOST_STROKE : actionFlowPalette.arrow
+            forkMarker = na.forkGhost ? ghostMarkerUrl : markerUrl
+          } else {
+            const e = edgeStrokeAndMarker(na, succNode as MappedAction & { row: number }, markerUrl, ghostMarkerUrl)
+            forkStroke = e.stroke
+            forkMarker = e.markerUrl
+          }
           appendOrthoEdge(
             content,
             layout[lastIdx]!.x + layout[lastIdx]!.w,
             layout[lastIdx]!.cy,
             succItem.x,
             succItem.cy,
-            markerUrl,
+            forkMarker,
             forkStroke,
             1.2
           )
@@ -605,7 +778,8 @@ export default function ActionFlowVisualization({
     layout.forEach((item, layoutIndex) => {
       const { node, x: nx, y: ny, w, h } = item
       if (node.kind === 'end') {
-        content
+        const endTip = flowEndSummary ? buildFlowEndTooltipHtml(flowEndSummary) : ''
+        const circle = content
           .append('circle')
           .attr('cx', nx + w / 2)
           .attr('cy', ny + h / 2)
@@ -613,18 +787,41 @@ export default function ActionFlowVisualization({
           .attr('fill', actionFlowPalette.end.fill)
           .attr('stroke', actionFlowPalette.end.stroke)
           .attr('stroke-width', 1.5)
+          .style('cursor', endTip ? 'pointer' : 'default')
+        if (endTip) {
+          circle.attr('data-tooltip-id', tooltipId).attr('data-tooltip-html', endTip).attr('data-tooltip-place', 'left')
+        }
         return
       }
 
       const act = node as MappedAction & { row: number }
+      const isGhost = act.forkGhost === true
+      const ghostError = isGhost && act.status === 'error'
       const tc = tokenColor(colorScale, act.tokenEstimate)
       const sc = effectiveStatusColors(act.status, act.durationMs)
-      const isChildBranch = act.source === 'child-session'
-      const fill = colorMode === 'status' ? sc.fill : tc.fill
-      let stroke = colorMode === 'status' ? sc.stroke : tc.stroke
-      if (isChildBranch && colorMode === 'status') stroke = '#8445BC'
-      let iconFill = colorMode === 'status' ? sc.icon : actionFlowPalette.green.icon
-      if (isChildBranch && colorMode === 'status') iconFill = '#6E38A0'
+      const errPalette = statusColors('error')
+      const isChildBranch = act.source === 'child-session' && !isGhost
+
+      let fill: string
+      let stroke: string
+      let iconFill: string
+      if (ghostError) {
+        fill = errPalette.fill
+        stroke = errPalette.stroke
+        iconFill = errPalette.icon
+      } else if (isGhost) {
+        fill = '#E8E8E8'
+        stroke = '#CFCFCF'
+        iconFill = '#A0A0A0'
+      } else if (isChildBranch && colorMode === 'status') {
+        fill = '#F3ECFA'
+        stroke = '#8445BC'
+        iconFill = '#6E38A0'
+      } else {
+        fill = colorMode === 'status' ? sc.fill : tc.fill
+        stroke = colorMode === 'status' ? sc.stroke : tc.stroke
+        iconFill = colorMode === 'status' ? sc.icon : actionFlowPalette.green.icon
+      }
 
       const rect = content
         .append('rect')
@@ -633,14 +830,15 @@ export default function ActionFlowVisualization({
         .attr('width', w)
         .attr('height', h)
         .attr('rx', 4)
-        .attr('fill', isChildBranch && colorMode === 'status' ? '#F3ECFA' : fill)
+        .attr('fill', fill)
         .attr('stroke', stroke)
-        .attr('stroke-width', isChildBranch ? 1.65 : 1.5)
+        .attr('stroke-width', isGhost ? 1.5 : isChildBranch ? 1.65 : 1.5)
         .style('cursor', 'pointer')
         .attr('data-tooltip-id', tooltipId)
         .attr('data-tooltip-html', buildCompactActionTooltipHtml(act, tooltipMessages))
         .attr('data-tooltip-place', 'top')
-      const canContext = act.messageID && (onForkFromAction || onAnalyzeFromAction)
+      const canContext =
+        act.messageID && (onForkFromAction || onAnalyzeFromAction) && act.forkGhost !== true
       const rectEl = rect.node() as SVGRectElement
       if (canContext) {
         rect.on('contextmenu', (ev: Event) => {
@@ -650,7 +848,11 @@ export default function ActionFlowVisualization({
         })
       }
 
-      if ((act.status === 'running' || act.status === 'pending') && colorMode === 'status') {
+      if (
+        !isGhost &&
+        (act.status === 'running' || act.status === 'pending') &&
+        colorMode === 'status'
+      ) {
         rect.attr('class', sc.isLongRunning ? 'action-flow-running-long' : 'action-flow-running')
       }
 
@@ -735,13 +937,22 @@ export default function ActionFlowVisualization({
       branchPath.lineTo(mid, y1)
       branchPath.lineTo(mid, y2)
       branchPath.lineTo(x2, y2)
+      const parentAct = node as MappedAction & { row: number }
+      const childAct = firstChild.node as MappedAction & { row: number }
+      const parentGhost = parentAct.forkGhost
+      const childGhost = childAct.forkGhost
+      const { stroke: branchStroke, markerUrl: branchMarker } =
+        parentGhost || childGhost
+          ? { stroke: FORK_GHOST_STROKE, markerUrl: ghostMarkerUrl }
+          : { stroke: '#8445BC', markerUrl: markerUrl }
       content
         .append('path')
         .attr('d', branchPath.toString())
         .attr('fill', 'none')
-        .attr('stroke', '#8445BC')
+        .attr('stroke', branchStroke)
         .attr('stroke-width', 1.75)
-        .attr('marker-end', markerUrl)
+        .attr('marker-end', branchMarker)
+        .attr('pointer-events', 'none')
     }
 
     if (canMockFork) {
@@ -794,6 +1005,7 @@ export default function ActionFlowVisualization({
               .attr('stroke', '#C8C8C8')
               .attr('stroke-width', 1.2)
               .attr('marker-end', markerUrl)
+              .attr('pointer-events', 'none')
           }
           hx += hw + GAP
         })
@@ -817,6 +1029,7 @@ export default function ActionFlowVisualization({
           .attr('stroke', '#C8C8C8')
           .attr('stroke-width', 1.2)
           .attr('marker-end', markerUrl)
+          .attr('pointer-events', 'none')
       }
     }
 
@@ -834,6 +1047,10 @@ export default function ActionFlowVisualization({
     mockBranchForkActionIndex,
     onForkFromAction,
     onAnalyzeFromAction,
+    showFlowEndNode,
+    flowEndSummary,
+    embedded,
+    viewportMaxHeight,
   ])
 
   const mockOffset = mockBranchForkActionIndex !== undefined ? ROW_H : 0
@@ -843,7 +1060,37 @@ export default function ActionFlowVisualization({
     TOP_PAD + MAX_VISIBLE_ROWS * ROW_H + BLOCK_H + BOTTOM_PAD,
     MIN_SVG_CONTENT_HEIGHT
   )
-  const viewportHeight = Math.min(Math.max(contentHeight, MIN_SVG_CONTENT_HEIGHT), maxVisibleHeight)
+  let viewportHeight = Math.min(Math.max(contentHeight, MIN_SVG_CONTENT_HEIGHT), maxVisibleHeight)
+  if (typeof viewportMaxHeight === 'number' && Number.isFinite(viewportMaxHeight) && viewportMaxHeight > 0) {
+    viewportHeight = Math.min(viewportHeight, viewportMaxHeight)
+  }
+  /** 仅作上限：内容较矮时不占满高度，避免「未溢出也出现滚动条」；超出 maxHeight 时才出现滚动条 */
+  const scrollAreaMaxHeight = viewportHeight
+
+  /** 内层滚动区不设 border：否则 box-sizing 下内容区 = maxHeight − 边框，易比 SVG 高度少 2px 而误出纵向条 */
+  const scrollInner = (
+    <div
+      className={hideScrollbar ? 'action-flow-scroll--hide-scrollbar' : undefined}
+      style={{
+        boxSizing: 'border-box',
+        overflowX: 'auto',
+        overflowY: 'auto',
+        width: '100%',
+        height: 'auto',
+        maxHeight: scrollAreaMaxHeight,
+        minHeight: 0,
+        flexShrink: 0,
+      }}
+    >
+      <svg
+        ref={svgRef}
+        style={{
+          display: 'block',
+          verticalAlign: 'top',
+        }}
+      />
+    </div>
+  )
 
   return (
     <>
@@ -857,36 +1104,32 @@ export default function ActionFlowVisualization({
         width: '100%',
       }}
     >
-      <div
-        style={{
-          boxSizing: 'border-box',
-          overflowX: 'auto',
-          overflowY: 'auto',
-          border: '1px solid #E8E8E8',
-          borderRadius: 8,
-          background: '#FCFCFC',
-          width: '100%',
-          height: viewportHeight,
-          maxHeight: viewportHeight,
-          minHeight: viewportHeight,
-          flexShrink: 0,
-        }}
-      >
-        <svg
-          ref={svgRef}
+      {embedded ? (
+        scrollInner
+      ) : (
+        <div
           style={{
-            display: 'block',
-            verticalAlign: 'top',
+            boxSizing: 'border-box',
+            border: '1px solid #E8E8E8',
+            borderRadius: 8,
+            background: '#FCFCFC',
+            overflow: 'hidden',
+            width: '100%',
           }}
-        />
-      </div>
+        >
+          {scrollInner}
+        </div>
+      )}
       <Tooltip
         id={tooltipId}
         className="action-flow-react-tooltip"
         variant="light"
         delayShow={150}
+        delayHide={220}
         opacity={1}
         clickable
+        /** 内层 overflow:auto 滚动会触发全局 scroll，默认会立刻关掉 tooltip */
+        globalCloseEvents={{ scroll: false, resize: true, escape: true }}
         arrowColor="#f8fafc"
       />
     </div>

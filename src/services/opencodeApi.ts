@@ -1,13 +1,30 @@
-const BASE = 'http://127.0.0.1:4096'
-
 import type {
   OcSession,
   OcTodo,
   OcMessage,
+  OcPendingQuestionItem,
 } from '../types/opencode'
+
+/**
+ * OpenCode HTTP 基址（须与终端里 `opencode serve` 打印的地址一致）。
+ * - 最省事：项目根建 `.env.local`，写一行 `VITE_OPENCODE_BASE=http://127.0.0.1:61830`（换成你的端口），保存后重启 `npm run dev`
+ * - 或直接改下面默认 return 的 URL
+ */
+function resolveOpencodeBase(): string {
+  const raw = import.meta.env.VITE_OPENCODE_BASE
+  if (typeof raw === 'string' && raw.trim()) {
+    return raw.trim().replace(/\/$/, '')
+  }
+  // 与 github.com/Alphake/opencode_vis main 默认一致；本机端口不同请用 .env.local 的 VITE_OPENCODE_BASE
+  return 'http://127.0.0.1:4096'
+}
+
+const BASE = resolveOpencodeBase()
 
 const LOG = {
   http: '[OpenCode · HTTP]',
+  /** 控制台里 Ctrl+F 搜这个，可快速跳到各接口「有 body 的」响应摘要（与上面的请求日志成对） */
+  httpResp: '[OC·HTTP·RESP]',
   sseRaw: '[OpenCode · SSE · 原始 data 字符串]',
   sseParsed: '[OpenCode · SSE · 解析后 JSON]',
 } as const
@@ -17,10 +34,45 @@ function clip(s: string, n = 1200): string {
   return `${s.slice(0, n)}… (${s.length} chars)`
 }
 
-/** 多项目目录下，与创建会话时一致，后续 message/todo 等请求也必须带此头，否则 OpenCode 会路由到错误实例（表现为无回复、空响应等）。 */
+/**
+ * OpenCode `POST /session/:id/message` 的 `model` 须为对象 `{ providerID, modelID }`，不能传 `provider/model` 字符串。
+ * 环境变量里仍写 `deepseek/deepseek-reasoner` 这种形式，此处按第一个 `/` 拆开。
+ */
+function parseModelRefToBody(ref: string): { providerID: string; modelID: string } | undefined {
+  const t = ref.trim()
+  const i = t.indexOf('/')
+  if (i <= 0 || i >= t.length - 1) return undefined
+  const providerID = t.slice(0, i).trim()
+  const modelID = t.slice(i + 1).trim()
+  if (!providerID || !modelID) return undefined
+  return { providerID, modelID }
+}
+
+/**
+ * 与 [OpenCode 服务器文档 · 认证](https://opencode.ai/docs/zh-cn/server/#%E8%AE%A4%E8%AF%81) 一致：
+ * 若启动时设置了 `OPENCODE_SERVER_PASSWORD`，则所有 HTTP（含 fetch、SSE）需带 Basic 认证，否则浏览器端会 401。
+ * 在 cockpit 侧设置 `VITE_OPENCODE_SERVER_PASSWORD`（及可选 `VITE_OPENCODE_SERVER_USERNAME`，默认 `opencode`）。
+ */
+function basicAuthHeader(): Record<string, string> {
+  const pwd = import.meta.env.VITE_OPENCODE_SERVER_PASSWORD
+  if (typeof pwd !== 'string' || !pwd.trim()) return {}
+  const user =
+    typeof import.meta.env.VITE_OPENCODE_SERVER_USERNAME === 'string' &&
+    import.meta.env.VITE_OPENCODE_SERVER_USERNAME.trim()
+      ? import.meta.env.VITE_OPENCODE_SERVER_USERNAME.trim()
+      : 'opencode'
+  const raw = `${user}:${pwd}`
+  const bytes = new TextEncoder().encode(raw)
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!)
+  return { Authorization: `Basic ${btoa(bin)}` }
+}
+
+/** 多项目目录 + 可选 HTTP Basic（见上）。 */
 function withDirectoryHeaders(base: Record<string, string>, directory?: string): Record<string, string> {
-  if (!directory) return base
-  return { ...base, 'x-opencode-directory': directory }
+  const out = { ...base, ...basicAuthHeader() }
+  if (directory) out['x-opencode-directory'] = directory
+  return out
 }
 
 // ===== REST API =====
@@ -106,6 +158,30 @@ export async function updateSessionTitle(
   return data
 }
 
+/**
+ * 删除会话（OpenCode: `DELETE /session/:id`）。
+ * 会从服务端移除该会话及全部消息；公开 API 无单独的「仅隐藏、可恢复」归档端点，与 TUI 中从历史里拿掉会话的效果一致。
+ */
+export async function deleteSession(sessionId: string, directory?: string): Promise<void> {
+  const url = `${BASE}/session/${sessionId}`
+  console.log(`${LOG.http} DELETE 会话`, url, directory ? { directory } : '')
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: withDirectoryHeaders({}, directory),
+  })
+  const bodyText = await res.text()
+  if (!res.ok) {
+    throw new Error(`deleteSession failed: ${res.status} ${bodyText}`)
+  }
+  if (bodyText) {
+    try {
+      console.log(`${LOG.http} DELETE /session 响应`, JSON.parse(bodyText))
+    } catch {
+      console.log(`${LOG.http} DELETE /session 响应`, clip(bodyText, 200))
+    }
+  }
+}
+
 export async function getTodos(sessionId: string, directory?: string): Promise<OcTodo[]> {
   const url = `${BASE}/session/${sessionId}/todo`
   console.log(`${LOG.http} GET todos`, url, directory ? { directory } : '')
@@ -122,6 +198,12 @@ export async function getMessages(sessionId: string, reason?: string, directory?
   const res = await fetch(url, { headers: withDirectoryHeaders({}, directory) })
   if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`)
   const data = await res.json()
+  console.log(`${LOG.httpResp} GET /message`, {
+    url,
+    status: res.status,
+    count: Array.isArray(data) ? data.length : -1,
+    note: '完整对话 JSON；正文以本接口为准，不在 SSE 里',
+  })
   console.log(`${LOG.http} GET /message 响应: ${data.length} 条消息（正文以本接口为准，不在 SSE 里）`)
   data.forEach((msg: OcMessage, i: number) => {
     console.log(`  [${i}] role=${msg.info.role}, parts=${msg.parts.length}, id=${msg.info.id}`)
@@ -142,12 +224,19 @@ export type UserMessagePartBody =
 
 /**
  * 发送用户消息。`text` 为单条 text part（通常已含 harness 引导）；`images` 会先作为 image parts 再跟 text（便于视觉模型）。
+ *
+ * `model`：可传 `provider/model` 字符串（与 env 一致），发送时会转为 `{ providerID, modelID }`。
+ * `agent` 对应同一请求体里的 `agent` 字段（字符串）。
  */
 export async function sendMessage(
   sessionId: string,
   text: string,
   directory?: string,
-  options?: { imageParts?: Array<{ media_type: string; data: string }> },
+  options?: {
+    imageParts?: Array<{ media_type: string; data: string }>
+    model?: string
+    agent?: string
+  },
 ): Promise<void> {
   const url = `${BASE}/session/${sessionId}/message`
   const imageParts: UserMessagePartBody[] = (options?.imageParts ?? []).map((img) => ({
@@ -159,12 +248,38 @@ export async function sendMessage(
     },
   }))
   const parts: UserMessagePartBody[] = [...imageParts, { type: 'text', text }]
-  const reqBody = { parts }
+  const modelRef =
+    (options?.model && options.model.trim()) ||
+    (typeof import.meta.env.VITE_OPENCODE_DEFAULT_MODEL === 'string' && import.meta.env.VITE_OPENCODE_DEFAULT_MODEL.trim()) ||
+    undefined
+  const modelBody = modelRef ? parseModelRefToBody(modelRef) : undefined
+  const agent =
+    (options?.agent && options.agent.trim()) ||
+    (typeof import.meta.env.VITE_OPENCODE_DEFAULT_AGENT === 'string' && import.meta.env.VITE_OPENCODE_DEFAULT_AGENT.trim()) ||
+    undefined
+  const reqBody: Record<string, unknown> = { parts }
+  if (modelBody) reqBody.model = modelBody
+  if (agent) reqBody.agent = agent
+  if (modelRef && !modelBody) {
+    console.warn(
+      `${LOG.http} model 无法解析为 provider/model（需含一个 /）：`,
+      JSON.stringify(modelRef),
+      '已省略 model 字段',
+    )
+  }
   console.log(
     `${LOG.http} POST 发送用户消息`,
     url,
-    { parts: parts.length, 预览: clip(text, 200) },
+    {
+      parts: parts.length,
+      预览: clip(text, 200),
+      ...(modelBody ? { model: modelBody } : {}),
+      ...(agent ? { agent } : {}),
+    },
     directory ? { directory } : '',
+  )
+  console.log(
+    `${LOG.http} POST /message 已发出：下一条「${LOG.httpResp}」要等 OpenCode 结束本轮 HTTP 才会打印（期间 session 可能 busy，属正常；流式过程在 SSE）。`,
   )
   const res = await fetch(url, {
     method: 'POST',
@@ -172,10 +287,13 @@ export async function sendMessage(
     body: JSON.stringify(reqBody),
   })
   const bodyText = await res.text()
-  console.log(
-    `${LOG.http} POST /message 响应 status=${res.status}（多为「本轮处理结束」后返回；body 见下，通常不是完整流式过程）`,
-    clip(bodyText, 800),
-  )
+  console.log(`${LOG.httpResp} POST /message`, {
+    url,
+    status: res.status,
+    ok: res.ok,
+    bodyLength: bodyText.length,
+    bodyPreview: bodyText.length ? clip(bodyText, 800) : '(empty body)',
+  })
   if (!res.ok) throw new Error(`Failed to send message: ${res.status} ${bodyText}`)
   const ct = res.headers.get('content-type') || ''
   if (ct.includes('text/html') || /^\s*</i.test(bodyText)) {
@@ -226,7 +344,7 @@ export async function forkSession(
 }
 
 export async function getDiff(sessionId: string): Promise<any[]> {
-  const res = await fetch(`${BASE}/session/${sessionId}/diff`)
+  const res = await fetch(`${BASE}/session/${sessionId}/diff`, { headers: withDirectoryHeaders({}) })
   if (!res.ok) throw new Error(`Failed to fetch diff: ${res.status}`)
   return res.json()
 }
@@ -254,27 +372,62 @@ export async function replyToQuestion(
   console.log(`${LOG.http} POST /question/.../reply`, clip(bodyText, 200))
 }
 
-/** OpenCode SDK v2：`GET /question`，列出待处理的 question 请求（用于根据 messageID/callID 解析 requestID） */
-export async function getPendingQuestions(directory?: string): Promise<
-  Array<{
-    id: string
-    sessionID: string
-    questions: unknown[]
-    tool?: { messageID: string; callID: string }
-  }>
-> {
-  const params = new URLSearchParams()
-  if (directory) params.set('directory', directory)
-  const qs = params.toString()
-  const url = qs ? `${BASE}/question?${qs}` : `${BASE}/question`
-  console.log(`${LOG.http} GET 待处理 question 列表`, url, directory ? { directory } : '')
-  const res = await fetch(url, { headers: withDirectoryHeaders({}, directory) })
-  if (!res.ok) {
-    const t = await res.text()
-    throw new Error(`getPendingQuestions failed: ${res.status} ${t}`)
+function normalizePendingQuestionList(raw: unknown): OcPendingQuestionItem[] {
+  if (Array.isArray(raw)) return raw as OcPendingQuestionItem[]
+  if (raw && typeof raw === 'object') {
+    const o = raw as Record<string, unknown>
+    for (const k of ['data', 'items', 'pending', 'result']) {
+      const v = o[k]
+      if (Array.isArray(v)) return v as OcPendingQuestionItem[]
+    }
   }
-  const data = await res.json()
-  const list = Array.isArray(data) ? data : []
+  return []
+}
+
+/**
+ * OpenCode：`GET /question`，列出待处理的 question 请求（用于根据 messageID/callID 解析 requestID）。
+ * 部分版本会把数组包在 `{ data: [...] }` 里，此处统一解析。
+ */
+export async function getPendingQuestions(
+  directory?: string,
+  options?: { sessionID?: string },
+): Promise<OcPendingQuestionItem[]> {
+  const buildUrl = (includeSession: boolean) => {
+    const params = new URLSearchParams()
+    if (directory) params.set('directory', directory)
+    if (includeSession && options?.sessionID) params.set('sessionID', options.sessionID)
+    const qs = params.toString()
+    return qs ? `${BASE}/question?${qs}` : `${BASE}/question`
+  }
+
+  const fetchList = async (url: string) => {
+    const res = await fetch(url, { headers: withDirectoryHeaders({}, directory) })
+    if (!res.ok) return { ok: false as const, status: res.status, text: await res.text() }
+    const data = await res.json()
+    return { ok: true as const, data }
+  }
+
+  let url = buildUrl(true)
+  console.log(
+    `${LOG.http} GET 待处理 question 列表`,
+    url,
+    directory ? { directory } : '',
+    options?.sessionID ? { sessionID: options.sessionID } : '',
+  )
+  let result = await fetchList(url)
+  if (
+    !result.ok &&
+    options?.sessionID &&
+    (result.status === 400 || result.status === 404 || result.status === 422)
+  ) {
+    console.warn(`${LOG.http} GET /question 带 sessionID 失败 ${result.status}，改为不带 session 重试`)
+    url = buildUrl(false)
+    result = await fetchList(url)
+  }
+  if (!result.ok) {
+    throw new Error(`getPendingQuestions failed: ${result.status} ${result.text}`)
+  }
+  const list = normalizePendingQuestionList(result.data)
   console.log(`${LOG.http} GET /question`, list.length, '条')
   return list
 }
@@ -356,7 +509,7 @@ async function streamGlobalSse(
   onEvent: (event: unknown) => void
 ): Promise<void> {
   const res = await fetch(url, {
-    headers: { Accept: 'text/event-stream' },
+    headers: { Accept: 'text/event-stream', ...basicAuthHeader() },
     signal,
   })
   if (!res.ok) {

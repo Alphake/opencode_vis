@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import type { OcSession } from '../types/opencode'
 import { folderDisplayName } from '../utils/sessionFolders'
 
@@ -12,6 +12,9 @@ interface SidebarProps {
   onSelectSession: (id: string) => void
   onCreateSession: () => void | Promise<void>
   creatingSession?: boolean
+  /** 调用 OpenCode DELETE /session/:id，从列表移除（服务端删除数据） */
+  onArchiveSession?: (sessionId: string) => void | Promise<void>
+  archivingSessionId?: string | null
   collapsed: boolean
   onToggle: () => void
   apiConnected: boolean
@@ -28,10 +31,13 @@ export default function Sidebar({
   onSelectSession,
   onCreateSession,
   creatingSession,
+  onArchiveSession,
+  archivingSessionId,
   collapsed,
   onToggle,
   apiConnected,
 }: SidebarProps) {
+  const [hoverSessionId, setHoverSessionId] = useState<string | null>(null)
   const titleName = useMemo(
     () => folderDisplayName(selectedDirectory),
     [selectedDirectory],
@@ -239,42 +245,90 @@ export default function Sidebar({
             </div>
           ) : (
             sessionsInFolder.map((session) => (
-              <button
+              <div
                 key={session.id}
-                onClick={() => onSelectSession(session.id)}
+                onMouseEnter={() => setHoverSessionId(session.id)}
+                onMouseLeave={() => setHoverSessionId(null)}
                 style={{
-                  width: '100%',
-                  padding: '8px 12px',
-                  background: session.id === selectedSessionId ? '#F0E6FA' : 'transparent',
-                  border: 'none',
-                  textAlign: 'left',
-                  cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 8,
+                  gap: 4,
+                  padding: '4px 8px 4px 12px',
+                  background: session.id === selectedSessionId ? '#F0E6FA' : 'transparent',
+                  borderRadius: 6,
                 }}
               >
-                <div
+                <button
+                  type="button"
+                  onClick={() => onSelectSession(session.id)}
                   style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    background: session.id === selectedSessionId ? '#8445BC' : '#C7C7C7',
-                    flexShrink: 0,
-                  }}
-                />
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: '#171717',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
+                    flex: 1,
+                    minWidth: 0,
+                    padding: '4px 0',
+                    background: 'transparent',
+                    border: 'none',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
                   }}
                 >
-                  {session.title || 'Untitled'}
-                </span>
-              </button>
+                  <div
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      background: session.id === selectedSessionId ? '#8445BC' : '#C7C7C7',
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      color: '#171717',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {session.title || 'Untitled'}
+                  </span>
+                </button>
+                {onArchiveSession && (
+                  <button
+                    type="button"
+                    title="归档：从列表移除（服务端删除会话数据）"
+                    disabled={archivingSessionId === session.id}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void onArchiveSession(session.id)
+                    }}
+                    style={{
+                      flexShrink: 0,
+                      width: 28,
+                      height: 28,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: 'transparent',
+                      border: 'none',
+                      borderRadius: 6,
+                      cursor: archivingSessionId === session.id ? 'wait' : 'pointer',
+                      opacity: hoverSessionId === session.id ? 1 : 0.35,
+                      color: '#737373',
+                    }}
+                  >
+                    {archivingSessionId === session.id ? (
+                      <span style={{ fontSize: 11 }}>…</span>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 8v13H3V8M1 3h22v5H1V3zM10 12h4" />
+                      </svg>
+                    )}
+                  </button>
+                )}
+              </div>
             ))
           )}
         </div>

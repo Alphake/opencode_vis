@@ -15,6 +15,8 @@ interface MessagePanelProps {
   /** 最近一条 todowrite 快照对应的「本批」进度；无快照时 null */
   latestTodowriteBatchProgress: LatestTodowriteBatchProgress | null
   loading: boolean
+  /** 已发送用户消息，正在轮询等待助手回复（SSE 可能未及时更新界面） */
+  waitingForAssistantReply?: boolean
   sessionId: string
   sessionTitle?: string
   onRefresh: () => void
@@ -51,6 +53,7 @@ export default function MessagePanel({
   archivedTodos,
   latestTodowriteBatchProgress,
   loading,
+  waitingForAssistantReply = false,
   sessionId,
   sessionTitle,
   onSendMessage,
@@ -125,6 +128,37 @@ export default function MessagePanel({
         />
       </div>
 
+      {waitingForAssistantReply && !loading && (
+        <div
+          style={{
+            flexShrink: 0,
+            padding: '8px 16px',
+            fontSize: 12,
+            color: '#4338ca',
+            background: 'linear-gradient(90deg, #eef2ff 0%, #faf5ff 100%)',
+            borderBottom: '1px solid #c7d2fe',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: '#6366f1',
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontWeight: 600 }}>等待模型回复中…</span>
+          <span style={{ color: '#64748b', fontWeight: 400 }}>
+            已自动轮询刷新；若长时间无内容，请查看 OpenCode 终端日志或模型是否排队。
+          </span>
+        </div>
+      )}
+
       {/* Messages (scrollable) */}
       <div
         ref={messageListScrollRef}
@@ -167,6 +201,9 @@ export default function MessagePanel({
                   message={msg}
                   isLastInTurn={isLastMessageInTurn(messages, idx)}
                   sessionDirectory={sessionDirectory}
+                  ssePendingQuestion={
+                    pendingQuestion && pendingQuestion.sessionID === sessionId ? pendingQuestion : null
+                  }
                   onQuestionAnswered={onQuestionAnswered}
                 />
               </div>

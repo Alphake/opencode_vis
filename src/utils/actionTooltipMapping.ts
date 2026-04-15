@@ -14,6 +14,8 @@ export type TooltipKeyValue = {
 export type TooltipBodyLine =
   | { kind: 'kv'; key: string; value: string }
   | { kind: 'text'; value: string }
+  /** `question` tool: label "About:" + one line per header */
+  | { kind: 'about'; headers: string[] }
   /** Full error text (no truncation); rendered with `pre-wrap` + scroll in CSS */
   | { kind: 'error'; value: string }
 
@@ -25,22 +27,40 @@ export type EnglishTooltipContent = {
   body: TooltipBodyLine[]
 }
 
-/** Long text in tooltip: no artificial cap (layout grows with content) */
-const PREVIEW_SOFT_MAX = 12_000
 const URL_LIST_MAX = 8
+/** Assistant `text` / `reasoning` tooltip body: first N words, then ellipsis */
+const PREVIEW_MAX_WORDS = 300
 
 function normalizeToolName(name: string): string {
   return name.trim().toLowerCase().replace(/-/g, '_')
 }
 
-function truncate(s: string, max: number): string {
+/** First `maxWords` word-like segments (Intl.Segmenter); fallback: whitespace tokens. */
+function truncateToMaxWords(s: string, maxWords: number): string {
   const t = s.trim()
-  if (t.length <= max) return t
-  return `${t.slice(0, max - 1)}…`
-}
-
-function softCap(s: string, max: number): string {
-  return truncate(s, max)
+  if (!t) return t
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    try {
+      const seg = new Intl.Segmenter(undefined, { granularity: 'word' })
+      let wordCount = 0
+      const out: string[] = []
+      for (const part of seg.segment(t)) {
+        if (part.isWordLike) {
+          if (wordCount >= maxWords) {
+            return out.join('') + '…'
+          }
+          wordCount++
+        }
+        out.push(part.segment)
+      }
+      return t
+    } catch {
+      /* fall through */
+    }
+  }
+  const words = t.split(/\s+/)
+  if (words.length <= maxWords) return t
+  return words.slice(0, maxWords).join(' ') + '…'
 }
 
 function str(v: unknown): string | undefined {
@@ -208,14 +228,6 @@ function englishToolBody(part: ToolPart, ctx: { allMessages?: OcMessage[] }): To
           value: fpRaw === '' ? '(empty)' : fpRaw,
         })
       }
-      const lim = num(input.limit)
-      if (lim !== undefined) {
-        lines.push({
-          kind: 'kv',
-          key: 'Limit (max lines)',
-          value: `${lim} — max lines to read from the file (line cap, not bytes).`,
-        })
-      }
       return lines
     }
     case 'write': {
@@ -350,10 +362,12 @@ function englishToolBody(part: ToolPart, ctx: { allMessages?: OcMessage[] }): To
       return []
     }
     case 'question': {
-      const qs = input.questions
+      const qs = input.questions as Array<{ header?: string }> | undefined
       const lines: TooltipBodyLine[] = []
       if (Array.isArray(qs)) {
-        lines.push({ kind: 'kv', key: 'Questions', value: String(qs.length) })
+        lines.push({ kind: 'kv', key: 'Answered questions', value: String(qs.length) })
+        const headers = qs.map((q) => (typeof q?.header === 'string' ? q.header : ''))
+        lines.push({ kind: 'about', headers })
       }
       return lines
     }
@@ -367,7 +381,10 @@ function englishToolBody(part: ToolPart, ctx: { allMessages?: OcMessage[] }): To
       if (Array.isArray(files)) {
         return [{ kind: 'kv', key: 'Files', value: String(files.length) }]
       }
-      if (title) return [{ kind: 'kv', key: 'Patch', value: title }]
+      const patchTitle = stringField(st?.title as string | undefined)
+      if (patchTitle !== undefined) {
+        return [{ kind: 'kv', key: 'Patch', value: patchTitle === '' ? '(empty)' : patchTitle }]
+      }
       return []
     }
     default: {
@@ -375,10 +392,10 @@ function englishToolBody(part: ToolPart, ctx: { allMessages?: OcMessage[] }): To
       const titleRaw = stringField(st?.title as string | undefined)
       const outRaw = stringField(st?.output as string | undefined)
       if (titleRaw !== undefined) {
-        lines.push({ kind: 'kv', key: 'Title', value: titleRaw === '' ? '(empty)' : softCap(titleRaw, PREVIEW_SOFT_MAX) })
+        lines.push({ kind: 'kv', key: 'Title', value: titleRaw === '' ? '(empty)' : titleRaw })
       }
       if (outRaw !== undefined) {
-        lines.push({ kind: 'kv', key: 'Output', value: outRaw === '' ? '(empty)' : softCap(outRaw, PREVIEW_SOFT_MAX) })
+        lines.push({ kind: 'kv', key: 'Output', value: outRaw === '' ? '(empty)' : outRaw })
       }
       return lines
     }
@@ -389,11 +406,13 @@ function englishNonToolBody(part: OcMessagePart): TooltipBodyLine[] {
   switch (part.type) {
     case 'reasoning': {
       const text = part.text?.trim() ?? ''
-      return [{ kind: 'kv', key: 'Preview', value: text ? softCap(text, PREVIEW_SOFT_MAX) : '(empty)' }]
+      if (!text) return [{ kind: 'text', value: '(empty)' }]
+      return [{ kind: 'text', value: truncateToMaxWords(text, PREVIEW_MAX_WORDS) }]
     }
     case 'text': {
       const text = part.text?.trim() ?? ''
-      return [{ kind: 'kv', key: 'Preview', value: text ? softCap(text, PREVIEW_SOFT_MAX) : '(empty)' }]
+      if (!text) return [{ kind: 'text', value: '(empty)' }]
+      return [{ kind: 'text', value: truncateToMaxWords(text, PREVIEW_MAX_WORDS) }]
     }
     case 'compaction':
       return [{ kind: 'kv', key: 'Note', value: 'Context compaction (summary may follow in session).' }]
@@ -429,6 +448,12 @@ export function formatEnglishTooltipContentHtml(content: EnglishTooltipContent, 
     .map((line) => {
       if (line.kind === 'kv') {
         return `<div class="action-tip-kv"><span class="action-tip-k">${escapeHtml(line.key)}</span><span class="action-tip-v">${escapeHtml(line.value)}</span></div>`
+      }
+      if (line.kind === 'about') {
+        const headersHtml = line.headers
+          .map((h) => `<div class="action-tip-about-line">${escapeHtml(h)}</div>`)
+          .join('')
+        return `<div class="action-tip-about"><div class="action-tip-about-label">About:</div>${headersHtml}</div>`
       }
       if (line.kind === 'error') {
         return `<div class="action-tip-error">${escapeHtml(line.value)}</div>`

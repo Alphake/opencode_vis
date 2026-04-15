@@ -9,6 +9,7 @@ import {
   forkSession,
   createSession,
   updateSessionTitle,
+  deleteSession,
   replyToQuestion,
   rejectQuestion,
   subscribeGlobalEvents,
@@ -21,6 +22,7 @@ import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
 import SubtaskDebugPanel from './components/SubtaskDebugPanel'
 import ActionAnalysisModal from './components/ActionAnalysisModal'
+import ForkSessionModal from './components/ForkSessionModal'
 import SubtaskMessageConnector from './components/SubtaskMessageConnector'
 import { groupAssistantSubtasks, isTodoWriteMessage } from './utils/subtaskGrouping'
 import { buildMappedActionsFromMessages } from './utils/actionMapping'
@@ -34,10 +36,41 @@ import {
   getLatestTodowriteBatchProgress,
 } from './utils/todoRegistry'
 import { buildUserMessageWithGuidance } from './config/harnessGuidance'
+import {
+  buildForkPanelSnapshotBundle,
+  getForkPanelSnapshotBundle,
+  saveForkPanelSnapshotBundle,
+  type ForkFromActionContext,
+  type ForkPanelSnapshotBundle,
+} from './utils/forkPanelSnapshot'
 
 /** 每条「含 todo 写入」的 message 下标 → 当时同步到的 todos（用于重放 diff） */
 type TodosSnapshotMap = Record<string, OcTodo[]>
 const AUTO_ABORT_STUCK_RUNNING_AFTER_MS = 24 * 60 * 60 * 1000
+
+/** 发送后若 SSE 未及时刷新，轮询 GET /message 直到出现助手消息（与 OpenCode 流式/长耗时兼容） */
+const POLL_ASSISTANT_INTERVAL_MS = 2000
+const POLL_ASSISTANT_MAX_ROUNDS = 90
+
+async function pollUntilAssistantMessage(
+  sessionId: string,
+  directory: string | undefined,
+  isStillSelected: () => boolean,
+  onMessages: (msgs: OcMessage[]) => void,
+): Promise<void> {
+  for (let i = 0; i < POLL_ASSISTANT_MAX_ROUNDS; i++) {
+    await new Promise((r) => setTimeout(r, POLL_ASSISTANT_INTERVAL_MS))
+    if (!isStillSelected()) return
+    try {
+      const msgs = await getMessages(sessionId, `轮询等待助手回复 ${i + 1}`, directory)
+      onMessages(msgs)
+      const last = msgs[msgs.length - 1]
+      if (last?.info.role === 'assistant') return
+    } catch (e) {
+      console.warn('[pollUntilAssistantMessage]', e)
+    }
+  }
+}
 
 function formatMessageForConsole(msg: OcMessage | undefined, index: number) {
   if (!msg) {
@@ -95,6 +128,18 @@ function App() {
   const [questionSubmitting, setQuestionSubmitting] = useState(false)
   const [aborting, setAborting] = useState(false)
   const [analysisAction, setAnalysisAction] = useState<(MappedAction & { row: number }) | null>(null)
+  /** Fork：先弹窗填说明，再采集子任务面板快照并调用 OpenCode fork */
+  const [pendingFork, setPendingFork] = useState<{
+    action: MappedAction & { row: number }
+    forkCtx?: ForkFromActionContext
+  } | null>(null)
+  const [forkBusy, setForkBusy] = useState(false)
+  const [archivingSessionId, setArchivingSessionId] = useState<string | null>(null)
+  /** 已发出用户消息但尚未在列表里看到助手收尾（轮询中） */
+  const [waitingForAssistantReply, setWaitingForAssistantReply] = useState(false)
+
+  const pendingForkRef = useRef(pendingFork)
+  pendingForkRef.current = pendingFork
 
   const directories = useMemo(() => {
     const u = uniqueDirectoriesFromSessions(sessions)
@@ -124,6 +169,12 @@ function App() {
   const activeSessionDirectory = useMemo(
     () => sessions.find(s => s.id === selectedSessionId)?.directory,
     [sessions, selectedSessionId],
+  )
+
+  /** Fork 后新 session：本地保存的「fork 前」子任务面板可视化快照（仅对比，不进上下文） */
+  const forkPanelSnapshotBundle = useMemo(
+    () => getForkPanelSnapshotBundle(selectedSessionId),
+    [selectedSessionId],
   )
 
   // Load sessions on mount
@@ -162,6 +213,10 @@ function App() {
     setSelectedSessionId(pick.id)
     setSelectedDirectory(normalizeSessionDirectory(pick.directory))
   }, [sessions, selectedSessionId, selectedDirectory])
+
+  useEffect(() => {
+    setWaitingForAssistantReply(false)
+  }, [selectedSessionId])
 
   // Subscribe to global SSE events
   useEffect(() => {
@@ -562,12 +617,31 @@ function App() {
   const handleSendMessage = useCallback(async (payload: MessageSendPayload) => {
     if (!selectedSessionId) return
     const dir = sessions.find(s => s.id === selectedSessionId)?.directory
-    // 引导语在 buildUserMessageWithGuidance（cockpit-ui/src/config/harnessGuidance.ts）中配置
-    await sendMessage(selectedSessionId, buildUserMessageWithGuidance(payload.combinedText), dir, {
-      imageParts: payload.imageParts,
-    })
-    const msgs = await getMessages(selectedSessionId, 'POST 发送完成后拉取完整列表', dir)
-    setMessages(msgs)
+    const sid = selectedSessionId
+    const text = buildUserMessageWithGuidance(payload.combinedText)
+    const images = payload.imageParts
+    // OpenCode 常在「本轮 Agent 跑完」后才返回 POST /message；若在此 await，MessageInput 会一直保持 sending，输入框被禁用。
+    // 与 fork 首条消息一致：后台发送，靠 SSE + 完成后拉列表 更新 UI。
+    void (async () => {
+      try {
+        await sendMessage(sid, text, dir, { imageParts: images })
+        const msgs = await getMessages(sid, 'POST 发送完成后拉取完整列表', dir)
+        setMessages(msgs)
+        const last = msgs[msgs.length - 1]
+        if (last?.info.role === 'user') {
+          setWaitingForAssistantReply(true)
+          try {
+            await pollUntilAssistantMessage(sid, dir, () => selectedSessionIdRef.current === sid, setMessages)
+          } finally {
+            setWaitingForAssistantReply(false)
+          }
+        }
+      } catch (e) {
+        console.error('[handleSendMessage]', e)
+        window.alert(`发送失败：${e instanceof Error ? e.message : String(e)}`)
+        setWaitingForAssistantReply(false)
+      }
+    })()
   }, [selectedSessionId, sessions])
 
   const handleAbortMessage = useCallback(async () => {
@@ -622,34 +696,154 @@ function App() {
     }
   }, [selectedDirectory])
 
-  const handleForkFromAction = useCallback(async (action: MappedAction & { row: number }) => {
-    const targetSessionId = action.sessionID || selectedSessionId
-    if (!targetSessionId || !action.messageID) return
-    const dir = sessions.find((s) => s.id === targetSessionId)?.directory ?? activeSessionDirectory
+  const handleArchiveSession = useCallback(
+    async (sessionId: string) => {
+      const s = sessions.find((x) => x.id === sessionId)
+      const label = (s?.title || 'Untitled').slice(0, 80)
+      if (
+        !window.confirm(
+          `确定要归档「${label}」吗？\n\n将调用 OpenCode DELETE /session/:id，该会话及其消息会从服务端删除，通常无法恢复。`,
+        )
+      ) {
+        return
+      }
+      const dir = s?.directory
+      setArchivingSessionId(sessionId)
+      try {
+        await deleteSession(sessionId, dir)
+        setPendingQuestions((prev) => {
+          const { [sessionId]: _, ...rest } = prev
+          return rest
+        })
+        const list = await getSessions()
+        setSessions(list)
+        setApiConnected(true)
+        if (list.length === 0) {
+          setSelectedSessionId('')
+          setMessages([])
+          setTodos([])
+          setTodosSnapshotAtMessageIndex({})
+        } else if (selectedSessionId === sessionId) {
+          setMessages([])
+          setTodos([])
+          setTodosSnapshotAtMessageIndex({})
+        }
+      } catch (e) {
+        console.error('Failed to archive session:', e)
+        window.alert(`归档失败：${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        setArchivingSessionId(null)
+      }
+    },
+    [sessions, selectedSessionId],
+  )
 
-    setCreatingSession(true)
-    try {
-      const forked = await forkSession(targetSessionId, {
-        messageID: action.messageID,
-        directory: dir,
-      })
-      const list = await getSessions()
-      setSessions(list)
-      setApiConnected(true)
-      setSelectedDirectory(normalizeSessionDirectory(forked.directory))
-      setSelectedSessionId(forked.id)
-      const [msgs, td] = await Promise.all([
-        getMessages(forked.id, 'fork 后加载会话', forked.directory),
-        getTodos(forked.id, forked.directory),
-      ])
-      setMessages(msgs)
-      setTodos(td)
-    } catch (e) {
-      console.error('Failed to fork session from action:', e)
-    } finally {
-      setCreatingSession(false)
-    }
-  }, [sessions, selectedSessionId, activeSessionDirectory])
+  const handleForkFromAction = useCallback(
+    (action: MappedAction & { row: number }, forkCtx?: ForkFromActionContext) => {
+      const targetSessionId = action.sessionID || selectedSessionId
+      if (!targetSessionId || !action.messageID) return
+      setPendingFork({ action, forkCtx })
+    },
+    [selectedSessionId],
+  )
+
+  const handleConfirmForkWithPrompt = useCallback(
+    async (forkPrompt: string) => {
+      const pending = pendingForkRef.current
+      if (!pending) return
+      const { action } = pending
+      const targetSessionId = action.sessionID || selectedSessionId
+      if (!targetSessionId || !action.messageID) {
+        setPendingFork(null)
+        return
+      }
+      const dir = sessions.find((s) => s.id === targetSessionId)?.directory ?? activeSessionDirectory
+
+      setForkBusy(true)
+      try {
+        const { forkCtx } = pending
+        let bundle: ForkPanelSnapshotBundle | null = null
+        if (forkCtx) {
+          try {
+            bundle = await buildForkPanelSnapshotBundle({
+              messages,
+              visibleSubtasks,
+              sessionDirectory: dir,
+              forkAnchorMessageId: action.messageID,
+              forkAnchorPartId: action.partId,
+              sourceParentSessionId: targetSessionId,
+              forkCtx,
+            })
+          } catch (e) {
+            console.error('Fork: panel snapshot failed (fork will still run):', e)
+          }
+        }
+
+        const forked = await forkSession(targetSessionId, {
+          messageID: action.messageID,
+          directory: dir,
+        })
+        if (bundle) {
+          saveForkPanelSnapshotBundle(forked.id, bundle)
+        }
+
+        const list = await getSessions()
+        setSessions(list)
+        setApiConnected(true)
+        setSelectedDirectory(normalizeSessionDirectory(forked.directory))
+        setSelectedSessionId(forked.id)
+        const [msgs, td] = await Promise.all([
+          getMessages(forked.id, 'after fork load session', forked.directory),
+          getTodos(forked.id, forked.directory),
+        ])
+        setMessages(msgs)
+        setTodos(td)
+
+        const userText = forkPrompt.trim()
+        if (userText.length > 0) {
+          // POST /message 常在本轮 Agent 跑完后才返回；不要 await，否则对话窗要等整轮结束。
+          void (async () => {
+            try {
+              await sendMessage(forked.id, buildUserMessageWithGuidance(userText), forked.directory)
+              const msgsAfterSend = await getMessages(
+                forked.id,
+                'after fork first user message',
+                forked.directory,
+              )
+              setMessages(msgsAfterSend)
+              const lastFork = msgsAfterSend[msgsAfterSend.length - 1]
+              if (lastFork?.info.role === 'user') {
+                setWaitingForAssistantReply(true)
+                try {
+                  await pollUntilAssistantMessage(
+                    forked.id,
+                    forked.directory,
+                    () => selectedSessionIdRef.current === forked.id,
+                    setMessages,
+                  )
+                } finally {
+                  setWaitingForAssistantReply(false)
+                }
+              }
+            } catch (err) {
+              console.error('Fork: first message failed:', err)
+              window.alert(
+                `Fork 后首条消息发送失败：${err instanceof Error ? err.message : String(err)}\n\n请检查 OpenCode 是否在运行、VITE_OPENCODE_BASE 是否与终端一致，以及控制台 Network 中 POST …/message 是否 200。`,
+              )
+            }
+          })()
+        }
+        setPendingFork(null)
+        setForkBusy(false)
+      } catch (e) {
+        console.error('Failed to fork session from action:', e)
+        setPendingFork(null)
+      } finally {
+        setForkBusy(false)
+      }
+    },
+    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks],
+  )
 
   const handleAnalyzeFromAction = useCallback((action: MappedAction & { row: number }) => {
     setAnalysisAction(action)
@@ -675,6 +869,8 @@ function App() {
         onSelectSession={setSelectedSessionId}
         onCreateSession={handleCreateSession}
         creatingSession={creatingSession}
+        onArchiveSession={handleArchiveSession}
+        archivingSessionId={archivingSessionId}
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         apiConnected={apiConnected}
@@ -716,6 +912,7 @@ function App() {
               archivedTodos={archivedForPanel}
               latestTodowriteBatchProgress={latestTodowriteBatchProgress}
               loading={loading}
+              waitingForAssistantReply={waitingForAssistantReply}
               sessionId={selectedSessionId}
               sessionTitle={selectedSession?.title}
               onRefresh={() => loadSessionData(selectedSessionId, activeSessionDirectory)}
@@ -784,9 +981,19 @@ function App() {
               onAnalyzeFromAction={handleAnalyzeFromAction}
               listScrollRef={subtaskScrollRef}
               sessionDirectory={activeSessionDirectory}
+              forkPanelSnapshotBundle={forkPanelSnapshotBundle}
             />
           </div>
         </div>
+
+        <ForkSessionModal
+          open={pendingFork !== null}
+          submitting={forkBusy}
+          onClose={() => {
+            if (!forkBusy) setPendingFork(null)
+          }}
+          onConfirm={handleConfirmForkWithPrompt}
+        />
 
         <SubtaskMessageConnector
           containerRef={linkAreaRef}

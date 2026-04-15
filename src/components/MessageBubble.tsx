@@ -1,9 +1,17 @@
 import { useState, useEffect } from 'react'
-import type { OcMessage, OcMessagePart, OcMessageInfo, OcQuestionInfo, ToolPart } from '../types/opencode'
+import type {
+  OcMessage,
+  OcMessagePart,
+  OcMessageInfo,
+  OcPendingQuestionRequest,
+  OcQuestionInfo,
+  ToolPart,
+} from '../types/opencode'
 import { stripHarnessGuidanceForDisplay } from '../config/harnessGuidance'
 import { getPendingQuestions, replyToQuestion, rejectQuestion } from '../services/opencodeApi'
 import {
   findQuestionRequestIdForToolPart,
+  findRequestIdFromSsePending,
   parseQuestionInputQuestions,
 } from '../utils/questionPart'
 
@@ -12,6 +20,8 @@ interface MessageBubbleProps {
   isLastInTurn: boolean
   /** 多目录实例：提交 question 答案时需要 */
   sessionDirectory?: string
+  /** SSE `question.asked` 的待答（含 request id），用于内联提交，优先于 GET /question */
+  ssePendingQuestion?: OcPendingQuestionRequest | null
   /** 内联 question 提交成功后刷新消息列表 */
   onQuestionAnswered?: () => Promise<void>
 }
@@ -75,6 +85,7 @@ export default function MessageBubble({
   message,
   isLastInTurn,
   sessionDirectory,
+  ssePendingQuestion,
   onQuestionAnswered,
 }: MessageBubbleProps) {
   const { info, parts } = message
@@ -92,6 +103,7 @@ export default function MessageBubble({
           key={idx}
           part={part}
           sessionDirectory={sessionDirectory}
+          ssePendingQuestion={ssePendingQuestion}
           onQuestionAnswered={onQuestionAnswered}
         />
       ))}
@@ -183,10 +195,12 @@ function AgentInfo({ info }: { info: OcMessageInfo }) {
 function PartView({
   part,
   sessionDirectory,
+  ssePendingQuestion,
   onQuestionAnswered,
 }: {
   part: OcMessagePart
   sessionDirectory?: string
+  ssePendingQuestion?: OcPendingQuestionRequest | null
   onQuestionAnswered?: () => Promise<void>
 }) {
   switch (part.type) {
@@ -218,6 +232,7 @@ function PartView({
         <ToolCallView
           part={part}
           sessionDirectory={sessionDirectory}
+          ssePendingQuestion={ssePendingQuestion}
           onQuestionAnswered={onQuestionAnswered}
         />
       )
@@ -289,10 +304,12 @@ function extractToolError(errorRaw?: string): { name?: string; text?: string } {
 function ToolCallView({
   part,
   sessionDirectory,
+  ssePendingQuestion,
   onQuestionAnswered,
 }: {
   part: ToolPart
   sessionDirectory?: string
+  ssePendingQuestion?: OcPendingQuestionRequest | null
   onQuestionAnswered?: () => Promise<void>
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -373,6 +390,7 @@ function ToolCallView({
           part={part}
           questions={questionItems}
           directory={sessionDirectory}
+          ssePendingQuestion={ssePendingQuestion}
           onDone={onQuestionAnswered}
         />
       )}
@@ -454,11 +472,13 @@ function QuestionInlineForm({
   part,
   questions,
   directory,
+  ssePendingQuestion,
   onDone,
 }: {
   part: ToolPart
   questions: OcQuestionInfo[]
   directory?: string
+  ssePendingQuestion?: OcPendingQuestionRequest | null
   onDone?: () => Promise<void>
 }) {
   const [selections, setSelections] = useState<string[][]>(() => questions.map(() => []))
@@ -507,8 +527,30 @@ function QuestionInlineForm({
   }
 
   const resolveRequestId = async (): Promise<string | undefined> => {
-    const list = await getPendingQuestions(directory)
-    return findQuestionRequestIdForToolPart(list, part)
+    const fromSse = findRequestIdFromSsePending(ssePendingQuestion, part)
+    if (fromSse) {
+      console.log('[QuestionInlineForm] 使用 SSE question.asked 的 request id', fromSse)
+      return fromSse
+    }
+    const delaysMs = [0, 200, 500, 1000]
+    for (let i = 0; i < delaysMs.length; i++) {
+      const d = delaysMs[i]!
+      if (d > 0) await new Promise((r) => setTimeout(r, d))
+      try {
+        const list = await getPendingQuestions(directory, { sessionID: part.sessionID })
+        const id = findQuestionRequestIdForToolPart(list, part)
+        if (id) return id
+      } catch (e) {
+        console.warn('[QuestionInlineForm] getPendingQuestions', e)
+      }
+    }
+    console.warn('[QuestionInlineForm] 无法匹配 request id', {
+      messageID: part.messageID,
+      callID: part.callID,
+      sessionID: part.sessionID,
+      directory,
+    })
+    return undefined
   }
 
   const submit = async () => {
@@ -560,9 +602,6 @@ function QuestionInlineForm({
         borderTop: '1px solid #F0F0F0',
       }}
     >
-      <div style={{ fontSize: 11, fontWeight: 600, color: '#4A2D7C', marginBottom: 8 }}>
-        请选题并提交（来自消息内联，不依赖 SSE）
-      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {questions.map((q, qi) => (
           <div

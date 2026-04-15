@@ -186,15 +186,17 @@ export interface AssistantSubtask {
   assistantMessageIndices: number[]
 }
 
+/**
+ * 同一子任务段在 assistant 消息增多时仍保持同一 id（仅用段首 assistant 的 message id），
+ * 避免仅因追加回复就换 key / 被误认为新开子任务。分段仍仅由 todowrite 完成 diff 驱动，与 user 消息无关。
+ */
 function buildSubtaskId(indices: number[], messages: OcMessage[]): string {
   if (indices.length === 0) return 'subtask-empty'
   const first = indices[0]!
   const last = indices[indices.length - 1]!
   const head = messages[first]!
   if (head.info.id && head.info.id.length > 0) {
-    return last === first
-      ? `subtask-${head.info.id}`
-      : `subtask-${head.info.id}__${last}`
+    return `subtask-${head.info.id}`
   }
   return `subtask-idx-${first}-${last}`
 }
@@ -299,11 +301,11 @@ export function groupAssistantSubtasks(
     }
 
     /**
-     * 子任务切分改为“完成驱动”：
-     * - 第一次 todowrite 开始进入同一执行段并持续累计；
+     * 子任务切分：完成驱动；仅遍历 assistant 消息下标，user 消息不参与分段。
+     * - 第一次 todowrite 起进入执行段并持续累计；
      * - pending -> in_progress 不切段；
-     * - 仅当快照 diff 出现「新完成」时才在该 tw 处收口一段；
-     * - 收口后从下一条 assistant 继续累计下一段。
+     * - 仅当 todowrite 快照 diff 出现「新完成」时才在该 tw 处收口一段；
+     * - 收口后从下一条 assistant 起累计下一段（中间插入的 user 消息不改变分段逻辑）。
      */
     let lastTodowriteSnapshot: OcTodo[] | null = null
     const snapAtTw = new Map<number, OcTodo[]>()
