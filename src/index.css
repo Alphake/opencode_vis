@@ -404,3 +404,49 @@ body {
   height: 0;
   display: none;
 }
+
+/* SubtaskCard：时长 Filter 滑块 — 缩小 thumb，与 9–10px 文案尺度协调 */
+input[type='range'].subtask-card-duration-filter-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+
+input[type='range'].subtask-card-duration-filter-range:focus {
+  outline: none;
+}
+
+input[type='range'].subtask-card-duration-filter-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: #d4d4d4;
+}
+
+input[type='range'].subtask-card-duration-filter-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8px;
+  height: 8px;
+  margin-top: -2.5px;
+  border-radius: 50%;
+  background: #5c5c5c;
+  border: 1px solid #3a3a3a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+}
+
+input[type='range'].subtask-card-duration-filter-range::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: #d4d4d4;
+}
+
+input[type='range'].subtask-card-duration-filter-range::-moz-range-thumb {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5c5c5c;
+  border: 1px solid #3a3a3a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+}

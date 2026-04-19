@@ -213,6 +213,40 @@ export default function SubtaskCard({
     return applyParallelLayoutFromCalls(merged, parallelByCallId)
   }, [parentFlowActions, childBranchActions, parallelByCallId])
 
+  const durationDomain = useMemo(() => {
+    const vals = flowActions
+      .map((a) => a.durationMs)
+      .filter((v): v is number => Number.isFinite(v) && v >= 0)
+    if (!vals.length) return null
+    return { min: Math.min(...vals), max: Math.max(...vals) }
+  }, [flowActions])
+  const [durationHighlightMinMs, setDurationHighlightMinMs] = useState(0)
+  useEffect(() => {
+    if (!durationDomain) {
+      setDurationHighlightMinMs(0)
+      return
+    }
+    setDurationHighlightMinMs((prev) => {
+      if (prev < durationDomain.min || prev > durationDomain.max) return durationDomain.min
+      return prev
+    })
+  }, [durationDomain])
+  const durationHighlightStep = useMemo(() => {
+    if (!durationDomain) return 1
+    return Math.max(1, Math.round((durationDomain.max - durationDomain.min) / 240))
+  }, [durationDomain])
+  const matchedLongActionCount = useMemo(() => {
+    if (!durationDomain) return flowActions.length
+    return flowActions.filter(
+      (a) => Number.isFinite(a.durationMs) && a.durationMs >= durationHighlightMinMs
+    ).length
+  }, [flowActions, durationDomain, durationHighlightMinMs])
+  /** 仅当用户把阈值高于数据下界时才暗化/蓝环；停在默认下界时与未筛选一致 */
+  const durationHighlightForFlow =
+    durationDomain != null && durationHighlightMinMs > durationDomain.min
+      ? durationHighlightMinMs
+      : null
+
   /** Fork 后：同一滚动面板内上下两栏 — 灰历史快照 / 当前会话（便于对照） */
   const forkStackLanes = useMemo(() => {
     if (!forkPanelSnapshotBundle || forkPanelSnapshotBundle.version !== 2) {
@@ -305,15 +339,25 @@ export default function SubtaskCard({
           display: 'flex',
           flexDirection: 'row',
           alignItems: 'center',
-          flexWrap: 'wrap',
+          flexWrap: 'nowrap',
           gap: 10,
           width: '100%',
           flexShrink: 0,
+          minWidth: 0,
+          overflowX: 'auto',
         }}
       >
-        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 8,
+            flexShrink: 0,
+          }}
+        >
           <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
-            Current · Actions duration
+            Actions duration
           </span>
           <button
             type="button"
@@ -355,9 +399,17 @@ export default function SubtaskCard({
           }}
         />
 
-        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 6,
+            flexShrink: 0,
+          }}
+        >
           <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
-            Current · Actions color
+            Actions color
           </span>
           <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <button
@@ -422,6 +474,63 @@ export default function SubtaskCard({
             </button>
           </div>
         </div>
+
+        {durationDomain && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              minWidth: 0,
+              flexShrink: 1,
+              marginLeft: 'auto',
+            }}
+          >
+            <span
+              style={{
+                fontSize: 9,
+                fontWeight: 500,
+                lineHeight: '12px',
+                color: '#6A6A6A',
+                flexShrink: 0,
+              }}
+            >
+              Filter
+            </span>
+            <input
+              className="subtask-card-duration-filter-range"
+              type="range"
+              min={durationDomain.min}
+              max={durationDomain.max}
+              step={durationHighlightStep}
+              value={durationHighlightMinMs}
+              onChange={(e) => setDurationHighlightMinMs(Number(e.target.value))}
+              title="Time filter — minimum duration to highlight"
+              aria-label="Time filter: minimum duration to highlight"
+              style={{
+                width: 120,
+                minWidth: 64,
+                maxWidth: 200,
+                flex: '1 1 80px',
+                height: 14,
+                verticalAlign: 'middle',
+              }}
+            />
+            <span
+              style={{
+                fontSize: 9,
+                fontWeight: 500,
+                lineHeight: '12px',
+                color: '#6A6A6A',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+              }}
+            >
+              {formatDurationMs(durationHighlightMinMs)} · {matchedLongActionCount}/{flowActions.length}
+            </span>
+          </div>
+        )}
       </div>
 
       <div
@@ -477,6 +586,7 @@ export default function SubtaskCard({
                 actions={flowActions}
                 durationMode={actionsDurationOn}
                 colorMode={colorBy === 'status' ? 'status' : 'tokens'}
+                durationHighlightMinMs={durationHighlightForFlow}
                 tooltipMessages={tooltipLookupMessages}
                 onForkFromAction={
                   onForkFromAction
@@ -507,6 +617,7 @@ export default function SubtaskCard({
             actions={flowActions}
             durationMode={actionsDurationOn}
             colorMode={colorBy === 'status' ? 'status' : 'tokens'}
+            durationHighlightMinMs={durationHighlightForFlow}
             tooltipMessages={tooltipLookupMessages}
             onForkFromAction={
               onForkFromAction

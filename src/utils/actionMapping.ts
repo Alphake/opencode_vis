@@ -55,7 +55,9 @@ function mapToolToActionType(tool: string): ActionType | null {
 
 function durationForReasoning(part: { time?: { start?: number; end?: number }; text?: string }): number {
   const { start, end } = part.time ?? {}
-  if (typeof start === 'number' && typeof end === 'number' && end >= start) return end - start
+  if (typeof start === 'number' && typeof end === 'number' && end > start) {
+    return Math.max(10, end - start)
+  }
   return Math.min(30_000, Math.max(0, estimateTokensFromStrings(part.text) * 40))
 }
 
@@ -70,8 +72,8 @@ function durationForTool(part: ToolPart, message: OcMessage, nowMs: number): num
   }
   const start = part.state?.time?.start
   const end = part.state?.time?.end
-  if (typeof start === 'number' && typeof end === 'number' && end >= start) {
-    return Math.min(120_000, end - start)
+  if (typeof start === 'number' && typeof end === 'number' && end > start) {
+    return Math.min(120_000, Math.max(10, end - start))
   }
   const created = message.info.time?.created ?? 0
   const completed = message.info.time?.completed

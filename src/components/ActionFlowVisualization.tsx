@@ -17,6 +17,17 @@ type FlowNode =
   | { kind: 'end'; row: number }
   | (MappedAction & { row: number; kind: 'action' })
 
+/** `computeLayout` 输出的每一项，用于连线 bundling */
+type FlowLayoutItem = {
+  node: FlowNode
+  x: number
+  y: number
+  w: number
+  h: number
+  cx: number
+  cy: number
+}
+
 const MARGIN_LEFT = 24
 const GAP = 12
 /**
@@ -35,6 +46,9 @@ const SESSION_REGION_GAP = 10
 const FORK_COMPARE_ROW_GAP = 44
 const TOP_PAD = 4
 const MIN_W = 28
+const DURATION_LINEAR_THRESHOLD_MS = 60_000
+const DURATION_MAX_W = 200
+const DURATION_LINEAR_EXTRA_AT_THRESHOLD = 96
 const BOTTOM_PAD = 6
 /** 至少两行泳道 + 两块 action 时的最小画布高度，避免空数据时 SVG 塌成几十像素 */
 const MIN_SVG_CONTENT_HEIGHT = TOP_PAD + 2 * ROW_H + 2 * BLOCK_H + BOTTOM_PAD
@@ -63,9 +77,34 @@ function edgeStrokeAndMarker(
 }
 
 function blockWidth(durationMode: boolean, durationMs: number): number {
-  if (!durationMode) return MIN_W
-  const w = 8 + durationMs / 40
-  return Math.max(MIN_W, Number.isFinite(w) ? w : MIN_W)
+  return durationWidthMeta(durationMode, durationMs).w
+}
+
+function durationWidthMeta(
+  durationMode: boolean,
+  durationMs: number
+): { w: number; overThreshold: boolean } {
+  if (!durationMode) return { w: MIN_W, overThreshold: false }
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return { w: MIN_W, overThreshold: false }
+  const maxExtra = Math.max(0, DURATION_MAX_W - MIN_W)
+  const linearExtra = Math.min(DURATION_LINEAR_EXTRA_AT_THRESHOLD, maxExtra)
+  let extra: number
+  if (durationMs <= DURATION_LINEAR_THRESHOLD_MS) {
+    extra = (durationMs / DURATION_LINEAR_THRESHOLD_MS) * linearExtra
+  } else {
+    const overRatio = durationMs / DURATION_LINEAR_THRESHOLD_MS - 1
+    const softPart = (maxExtra - linearExtra) * (1 - Math.exp(-0.9 * overRatio))
+    extra = linearExtra + softPart
+  }
+  const w = Math.min(DURATION_MAX_W, MIN_W + Math.max(0, extra))
+  return { w, overThreshold: durationMs > DURATION_LINEAR_THRESHOLD_MS }
+}
+
+function formatDurationMs(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return '—'
+  const sec = durationMs / 1000
+  if (sec < 0.01) return '<0.01s'
+  return `${sec.toFixed(2)}s`
 }
 
 function statusColors(status: ActionStatus): { fill: string; stroke: string; icon: string } {
@@ -167,10 +206,7 @@ function buildSemanticTooltipBlockHtml(act: MappedAction & { row: number }, tool
 
 /** Region 3: duration only (token estimate removed from tooltip) */
 function buildTooltipFooterHtml(act: MappedAction & { row: number }): string {
-  const dur =
-    Number.isFinite(act.durationMs) && act.durationMs > 0
-      ? `${(act.durationMs / 1000).toFixed(2)}s`
-      : '—'
+  const dur = formatDurationMs(act.durationMs)
   const rows: TooltipKeyValue[] = [{ key: 'Duration', value: dur }]
   return formatTooltipKeyValuesAsHtml(rows, escapeHtml)
 }
@@ -185,10 +221,7 @@ function buildActionTooltipHtml(act: MappedAction & { row: number }, tooltipMess
 }
 
 function buildCompactActionTooltipHtml(act: MappedAction & { row: number }, tooltipMessages?: OcMessage[]): string {
-  const dur =
-    Number.isFinite(act.durationMs) && act.durationMs > 0
-      ? `${(act.durationMs / 1000).toFixed(2)}s`
-      : '—'
+  const dur = formatDurationMs(act.durationMs)
   let main = ''
   if (tooltipMessages?.length) {
     const part = resolvePartForAction(tooltipMessages, act)
@@ -307,53 +340,8 @@ function computeLayout(
     seq.push({ kind: 'end', row: 1 })
   }
 
-  const actionColumns = new Map<number, number>()
-  const groupStepToColumn = new Map<string, Map<number, number>>()
-  const groupLaneStepCounter = new Map<string, Map<number, number>>()
-  let nextColumn = 0
-  sorted.forEach((a, idx) => {
-    if (!a.parallelGroupId) {
-      actionColumns.set(idx, nextColumn++)
-      return
-    }
-    const gid = a.parallelGroupId
-    const lane = a.parallelLaneIndex ?? 0
-    let laneCounter = groupLaneStepCounter.get(gid)
-    if (!laneCounter) {
-      laneCounter = new Map<number, number>()
-      groupLaneStepCounter.set(gid, laneCounter)
-    }
-    const step = laneCounter.get(lane) ?? 0
-    laneCounter.set(lane, step + 1)
-
-    let stepCols = groupStepToColumn.get(gid)
-    if (!stepCols) {
-      stepCols = new Map<number, number>()
-      groupStepToColumn.set(gid, stepCols)
-    }
-    if (!stepCols.has(step)) stepCols.set(step, nextColumn++)
-    actionColumns.set(idx, stepCols.get(step)!)
-  })
-  const endColumn = nextColumn
-
-  const colMaxWidth = new Map<number, number>()
-  sorted.forEach((a, idx) => {
-    const c = actionColumns.get(idx)
-    if (c === undefined) return
-    const w = blockWidth(durationMode, a.durationMs)
-    colMaxWidth.set(c, Math.max(colMaxWidth.get(c) ?? 0, w))
-  })
-  if (includeEndNode) {
-    colMaxWidth.set(endColumn, Math.max(colMaxWidth.get(endColumn) ?? 0, MIN_W))
-  }
-
-  const colStartX = new Map<number, number>()
-  let x = MARGIN_LEFT
-  const lastColIndex = includeEndNode ? endColumn : nextColumn - 1
-  for (let c = 0; c <= lastColIndex; c++) {
-    colStartX.set(c, x)
-    x += (colMaxWidth.get(c) ?? MIN_W) + GAP
-  }
+  /** step 间距收紧：顺序推进时不拉太开 */
+  const TIMELINE_STEP_GAP = 10
 
   const sessionKeySet = new Set<string>()
   sorted.forEach((a) => sessionKeySet.add(actionSessionKey(a)))
@@ -376,6 +364,175 @@ function computeLayout(
   sessionOrder.push(...childKeys)
   if (sessionOrder.length === 0) sessionOrder.push('session:main')
 
+  /** 全局画布上的 x（索引 -> x） */
+  const actionXBySortedIndex = new Map<number, number>()
+
+  const rootIndices = sorted
+    .map((a, idx) => ({ a, idx }))
+    .filter((x) => x.a.source !== 'child-session')
+    .map((x) => x.idx)
+
+  /** 根轴 slot（统一时间轴） */
+  const rootSlotByIndex = new Map<number, string>()
+  const rootGroupStepToSlot = new Map<string, Map<number, string>>()
+  const rootGroupLaneStepCounter = new Map<string, Map<number, number>>()
+  const rootSlotIndices = new Map<string, number[]>()
+  let nextRootSlot = 0
+  for (const idx of rootIndices) {
+    const a = sorted[idx]!
+    let slotKey: string
+    if (!a.parallelGroupId) {
+      slotKey = `root:${nextRootSlot++}`
+    } else {
+      const session = actionSessionKey(a)
+      const isParentTaskEntry = a.actionType === 'Subagent' && a.source !== 'child-session' && Boolean(a.callID)
+      const groupKey = isParentTaskEntry ? a.parallelGroupId : `${session}::${a.parallelGroupId}`
+      const lane = a.parallelLaneIndex ?? 0
+      let laneCounter = rootGroupLaneStepCounter.get(groupKey)
+      if (!laneCounter) {
+        laneCounter = new Map<number, number>()
+        rootGroupLaneStepCounter.set(groupKey, laneCounter)
+      }
+      const step = laneCounter.get(lane) ?? 0
+      laneCounter.set(lane, step + 1)
+
+      let stepSlots = rootGroupStepToSlot.get(groupKey)
+      if (!stepSlots) {
+        stepSlots = new Map<number, string>()
+        rootGroupStepToSlot.set(groupKey, stepSlots)
+      }
+      if (!stepSlots.has(step)) stepSlots.set(step, `root:${nextRootSlot++}`)
+      slotKey = stepSlots.get(step)!
+    }
+    rootSlotByIndex.set(idx, slotKey)
+    let list = rootSlotIndices.get(slotKey)
+    if (!list) {
+      list = []
+      rootSlotIndices.set(slotKey, list)
+    }
+    list.push(idx)
+  }
+
+  /**
+   * 子 session 局部轴（相对偏移）：
+   * - 每个子 session 仅按自身动作推进；
+   * - 记录 childSpan，用于扩展父 task 所在 slot 的有效右边界。
+   */
+  const childLocalXByIndex = new Map<number, number>()
+  const childSpanByCallID = new Map<string, number>()
+  for (const childSession of childKeys) {
+    const callID = childSession.slice('session:task:'.length)
+    const childIndices = sorted
+      .map((a, idx) => ({ a, idx }))
+      .filter((x) => x.a.source === 'child-session' && actionSessionKey(x.a) === childSession)
+      .map((x) => x.idx)
+    if (childIndices.length === 0) {
+      childSpanByCallID.set(callID, 0)
+      continue
+    }
+    const childSlotByIndex = new Map<number, string>()
+    const childGroupStepToSlot = new Map<string, Map<number, string>>()
+    const childGroupLaneStepCounter = new Map<string, Map<number, number>>()
+    let nextChildSlot = 0
+    for (const idx of childIndices) {
+      const a = sorted[idx]!
+      let slotKey: string
+      if (!a.parallelGroupId) {
+        slotKey = `child:${nextChildSlot++}`
+      } else {
+        const groupKey = a.parallelGroupId
+        const lane = a.parallelLaneIndex ?? 0
+        let laneCounter = childGroupLaneStepCounter.get(groupKey)
+        if (!laneCounter) {
+          laneCounter = new Map<number, number>()
+          childGroupLaneStepCounter.set(groupKey, laneCounter)
+        }
+        const step = laneCounter.get(lane) ?? 0
+        laneCounter.set(lane, step + 1)
+        let stepSlots = childGroupStepToSlot.get(groupKey)
+        if (!stepSlots) {
+          stepSlots = new Map<number, string>()
+          childGroupStepToSlot.set(groupKey, stepSlots)
+        }
+        if (!stepSlots.has(step)) stepSlots.set(step, `child:${nextChildSlot++}`)
+        slotKey = stepSlots.get(step)!
+      }
+      childSlotByIndex.set(idx, slotKey)
+    }
+
+    const childSlotWidth = new Map<string, number>()
+    for (const idx of childIndices) {
+      const slotKey = childSlotByIndex.get(idx)
+      if (!slotKey) continue
+      const w = blockWidth(durationMode, sorted[idx]!.durationMs)
+      childSlotWidth.set(slotKey, Math.max(childSlotWidth.get(slotKey) ?? 0, w))
+    }
+    const childSlotStartX = new Map<string, number>()
+    let childCursor = 0
+    for (let s = 0; s < nextChildSlot; s++) {
+      const slotKey = `child:${s}`
+      childSlotStartX.set(slotKey, childCursor)
+      childCursor += (childSlotWidth.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
+    }
+    for (const idx of childIndices) {
+      const slotKey = childSlotByIndex.get(idx)
+      childLocalXByIndex.set(idx, slotKey ? (childSlotStartX.get(slotKey) ?? 0) : 0)
+    }
+    const childSpanRight = Math.max(0, childCursor - TIMELINE_STEP_GAP)
+    childSpanByCallID.set(callID, childSpanRight)
+  }
+
+  /** 根轴每个 slot 的有效跨度：max(父块宽, 父task->子session全程宽) */
+  const rootSlotEffectiveSpan = new Map<string, number>()
+  for (const [slotKey, indices] of rootSlotIndices.entries()) {
+    let span = MIN_W
+    for (const idx of indices) {
+      const a = sorted[idx]!
+      const w = blockWidth(durationMode, a.durationMs)
+      span = Math.max(span, w)
+      if (a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID) {
+        const childSpan = childSpanByCallID.get(a.callID) ?? 0
+        span = Math.max(span, w + TIMELINE_STEP_GAP + childSpan)
+      }
+    }
+    rootSlotEffectiveSpan.set(slotKey, span)
+  }
+
+  const rootSlotStartX = new Map<string, number>()
+  let rootCursor = MARGIN_LEFT
+  for (let s = 0; s < nextRootSlot; s++) {
+    const slotKey = `root:${s}`
+    rootSlotStartX.set(slotKey, rootCursor)
+    rootCursor += (rootSlotEffectiveSpan.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
+  }
+  for (const idx of rootIndices) {
+    const slotKey = rootSlotByIndex.get(idx)
+    if (!slotKey) continue
+    actionXBySortedIndex.set(idx, rootSlotStartX.get(slotKey) ?? MARGIN_LEFT)
+  }
+
+  /** 子 session 绝对 x = 父task右缘 + gap + 本地相对x */
+  for (const childSession of childKeys) {
+    const callID = childSession.slice('session:task:'.length)
+    const parentIdx = sorted.findIndex(
+      (a) => a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID === callID
+    )
+    if (parentIdx < 0) continue
+    const parent = sorted[parentIdx]!
+    const parentX = actionXBySortedIndex.get(parentIdx) ?? MARGIN_LEFT
+    const parentRight = parentX + blockWidth(durationMode, parent.durationMs)
+    const childBaseX = parentRight + TIMELINE_STEP_GAP
+    const childIndices = sorted
+      .map((a, idx) => ({ a, idx }))
+      .filter((x) => x.a.source === 'child-session' && actionSessionKey(x.a) === childSession)
+      .map((x) => x.idx)
+    for (const idx of childIndices) {
+      actionXBySortedIndex.set(idx, childBaseX + (childLocalXByIndex.get(idx) ?? 0))
+    }
+  }
+
+  const endNodeX = rootCursor
+
   const sessionTopY = new Map<string, number>()
   let sessionY = TOP_PAD
   for (const session of sessionOrder) {
@@ -397,24 +554,13 @@ function computeLayout(
     MIN_SVG_CONTENT_HEIGHT
   )
 
-  const layout: {
-    node: FlowNode
-    x: number
-    y: number
-    w: number
-    h: number
-    cx: number
-    cy: number
-  }[] = []
+  const layout: FlowLayoutItem[] = []
 
   for (let i = 0; i < seq.length; i++) {
     const node = seq[i]!
     if (node.kind === 'end') {
       const w = MIN_W
-      const c = endColumn
-      const x0 = colStartX.get(c) ?? MARGIN_LEFT
-      const cw = colMaxWidth.get(c) ?? MIN_W
-      const xNode = x0 + (cw - w) / 2
+      const xNode = endNodeX
       /** 终点黄点固定在主会话第一行（kernel / layer 0） */
       const y = sessionTopY.get('session:main') ?? TOP_PAD
       const cy = y + BLOCK_H / 2
@@ -422,10 +568,7 @@ function computeLayout(
     } else {
       const a = node as MappedAction & { row: number }
       const w = blockWidth(durationMode, a.durationMs)
-      const c = actionColumns.get(i) ?? i
-      const x0 = colStartX.get(c) ?? MARGIN_LEFT
-      const cw = colMaxWidth.get(c) ?? w
-      const xNode = x0 + (cw - w) / 2
+      const xNode = actionXBySortedIndex.get(i) ?? MARGIN_LEFT
       const session = actionSessionKey(a)
       const yBase = sessionTopY.get(session) ?? TOP_PAD
       const y =
@@ -438,7 +581,13 @@ function computeLayout(
     }
   }
 
-  const totalW = Math.max(x + MARGIN_LEFT, 360)
+  const maxActionRight = sorted.reduce((maxR, a, idx) => {
+    const x = actionXBySortedIndex.get(idx) ?? MARGIN_LEFT
+    const w = blockWidth(durationMode, a.durationMs)
+    return Math.max(maxR, x + w)
+  }, MARGIN_LEFT)
+  const totalTimelineRight = includeEndNode ? Math.max(maxActionRight, endNodeX + MIN_W) : maxActionRight
+  const totalW = Math.max(totalTimelineRight + MARGIN_LEFT, 360)
   return { layout, totalW, totalH }
 }
 
@@ -476,10 +625,71 @@ function appendOrthoEdge(
     .attr('pointer-events', 'none')
 }
 
+function joinStrokeForFanIn(
+  from: MappedAction & { row: number },
+  to: FlowNode,
+  markerUrl: string,
+  ghostMarkerUrl: string
+): { stroke: string; markerUrl: string } {
+  if (to.kind === 'end') {
+    return {
+      stroke: from.forkGhost ? FORK_GHOST_STROKE : actionFlowPalette.arrow,
+      markerUrl: from.forkGhost ? ghostMarkerUrl : markerUrl,
+    }
+  }
+  return edgeStrokeAndMarker(from, to as MappedAction & { row: number }, markerUrl, ghostMarkerUrl)
+}
+
+/**
+ * 多条边汇入同一后继：共享同一竖直线 x = bundleX（位于最右前驱出口与后继左缘之间），再水平接入后继。
+ */
+function appendOrthoFanIn(
+  content: d3.Selection<SVGGElement, unknown, null, undefined>,
+  sources: FlowLayoutItem[],
+  target: FlowLayoutItem,
+  markerUrl: string,
+  ghostMarkerUrl: string
+) {
+  if (sources.length === 0) return
+  if (sources.length === 1) {
+    const s = sources[0]!
+    const na = s.node as MappedAction & { row: number }
+    const { stroke, markerUrl: m } = joinStrokeForFanIn(na, target.node, markerUrl, ghostMarkerUrl)
+    appendOrthoEdge(content, s.x + s.w, s.cy, target.x, target.cy, m, stroke, 1.2)
+    return
+  }
+  const maxEnd = Math.max(...sources.map(s => s.x + s.w))
+  const bundleX = (maxEnd + target.x) / 2
+  for (const s of sources) {
+    const na = s.node as MappedAction & { row: number }
+    const { stroke, markerUrl: m } = joinStrokeForFanIn(na, target.node, markerUrl, ghostMarkerUrl)
+    const path = d3.path()
+    path.moveTo(s.x + s.w, s.cy)
+    path.lineTo(bundleX, s.cy)
+    path.lineTo(bundleX, target.cy)
+    path.lineTo(target.x, target.cy)
+    content
+      .append('path')
+      .attr('d', path.toString())
+      .attr('fill', 'none')
+      .attr('stroke', stroke)
+      .attr('stroke-width', 1.2)
+      .attr('marker-end', m)
+      .attr('pointer-events', 'none')
+  }
+}
+
 interface Props {
   actions: (MappedAction & { row: number })[]
   durationMode: boolean
   colorMode: 'status' | 'tokens'
+  /**
+   * 突出「更耗时」：仅当 `durationMs >= durationHighlightMinMs` 时保持正常亮度；
+   * 更短的 action 暗化（与 `durationMode` / `colorMode` 无关）。
+   */
+  durationHighlightMinMs?: number | null
+  /** 有阈值时自动滚动到第一个命中的 action（默认 true） */
+  autoScrollFirstFilteredMatch?: boolean
   /**
    * 与 action 对应的原文查找表：须为 `segmentMessages` 与 `childBranchMessages` 的合并
    *（见 `mergeMessagesForActionTooltipLookup`），以便用 `partId` 对齐 rect 与 `OcMessagePart`。
@@ -510,6 +720,8 @@ export default function ActionFlowVisualization({
   actions,
   durationMode,
   colorMode,
+  durationHighlightMinMs = null,
+  autoScrollFirstFilteredMatch = true,
   tooltipMessages,
   onForkFromAction,
   onAnalyzeFromAction,
@@ -521,6 +733,7 @@ export default function ActionFlowVisualization({
   hideScrollbar = false,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
   const [contextMenu, setContextMenu] = useState<ActionFlowContextMenuState | null>(null)
   const reactId = useId().replace(/:/g, '')
   const markerId = `action-flow-arrow-${reactId}`
@@ -543,6 +756,8 @@ export default function ActionFlowVisualization({
       includeEndNode: showFlowEndNode,
     })
     const offsetY = verticalCenterOffsetY(layout, totalH)
+    const highlightActive =
+      durationHighlightMinMs != null && Number.isFinite(durationHighlightMinMs)
 
     const defs = root.append('defs')
     defs
@@ -584,73 +799,10 @@ export default function ActionFlowVisualization({
     const content = root.append('g').attr('transform', `translate(0, ${offsetY + topOffset})`)
     const contentNode = content.node() as SVGGElement | null
 
-    for (let i = 0; i < layout.length - 1; i++) {
-      const a = layout[i]!
-      const b = layout[i + 1]!
-      if (a.node.kind === 'action' && b.node.kind === 'action') {
-        const pa = a.node as MappedAction & { row: number }
-        const pb = b.node as MappedAction & { row: number }
-        const ra = pa.forkCompareRow ?? 0
-        const rb = pb.forkCompareRow ?? 0
-        if (ra !== rb) {
-          const x1 = a.x + a.w
-          const y1 = a.cy
-          const x2 = b.x
-          const y2 = b.cy
-          let segStroke = FORK_GHOST_STROKE
-          let segMarker = ghostMarkerUrl
-          if (ra === 0 && rb === 2) {
-            segStroke = actionFlowPalette.arrow
-            segMarker = markerUrl
-          } else if (ra === 1 && rb === 2) {
-            segStroke = actionFlowPalette.arrow
-            segMarker = markerUrl
-          }
-          appendOrthoEdge(content, x1, y1, x2, y2, segMarker, segStroke, 1.2)
-          continue
-        }
-        if (
-          pa.actionType === 'Subagent' &&
-          pa.childSessionID &&
-          pa.callID &&
-          pb.source === 'child-session' &&
-          pb.parentTaskCallID === pa.callID &&
-          pb.branchChildSessionID === pa.childSessionID
-        ) {
-          continue
-        }
-        if (parallelSiblingSkip(pa, pb)) continue
-      }
-      const x1 = a.x + a.w
-      const y1 = a.cy
-      const x2 = b.x
-      const y2 = b.cy
-      const mid = (x1 + x2) / 2
-      const path = d3.path()
-      path.moveTo(x1, y1)
-      path.lineTo(mid, y1)
-      path.lineTo(mid, y2)
-      path.lineTo(x2, y2)
-      const { stroke: segStroke, markerUrl: segMarker } =
-        a.node.kind === 'action' && b.node.kind === 'action'
-          ? edgeStrokeAndMarker(
-              a.node as MappedAction & { row: number },
-              b.node as MappedAction & { row: number },
-              markerUrl,
-              ghostMarkerUrl
-            )
-          : { stroke: actionFlowPalette.arrow, markerUrl }
-      content
-        .append('path')
-        .attr('d', path.toString())
-        .attr('fill', 'none')
-        .attr('stroke', segStroke)
-        .attr('stroke-width', 1.2)
-        .attr('marker-end', segMarker)
-        .attr('pointer-events', 'none')
-    }
+    /** 并行多 lane 汇入同一后继时由 `appendOrthoFanIn` 绘制，此处跳过避免重复折线 */
+    const parallelJoinSkip = new Set<string>()
 
-    /** 并行组：前驱分叉到各 lane 首节点、各 lane 末节点汇合到后继 */
+    /** 并行组：lane 内连线、前驱→各 lane 首、各 lane 末→后继（多源汇入同一 bundleX） */
     const groupIdToIndices = new Map<string, number[]>()
     for (let i = 0; i < layout.length; i++) {
       const item = layout[i]!
@@ -723,13 +875,14 @@ export default function ActionFlowVisualization({
         }
         list.push(idx)
       }
+
+      const lastIndices: number[] = []
       for (const laneIndices of byLane.values()) {
         const sortedIdx = [...laneIndices].sort((a, b) => {
           const ta = (layout[a]!.node as MappedAction & { row: number }).sortTime
           const tb = (layout[b]!.node as MappedAction & { row: number }).sortTime
           return ta - tb
         })
-        // 同一并行 lane 内部必须保持连续连线，避免因全局相邻关系被打断而出现“中间断线”。
         for (let i = 0; i < sortedIdx.length - 1; i++) {
           const fromIdx = sortedIdx[i]!
           const toIdx = sortedIdx[i + 1]!
@@ -763,32 +916,88 @@ export default function ActionFlowVisualization({
             1.2
           )
         }
-        const lastIdx = sortedIdx[sortedIdx.length - 1]!
-        if (succItem && succIdx >= 0 && lastIdx + 1 !== succIdx) {
-          const na = layout[lastIdx]!.node as MappedAction & { row: number }
-          const succNode = layout[succIdx]!.node
-          let forkStroke: string
-          let forkMarker: string
-          if (succNode.kind === 'end') {
-            forkStroke = na.forkGhost ? FORK_GHOST_STROKE : actionFlowPalette.arrow
-            forkMarker = na.forkGhost ? ghostMarkerUrl : markerUrl
-          } else {
-            const e = edgeStrokeAndMarker(na, succNode as MappedAction & { row: number }, markerUrl, ghostMarkerUrl)
-            forkStroke = e.stroke
-            forkMarker = e.markerUrl
-          }
-          appendOrthoEdge(
-            content,
-            layout[lastIdx]!.x + layout[lastIdx]!.w,
-            layout[lastIdx]!.cy,
-            succItem.x,
-            succItem.cy,
-            forkMarker,
-            forkStroke,
-            1.2
-          )
-        }
+        lastIndices.push(sortedIdx[sortedIdx.length - 1]!)
       }
+
+      if (succItem && succIdx >= 0 && lastIndices.length > 0) {
+        for (const li of lastIndices) {
+          parallelJoinSkip.add(`${li}-${succIdx}`)
+        }
+        appendOrthoFanIn(
+          content,
+          lastIndices.map((idx) => layout[idx]!),
+          layout[succIdx]!,
+          markerUrl,
+          ghostMarkerUrl
+        )
+      }
+    }
+
+    for (let i = 0; i < layout.length - 1; i++) {
+      const a = layout[i]!
+      const b = layout[i + 1]!
+      if (a.node.kind === 'action' && b.node.kind === 'action') {
+        const pa = a.node as MappedAction & { row: number }
+        const pb = b.node as MappedAction & { row: number }
+        const ra = pa.forkCompareRow ?? 0
+        const rb = pb.forkCompareRow ?? 0
+        if (ra !== rb) {
+          const x1 = a.x + a.w
+          const y1 = a.cy
+          const x2 = b.x
+          const y2 = b.cy
+          let segStroke = FORK_GHOST_STROKE
+          let segMarker = ghostMarkerUrl
+          if (ra === 0 && rb === 2) {
+            segStroke = actionFlowPalette.arrow
+            segMarker = markerUrl
+          } else if (ra === 1 && rb === 2) {
+            segStroke = actionFlowPalette.arrow
+            segMarker = markerUrl
+          }
+          appendOrthoEdge(content, x1, y1, x2, y2, segMarker, segStroke, 1.2)
+          continue
+        }
+        if (
+          pa.actionType === 'Subagent' &&
+          pa.childSessionID &&
+          pa.callID &&
+          pb.source === 'child-session' &&
+          pb.parentTaskCallID === pa.callID &&
+          pb.branchChildSessionID === pa.childSessionID
+        ) {
+          continue
+        }
+        if (parallelSiblingSkip(pa, pb)) continue
+      }
+      if (parallelJoinSkip.has(`${i}-${i + 1}`)) continue
+      const x1 = a.x + a.w
+      const y1 = a.cy
+      const x2 = b.x
+      const y2 = b.cy
+      const mid = (x1 + x2) / 2
+      const path = d3.path()
+      path.moveTo(x1, y1)
+      path.lineTo(mid, y1)
+      path.lineTo(mid, y2)
+      path.lineTo(x2, y2)
+      const { stroke: segStroke, markerUrl: segMarker } =
+        a.node.kind === 'action' && b.node.kind === 'action'
+          ? edgeStrokeAndMarker(
+              a.node as MappedAction & { row: number },
+              b.node as MappedAction & { row: number },
+              markerUrl,
+              ghostMarkerUrl
+            )
+          : { stroke: actionFlowPalette.arrow, markerUrl }
+      content
+        .append('path')
+        .attr('d', path.toString())
+        .attr('fill', 'none')
+        .attr('stroke', segStroke)
+        .attr('stroke-width', 1.2)
+        .attr('marker-end', segMarker)
+        .attr('pointer-events', 'none')
     }
 
     layout.forEach((item, layoutIndex) => {
@@ -813,6 +1022,15 @@ export default function ActionFlowVisualization({
       const act = node as MappedAction & { row: number }
       const isGhost = act.forkGhost === true
       const ghostError = isGhost && act.status === 'error'
+      const matchesDurationHighlight =
+        !highlightActive ||
+        !Number.isFinite(act.durationMs) ||
+        act.durationMs >= (durationHighlightMinMs as number)
+      const showDurationFocusRing =
+        highlightActive &&
+        matchesDurationHighlight &&
+        !isGhost &&
+        !ghostError
       const tc = tokenColor(colorScale, act.tokenEstimate)
       const sc = effectiveStatusColors(act.status, act.durationMs)
       const errPalette = statusColors('error')
@@ -853,6 +1071,13 @@ export default function ActionFlowVisualization({
         .attr('data-tooltip-id', tooltipId)
         .attr('data-tooltip-html', buildCompactActionTooltipHtml(act, tooltipMessages))
         .attr('data-tooltip-place', 'top')
+      if (!matchesDurationHighlight) {
+        rect.attr('opacity', 0.12)
+      } else if (highlightActive) {
+        rect.attr('opacity', 1)
+      }
+      const durationMeta = durationWidthMeta(durationMode, act.durationMs)
+      const overDurationThreshold = !isGhost && durationMeta.overThreshold
       const canContext =
         act.messageID && (onForkFromAction || onAnalyzeFromAction) && act.forkGhost !== true
       const rectEl = rect.node() as SVGRectElement
@@ -872,6 +1097,20 @@ export default function ActionFlowVisualization({
         rect.attr('class', sc.isLongRunning ? 'action-flow-running-long' : 'action-flow-running')
       }
 
+      if (showDurationFocusRing) {
+        content
+          .append('rect')
+          .attr('x', nx - 2)
+          .attr('y', ny - 2)
+          .attr('width', w + 4)
+          .attr('height', h + 4)
+          .attr('rx', 6)
+          .attr('fill', 'none')
+          .attr('stroke', '#2563EB')
+          .attr('stroke-width', 2.25)
+          .attr('pointer-events', 'none')
+      }
+
       if (contentNode) {
         appendActionFlowIcon(
           contentNode,
@@ -881,6 +1120,31 @@ export default function ActionFlowVisualization({
           iconFill,
           `${reactId}-${layoutIndex}-`
         )
+      }
+      if (!matchesDurationHighlight) {
+        content
+          .append('rect')
+          .attr('x', nx)
+          .attr('y', ny)
+          .attr('width', w)
+          .attr('height', h)
+          .attr('rx', 4)
+          .attr('fill', '#0f172a')
+          .attr('opacity', 0.5)
+          .attr('pointer-events', 'none')
+      }
+
+      if (overDurationThreshold && w >= 66) {
+        content
+          .append('text')
+          .attr('x', nx + 6)
+          .attr('y', ny + 10)
+          .attr('font-size', 9)
+          .attr('font-weight', 700)
+          .attr('fill', '#B45309')
+          .attr('font-family', SVG_FONT_SANS)
+          .text(`>${Math.round(DURATION_LINEAR_THRESHOLD_MS / 1000)}s`)
+          .attr('pointer-events', 'none')
       }
 
       if (canContext && w >= MORE_BTN_MIN_W) {
@@ -955,18 +1219,18 @@ export default function ActionFlowVisualization({
       branchPath.lineTo(x2, y2)
       const parentAct = node as MappedAction & { row: number }
       const childAct = firstChild.node as MappedAction & { row: number }
-      const parentGhost = parentAct.forkGhost
-      const childGhost = childAct.forkGhost
-      const { stroke: branchStroke, markerUrl: branchMarker } =
-        parentGhost || childGhost
-          ? { stroke: FORK_GHOST_STROKE, markerUrl: ghostMarkerUrl }
-          : { stroke: '#8445BC', markerUrl: markerUrl }
+      const { stroke: branchStroke, markerUrl: branchMarker } = edgeStrokeAndMarker(
+        parentAct,
+        childAct,
+        markerUrl,
+        ghostMarkerUrl
+      )
       content
         .append('path')
         .attr('d', branchPath.toString())
         .attr('fill', 'none')
         .attr('stroke', branchStroke)
-        .attr('stroke-width', 1.75)
+        .attr('stroke-width', 1.2)
         .attr('marker-end', branchMarker)
         .attr('pointer-events', 'none')
     }
@@ -1053,10 +1317,25 @@ export default function ActionFlowVisualization({
     // 关键：使用像素级固定画布，不用 viewBox 缩放，避免不同行数时 action 尺寸变化
     root.attr('width', totalW).attr('height', desiredH)
     svg.removeAttribute('viewBox')
+
+    if (highlightActive && autoScrollFirstFilteredMatch) {
+      const thr = durationHighlightMinMs as number
+      const firstMatched = layout.find((item) => {
+        if (item.node.kind !== 'action') return false
+        const a = item.node as MappedAction & { row: number }
+        return Number.isFinite(a.durationMs) && a.durationMs >= thr
+      })
+      if (firstMatched && scrollRef.current) {
+        const targetLeft = Math.max(0, firstMatched.x - 18)
+        scrollRef.current.scrollTo({ left: targetLeft, behavior: 'smooth' })
+      }
+    }
   }, [
     actions,
     durationMode,
     colorMode,
+    durationHighlightMinMs,
+    autoScrollFirstFilteredMatch,
     tooltipMessages,
     markerId,
     tooltipId,
@@ -1097,6 +1376,7 @@ export default function ActionFlowVisualization({
         minHeight: 0,
         flexShrink: 0,
       }}
+      ref={scrollRef}
     >
       <svg
         ref={svgRef}
