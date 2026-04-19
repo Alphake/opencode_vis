@@ -50,12 +50,16 @@ interface SubtaskCardProps {
   selectedActionType?: string | null
   /** 当前选中的单个 action key；优先级高于 selectedActionType */
   selectedActionKey?: string | null
+  /** 仅用于 ActionFlow 的 action-level 筛选（区分 treemap 点击与普通点击） */
+  flowHighlightedActionKey?: string | null
   /** 选中位于其他子任务卡片时，本卡所有 action 应整体 dim */
   otherSubtaskHasSelection?: boolean
   /** treemap cell 点击：传 null 取消选中 */
   onSelectActionType?: (actionType: string | null) => void
   /** treemap mini-block 或 ActionFlow rect 单击：传 null 取消选中 */
   onSelectAction?: (actionKey: string | null) => void
+  /** ActionFlow rect 单击：仅同步 treemap 选中，不触发 flow 筛选 */
+  onSelectActionFromFlow?: (actionKey: string | null) => void
 }
 
 type ColorByMode = 'status' | 'tokens'
@@ -123,9 +127,11 @@ export default function SubtaskCard({
   leadingTreemapSize,
   selectedActionType = null,
   selectedActionKey = null,
+  flowHighlightedActionKey = null,
   otherSubtaskHasSelection = false,
   onSelectActionType,
   onSelectAction,
+  onSelectActionFromFlow,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
@@ -243,6 +249,17 @@ export default function SubtaskCard({
     return { min: Math.min(...vals), max: Math.max(...vals) }
   }, [flowActions])
   const [durationHighlightMinMs, setDurationHighlightMinMs] = useState(0)
+  const [durationFilterTouched, setDurationFilterTouched] = useState(false)
+  const subtaskSig = useMemo(() => {
+    const ids = subtask.assistantMessageIndices
+    const first = ids[0] ?? -1
+    const last = ids[ids.length - 1] ?? -1
+    return `${subtask.subtask_id}:${first}:${last}:${ids.length}`
+  }, [subtask.subtask_id, subtask.assistantMessageIndices])
+  useEffect(() => {
+    setDurationFilterTouched(false)
+    setDurationHighlightMinMs(0)
+  }, [subtaskSig])
   useEffect(() => {
     if (!durationDomain) {
       setDurationHighlightMinMs(0)
@@ -257,15 +274,25 @@ export default function SubtaskCard({
     if (!durationDomain) return 1
     return Math.max(1, Math.round((durationDomain.max - durationDomain.min) / 240))
   }, [durationDomain])
+  const effectiveDurationMin = useMemo(() => {
+    if (!durationDomain) return 0
+    return durationFilterTouched ? durationHighlightMinMs : durationDomain.min
+  }, [durationDomain, durationFilterTouched, durationHighlightMinMs])
+  const durationDisplayMs = useMemo(() => {
+    if (!durationDomain) return 0
+    return durationFilterTouched ? durationHighlightMinMs : durationDomain.max
+  }, [durationDomain, durationFilterTouched, durationHighlightMinMs])
   const matchedLongActionCount = useMemo(() => {
     if (!durationDomain) return flowActions.length
     return flowActions.filter(
-      (a) => Number.isFinite(a.durationMs) && a.durationMs >= durationHighlightMinMs
+      (a) => Number.isFinite(a.durationMs) && a.durationMs >= effectiveDurationMin
     ).length
-  }, [flowActions, durationDomain, durationHighlightMinMs])
+  }, [flowActions, durationDomain, effectiveDurationMin])
   /** 仅当用户把阈值高于数据下界时才暗化/蓝环；停在默认下界时与未筛选一致 */
   const durationHighlightForFlow =
-    durationDomain != null && durationHighlightMinMs > durationDomain.min
+    durationFilterTouched &&
+    durationDomain != null &&
+    durationHighlightMinMs > durationDomain.min
       ? durationHighlightMinMs
       : null
 
@@ -278,13 +305,13 @@ export default function SubtaskCard({
   /**
    * Fork 后：在同一 SVG 内合并「fork 前共享前缀」+「锚点后旧轨迹（灰幽灵）」+「新分支」。
    *
-   * 关键约束：
-   * - 历史轨迹（前缀 + 锚点 + 锚点后灰幽灵）一律来自 snapshot —— 新 session 通常并不
-   *   回填 fork 之前的消息，依赖「在新 session 里也能找到锚点」会直接 return null，
-   *   导致整段历史画不出来。改为只要 snapshot 里能定位到锚点即可进入合并模式。
-   * - 新分支：当前 session 的 flowActions 中 messageID 不在 snapshot 共享前缀的部分；
-   *   若新 session 自带共享前缀（同 messageID），自动去重；否则全部视为新分支。
-   * - 锚点 actionKey 透传 ActionFlowVisualization，用于「锚点 → 第一条新分支」分叉边。
+   * 关键设计：fork 前的 action 是新 session 上下文的天然组成部分（OpenCode 的 fork 把消息
+   * 复制到了新 session），它们就在 `flowActions` 里。所以 pre-fork + 新分支都直接复用
+   * `flowActions` 的对象 —— 这样 treemap、debug panel、tooltip、selection 联动等所有
+   * 下游逻辑都能正确认识它们；只有 anchor 之后的「旧分支假设轨迹」（ghost）才需要从
+   * snapshot 拿（因为新 session 里没有这一段）。
+   *
+   * 兜底：如果新 session 没回填 pre-fork 消息（极端情况），退化为完全用 snapshot 当 pre-fork。
    */
   const forkMergedFlow = useMemo(() => {
     if (!forkPanelSnapshotBundle || forkPanelSnapshotBundle.version !== 2) return null
@@ -302,23 +329,31 @@ export default function SubtaskCard({
     /** 锚点必须能在 snapshot 中定位；找不到时不进入合并模式 */
     if (oldAnchorIdx < 0) return null
 
-    /** 历史前缀（含锚点）：snapshot 数据，正常配色 */
-    const preForkAndAnchor = oldActions.slice(0, oldAnchorIdx + 1)
-    const anchorActionKey = actionKey(preForkAndAnchor[oldAnchorIdx]!)
-    /** 锚点之后的旧轨迹：snapshot 数据，灰幽灵 */
+    /** 优先在当前 session 里定位锚点 —— 拿到的就是 flowActions 自己的对象，
+     *  treemap / 选中联动 / 闪烁高亮 都共享同一份引用。 */
+    const currentAnchorIdx = flowActions.findIndex(matchAnchor)
+
+    let preForkAndAnchor: (MappedAction & { row: number })[]
+    let postAnchorCurrent: (MappedAction & { row: number })[]
+    if (currentAnchorIdx >= 0) {
+      preForkAndAnchor = flowActions.slice(0, currentAnchorIdx + 1)
+      postAnchorCurrent = flowActions.slice(currentAnchorIdx + 1)
+    } else {
+      /** 兜底：新 session 没回填 fork 前的消息 —— 用 snapshot 的前缀，
+       *  整个 flowActions 都视为新分支 */
+      preForkAndAnchor = oldActions.slice(0, oldAnchorIdx + 1)
+      postAnchorCurrent = flowActions
+    }
+
+    const anchorActionKey = actionKey(preForkAndAnchor[preForkAndAnchor.length - 1]!)
+
+    /** 锚点之后的旧轨迹：snapshot 数据，打 forkGhost 标 */
     const ghostSuffix = oldActions
       .slice(oldAnchorIdx + 1)
       .map((a) => ({ ...a, forkGhost: true }))
 
-    /** 新分支：剔除新 session 中与共享前缀 messageID 重叠的部分（若有） */
-    const sharedMessageIds = new Set(
-      preForkAndAnchor
-        .map((a) => a.messageID)
-        .filter((id): id is string => Boolean(id)),
-    )
-    const newBranch = flowActions
-      .filter((a) => !a.messageID || !sharedMessageIds.has(a.messageID))
-      .map((a) => ({ ...a, forkCompareRow: 2 as const }))
+    /** 新分支：当前 session 锚点之后的部分，打 forkCompareRow=2 标 */
+    const newBranch = postAnchorCurrent.map((a) => ({ ...a, forkCompareRow: 2 as const }))
 
     const merged = [...preForkAndAnchor, ...ghostSuffix, ...newBranch].sort(
       (x, y) => x.sortTime - y.sortTime,
@@ -579,7 +614,10 @@ export default function SubtaskCard({
               max={durationDomain.max}
               step={durationHighlightStep}
               value={durationHighlightMinMs}
-              onChange={(e) => setDurationHighlightMinMs(Number(e.target.value))}
+              onChange={(e) => {
+                setDurationFilterTouched(true)
+                setDurationHighlightMinMs(Number(e.target.value))
+              }}
               title="Time filter — minimum duration to highlight"
               aria-label="Time filter: minimum duration to highlight"
               style={{
@@ -601,7 +639,7 @@ export default function SubtaskCard({
                 flexShrink: 0,
               }}
             >
-              {formatDurationMs(durationHighlightMinMs)} · {matchedLongActionCount}/{flowActions.length}
+              {formatDurationMs(durationDisplayMs)} · {matchedLongActionCount}/{flowActions.length}
             </span>
           </div>
         )}
@@ -632,9 +670,9 @@ export default function SubtaskCard({
               durationHighlightMinMs={durationHighlightForFlow}
               tooltipMessages={renderTooltips}
               highlightedActionType={selectedActionType}
-              highlightedActionKey={selectedActionKey}
+              highlightedActionKey={flowHighlightedActionKey}
               dimAll={otherSubtaskHasSelection}
-              onSelectAction={onSelectAction}
+              onSelectAction={onSelectActionFromFlow}
               forkAnchorActionKey={forkAnchor}
               onForkFromAction={handleForkFromActionWrapped}
               onAnalyzeFromAction={onAnalyzeFromAction}

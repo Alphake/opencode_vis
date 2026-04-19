@@ -20,12 +20,16 @@ interface SubtaskDebugPanelProps {
   /** 联动选中：type 级 / action 级 / 无 */
   selection?:
     | { kind: 'type'; subtaskIndex: number; actionType: string }
-    | { kind: 'action'; subtaskIndex: number; actionKey: string }
+    | { kind: 'action'; subtaskIndex: number; actionKey: string; source: 'treemap' | 'flow' }
     | null
   /** treemap cell 点击回调；传入 null 取消选中 */
   onSelectActionType?: (subtaskIndex: number, actionType: string | null) => void
   /** treemap mini-block 或 ActionFlow rect 单击 → action-level 选中 */
-  onSelectAction?: (subtaskIndex: number, actionKey: string | null) => void
+  onSelectAction?: (
+    subtaskIndex: number,
+    actionKey: string | null,
+    source?: 'treemap' | 'flow',
+  ) => void
 }
 
 export default function SubtaskDebugPanel({
@@ -67,7 +71,9 @@ export default function SubtaskDebugPanel({
           <span style={{ color: '#AAA', fontSize: 11 }}>暂无子任务</span>
         ) : (
           visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => (
-            <Fragment key={st.subtask_id}>
+            <Fragment
+              key={`${st.subtask_id}:${sourceIndex}:${st.assistantMessageIndices[0] ?? -1}:${st.assistantMessageIndices[st.assistantMessageIndices.length - 1] ?? -1}:${st.assistantMessageIndices.length}`}
+            >
             <SubtaskCard
               subtask={st}
               messages={messages}
@@ -90,6 +96,14 @@ export default function SubtaskDebugPanel({
                   ? selection.actionKey
                   : null
               }
+              flowHighlightedActionKey={
+                selection &&
+                selection.kind === 'action' &&
+                selection.subtaskIndex === sourceIndex &&
+                selection.source === 'treemap'
+                  ? selection.actionKey
+                  : null
+              }
               /**
                * 跨子任务 dim 已取消：treemap / rect 选中只影响命中所在子任务卡片，
                * 其它卡片完全保持正常显示，避免「点一个 rect 整页都暗下去」。
@@ -103,6 +117,11 @@ export default function SubtaskDebugPanel({
               onSelectAction={
                 onSelectAction
                   ? (key) => onSelectAction(sourceIndex, key)
+                  : undefined
+              }
+              onSelectActionFromFlow={
+                onSelectAction
+                  ? (key) => onSelectAction(sourceIndex, key, 'flow')
                   : undefined
               }
             />

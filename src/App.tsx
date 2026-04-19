@@ -259,7 +259,7 @@ function App() {
    */
   const [selection, setSelection] = useState<
     | { kind: 'type'; subtaskIndex: number; actionType: string }
-    | { kind: 'action'; subtaskIndex: number; actionKey: string }
+    | { kind: 'action'; subtaskIndex: number; actionKey: string; source: 'treemap' | 'flow' }
     | null
   >(null)
   const handleSelectActionType = useCallback(
@@ -282,18 +282,19 @@ function App() {
     [],
   )
   const handleSelectAction = useCallback(
-    (subtaskIndex: number, actionKey: string | null) => {
+    (subtaskIndex: number, actionKey: string | null, source: 'treemap' | 'flow' = 'treemap') => {
       setSelection((prev) => {
         if (actionKey === null) return null
         if (
           prev &&
           prev.kind === 'action' &&
           prev.subtaskIndex === subtaskIndex &&
-          prev.actionKey === actionKey
+          prev.actionKey === actionKey &&
+          prev.source === source
         ) {
           return null
         }
-        return { kind: 'action', subtaskIndex, actionKey }
+        return { kind: 'action', subtaskIndex, actionKey, source }
       })
       if (actionKey !== null) setLinkedSubtaskIndex(subtaskIndex)
     },

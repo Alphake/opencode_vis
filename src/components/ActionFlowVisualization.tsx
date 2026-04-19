@@ -43,8 +43,6 @@ const ROW_H = 32
 /** 同一 row 上并行 lane 的垂直错开（与主 row 间距一致） */
 const PARALLEL_LANE_DY = ROW_H
 const SESSION_REGION_GAP = 10
-/** Fork 对比：锚点后换行 — 父旧轨迹（灰）与新轨迹的垂直间距 */
-const FORK_COMPARE_ROW_GAP = 44
 const TOP_PAD = 4
 const MIN_W = 28
 const DURATION_LINEAR_THRESHOLD_MS = 60_000
@@ -155,16 +153,17 @@ function laneOffsetY(parallelLaneIndex?: number): number {
 }
 
 /**
- * 会话垂直分区：
- * - `session:main`：主进程会话内动作；**不含**已解析出子 session 的父 task（后者单独占一块「子会话区域」）。
- * - `session:task:<parentTaskCallID>`：**整块**子会话区域（父侧 task 节点 + `child-session` 动作），叠在 main 下方。
- * - `session:fork-new-branch`：fork 后新会话的分支动作（`forkCompareRow === 2`），与父会话同 SVG，
- *   x 从 fork 锚点右缘起算独立推进，y 放在主会话/子会话之下作为「下一条泳道」。
+ * 会话垂直分区（顺序很重要）：
+ * 1. `session:task:<parentTaskCallID>`：child-session 动作 / 已解析出 childSessionID 的父 Subagent
+ *    都进入对应的子会话区域。**fork 前后规则一致** —— 新分支里的 task 也照样进自己的子会话区。
+ * 2. `session:fork-new-branch`：fork 后新会话「主泳道」上的非 task 动作（kernel / 工具等），
+ *    `forkCompareRow === 2` 标记。x 从 fork 锚点右缘起算独立推进，y 放在历史区域之下。
+ * 3. `session:main`：fork 之前 / 普通模式下主进程会话内的非 task 动作。
+ *
+ * 注意：判别顺序必须先 child-session / Subagent→childSession，再 forkCompareRow，
+ * 否则新分支里的 task 会被强行塞进 fork-new-branch、与它的子会话割裂。
  */
 function actionSessionKey(a: MappedAction & { row: number }): string {
-  if (a.forkCompareRow === 2 && a.source !== 'child-session') {
-    return 'session:fork-new-branch'
-  }
   if (a.source === 'child-session' && a.parentTaskCallID) {
     return `session:task:${a.parentTaskCallID}`
   }
@@ -176,7 +175,15 @@ function actionSessionKey(a: MappedAction & { row: number }): string {
   ) {
     return `session:task:${a.callID}`
   }
+  if (a.forkCompareRow === 2) {
+    return 'session:fork-new-branch'
+  }
   return 'session:main'
+}
+
+/** 是否属于「fork 之后的新分支」(包括新分支里的 task / 子 session)。统一以 forkCompareRow=2 标记 */
+function isNewBranchAction(a: MappedAction & { row: number }): boolean {
+  return a.forkCompareRow === 2
 }
 
 /** 父 task 在数据里仍是 layer1；在子会话 **区域** 内绘制时固定为第一行（新开 session 的顶轨） */
@@ -348,54 +355,90 @@ function computeLayout(
 
   const sessionKeySet = new Set<string>()
   sorted.forEach((a) => sessionKeySet.add(actionSessionKey(a)))
+
+  /**
+   * 「是否在 fork 对比模式」：只要存在任意 forkCompareRow=2 的 action 就成立 —— 包含
+   * 新分支只有 task / 子 session 没有「主泳道」非 task 动作的边角情况。
+   * `hasForkNewBranchSession` 仅判断 `session:fork-new-branch` 区域是否存在（决定要不要单独占一条泳道）。
+   */
+  const hasNewBranchAction = sorted.some(isNewBranchAction)
+  const hasForkNewBranchSession = sessionKeySet.has('session:fork-new-branch')
+
+  /** task 子会话区域 → 是否属于「新分支的 task」（看父 Subagent 的 forkCompareRow） */
+  const isNewBranchTaskKey = (k: string): boolean => {
+    if (!k.startsWith('session:task:')) return false
+    const callID = k.slice('session:task:'.length)
+    const parent = sorted.find(
+      (a) => a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID === callID,
+    )
+    if (parent) return parent.forkCompareRow === 2
+    /** 兜底：父 Subagent 不在当前数据中（理论上不会，安全起见看本区域里的 child-session 动作标记） */
+    const anyAction = sorted.find((a) => actionSessionKey(a) === k)
+    return anyAction?.forkCompareRow === 2
+  }
+
   const sessionOrder: string[] = []
   if (sessionKeySet.has('session:main')) sessionOrder.push('session:main')
-  const hasForkNewBranch = sessionKeySet.has('session:fork-new-branch')
 
   /**
    * Fork 对比模式下两条平行支线，每条独立终点：
-   *  - 历史轨迹（main，含锚点 + 灰幽灵）→ 灰色 end（嵌在主泳道右端）
-   *  - 新分支（fork-new-branch）→ 正常 end（嵌在新泳道右端）
+   *  - 历史轨迹（含锚点 + 灰幽灵）→ 灰色 end（嵌在主泳道右端）
+   *  - 新分支 → 正常 end（嵌在新泳道右端）
    * 普通模式仍然只有一个 main end。
+   * end 节点必须能识别属于哪条支线（sessionRegion），否则 x/y 都对不上。
    */
   const seq: FlowNode[] = sorted.map(a => ({ ...a, kind: 'action' as const }))
   if (includeEndNode) {
     seq.push({ kind: 'end', row: 1, sessionRegion: 'main' })
-    if (hasForkNewBranch) {
+    if (hasNewBranchAction) {
       seq.push({ kind: 'end', row: 1, sessionRegion: 'fork-new-branch' })
     }
   }
   const childKeys = [...sessionKeySet].filter(
     (k) => k !== 'session:main' && k !== 'session:fork-new-branch'
   )
-  childKeys.sort((ka, kb) => {
-    const actionsA = sorted.filter((a) => actionSessionKey(a) === ka)
-    const actionsB = sorted.filter((a) => actionSessionKey(a) === kb)
-    const ga = actionsA[0]?.parallelGroupId ?? ''
-    const gb = actionsB[0]?.parallelGroupId ?? ''
-    if (ga !== gb) return ga.localeCompare(gb)
-    const la = actionsA[0]?.parallelLaneIndex ?? 0
-    const lb = actionsB[0]?.parallelLaneIndex ?? 0
-    if (la !== lb) return la - lb
-    const minA = Math.min(...actionsA.map((x) => x.sortTime))
-    const minB = Math.min(...actionsB.map((x) => x.sortTime))
-    return minA - minB
-  })
-  sessionOrder.push(...childKeys)
-  /** fork-new-branch 始终放在最底（作为「分叉后下一条泳道」） */
-  if (hasForkNewBranch) sessionOrder.push('session:fork-new-branch')
+  const sortChildKeys = (keys: string[]) => {
+    keys.sort((ka, kb) => {
+      const actionsA = sorted.filter((a) => actionSessionKey(a) === ka)
+      const actionsB = sorted.filter((a) => actionSessionKey(a) === kb)
+      const ga = actionsA[0]?.parallelGroupId ?? ''
+      const gb = actionsB[0]?.parallelGroupId ?? ''
+      if (ga !== gb) return ga.localeCompare(gb)
+      const la = actionsA[0]?.parallelLaneIndex ?? 0
+      const lb = actionsB[0]?.parallelLaneIndex ?? 0
+      if (la !== lb) return la - lb
+      const minA = Math.min(...actionsA.map((x) => x.sortTime))
+      const minB = Math.min(...actionsB.map((x) => x.sortTime))
+      return minA - minB
+    })
+    return keys
+  }
+  /**
+   * Fork 后泳道顺序：
+   *   main (历史含 anchor + ghost)
+   *   → 历史 task 子会话区 (parent 为历史 Subagent)
+   *   → session:fork-new-branch (新分支「主泳道」非 task 动作)
+   *   → 新分支 task 子会话区 (parent 为新分支 Subagent)
+   * 这样新分支的子 session 不会被挤到历史泳道之间，整段「新分支」在视觉上聚团在底部。
+   */
+  const historicalChildKeys = sortChildKeys(childKeys.filter((k) => !isNewBranchTaskKey(k)))
+  const newBranchChildKeys = sortChildKeys(childKeys.filter((k) => isNewBranchTaskKey(k)))
+  sessionOrder.push(...historicalChildKeys)
+  if (hasForkNewBranchSession) sessionOrder.push('session:fork-new-branch')
+  sessionOrder.push(...newBranchChildKeys)
   if (sessionOrder.length === 0) sessionOrder.push('session:main')
 
   /** 全局画布上的 x（索引 -> x） */
   const actionXBySortedIndex = new Map<number, number>()
 
   /**
-   * 根轴：主会话内 + fork 锚点之前 / 灰幽灵的全部动作（与原始时间线同步）。
-   * fork-new-branch 区域不进根轴，单独走「分叉新分支」的本地 x 轨。
+   * 根轴：所有「非新分支 + 非 child-session」的动作（即历史轨迹的父侧）。
+   * 新分支 (forkCompareRow=2) 的父侧动作 —— 包括新分支 Subagent —— 一律走 branch 局部 x 轨，
+   * 不与历史动作竞争横轴位置。
    */
   const rootIndices = sorted
     .map((a, idx) => ({ a, idx }))
-    .filter((x) => x.a.source !== 'child-session' && actionSessionKey(x.a) !== 'session:fork-new-branch')
+    .filter((x) => x.a.source !== 'child-session' && !isNewBranchAction(x.a))
     .map((x) => x.idx)
 
   /** 根轴 slot（统一时间轴） */
@@ -537,66 +580,73 @@ function computeLayout(
     actionXBySortedIndex.set(idx, rootSlotStartX.get(slotKey) ?? MARGIN_LEFT)
   }
 
-  /** 子 session 绝对 x = 父task右缘 + gap + 本地相对x */
-  for (const childSession of childKeys) {
-    const callID = childSession.slice('session:task:'.length)
-    const parentIdx = sorted.findIndex(
-      (a) => a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID === callID
-    )
-    if (parentIdx < 0) continue
-    const parent = sorted[parentIdx]!
-    const parentX = actionXBySortedIndex.get(parentIdx) ?? MARGIN_LEFT
-    const parentRight = parentX + blockWidth(durationMode, parent.durationMs)
-    const childBaseX = parentRight + TIMELINE_STEP_GAP
-    const childIndices = sorted
-      .map((a, idx) => ({ a, idx }))
-      .filter((x) => x.a.source === 'child-session' && actionSessionKey(x.a) === childSession)
-      .map((x) => x.idx)
-    for (const idx of childIndices) {
-      actionXBySortedIndex.set(idx, childBaseX + (childLocalXByIndex.get(idx) ?? 0))
-    }
-  }
-
   /**
    * Fork 新分支：作为根轴上 anchor 右缘 + gap 起算的独立 x 轨。
+   * 必须先算完 branch x，子 session 的 x 才能对齐到「新分支 Subagent 的右缘」。
    * - 与 anchor 之后的「灰色幽灵后缀」共享相同的起点 x，但在不同 session 区域（垂直分开），
    *   形成「同一 SVG 内的两条平行支线」视觉效果。
    * - 若没有显式 anchor 或没有任何幽灵动作，回退到主轴右端起算。
    */
   let forkBranchRight = MARGIN_LEFT
-  if (hasForkNewBranch) {
-    /** 1. 解析 anchor 在主轴上的右缘 */
+  if (hasNewBranchAction) {
+    /** 1. 解析 anchor 在主轴上的右缘（anchor 必定是历史动作，已有 root 轴 x） */
     let anchorRight: number | null = null
     if (forkAnchorActionKey) {
       for (let i = 0; i < sorted.length; i++) {
         const a = sorted[i]!
         if (actionKey(a) === forkAnchorActionKey) {
           const x = actionXBySortedIndex.get(i)
-          if (x != null) anchorRight = x + blockWidth(durationMode, a.durationMs)
+          if (x != null) {
+            const w = blockWidth(durationMode, a.durationMs)
+            anchorRight = x + w
+            /** anchor 自己若是带 child session 的 Subagent，下沉支线必须越过 child 区域，
+             *  否则 ghost / 新分支会与 anchor 的子 session 横向叠合。 */
+            if (
+              a.actionType === 'Subagent' &&
+              a.source !== 'child-session' &&
+              a.callID
+            ) {
+              const childSpan = childSpanByCallID.get(a.callID) ?? 0
+              if (childSpan > 0) anchorRight = x + w + TIMELINE_STEP_GAP + childSpan
+            }
+          }
           break
         }
       }
     }
     if (anchorRight == null) {
-      /** 兜底：取主轴最右非 fork-new-branch 动作的右缘 */
+      /** 兜底：取主轴最右「非新分支」动作的右缘（连同其子 session 末端） */
       for (let i = 0; i < sorted.length; i++) {
         const a = sorted[i]!
-        if (actionSessionKey(a) === 'session:fork-new-branch') continue
+        if (isNewBranchAction(a)) continue
         const x = actionXBySortedIndex.get(i)
         if (x == null) continue
-        const r = x + blockWidth(durationMode, a.durationMs)
+        let r = x + blockWidth(durationMode, a.durationMs)
+        if (
+          a.actionType === 'Subagent' &&
+          a.source !== 'child-session' &&
+          a.callID
+        ) {
+          const childSpan = childSpanByCallID.get(a.callID) ?? 0
+          if (childSpan > 0) r = x + blockWidth(durationMode, a.durationMs) + TIMELINE_STEP_GAP + childSpan
+        }
         if (anchorRight == null || r > anchorRight) anchorRight = r
       }
     }
     const forkBaseX = (anchorRight ?? MARGIN_LEFT) + TIMELINE_STEP_GAP
 
-    /** 2. fork-new-branch 内部本地 x（按 sortTime 顺序，与子 session 类似的 slot 结构，复用 parallelGroupId/laneIndex） */
+    /**
+     * 2. branch indices = 所有「forkCompareRow=2 且非 child-session」的动作。
+     *    包含新分支的 Subagent —— 它们虽然 actionSessionKey 落在 task 子区域（与 fork 前一致），
+     *    但 x 必须走 branch 轨而非 root 轨，否则会和历史动作抢占同一段水平空间。
+     */
     const branchIndices = sorted
       .map((a, idx) => ({ a, idx }))
-      .filter((x) => actionSessionKey(x.a) === 'session:fork-new-branch')
+      .filter((x) => isNewBranchAction(x.a) && x.a.source !== 'child-session')
       .map((x) => x.idx)
 
     const branchSlotByIndex = new Map<number, string>()
+    const branchSlotIndices = new Map<string, number[]>()
     const branchGroupStepToSlot = new Map<string, Map<number, string>>()
     const branchGroupLaneStepCounter = new Map<string, Map<number, number>>()
     let nextBranchSlot = 0
@@ -624,20 +674,32 @@ function computeLayout(
         slotKey = stepSlots.get(step)!
       }
       branchSlotByIndex.set(idx, slotKey)
+      const arr = branchSlotIndices.get(slotKey) ?? []
+      arr.push(idx)
+      branchSlotIndices.set(slotKey, arr)
     }
-    const branchSlotWidth = new Map<string, number>()
-    for (const idx of branchIndices) {
-      const slotKey = branchSlotByIndex.get(idx)
-      if (!slotKey) continue
-      const w = blockWidth(durationMode, sorted[idx]!.durationMs)
-      branchSlotWidth.set(slotKey, Math.max(branchSlotWidth.get(slotKey) ?? 0, w))
+    /** branch slot 有效宽度需考虑「新分支 Subagent 的子 session 宽度」，否则下一个 branch slot
+     *  会与子 session 横向重叠（与 root 轨同样的逻辑）。 */
+    const branchSlotEffectiveSpan = new Map<string, number>()
+    for (const [slotKey, indices] of branchSlotIndices.entries()) {
+      let span = MIN_W
+      for (const idx of indices) {
+        const a = sorted[idx]!
+        const w = blockWidth(durationMode, a.durationMs)
+        span = Math.max(span, w)
+        if (a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID) {
+          const childSpan = childSpanByCallID.get(a.callID) ?? 0
+          span = Math.max(span, w + TIMELINE_STEP_GAP + childSpan)
+        }
+      }
+      branchSlotEffectiveSpan.set(slotKey, span)
     }
     const branchSlotStartX = new Map<string, number>()
     let branchCursor = 0
     for (let s = 0; s < nextBranchSlot; s++) {
       const slotKey = `branch:${s}`
       branchSlotStartX.set(slotKey, branchCursor)
-      branchCursor += (branchSlotWidth.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
+      branchCursor += (branchSlotEffectiveSpan.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
     }
     for (const idx of branchIndices) {
       const slotKey = branchSlotByIndex.get(idx)
@@ -645,15 +707,106 @@ function computeLayout(
       actionXBySortedIndex.set(idx, forkBaseX + localX)
     }
     forkBranchRight = forkBaseX + Math.max(0, branchCursor - TIMELINE_STEP_GAP)
+
+    /**
+     * 双轨对齐：ghost 走的根轴 slot 与新分支走的 branch slot 是两套独立累计的 cursor，
+     * 即便 TIMELINE_STEP_GAP 相同，只要每个 slot 自己的 effectiveSpan 不同（duration 不一致 /
+     * Subagent 子 session 宽度不同），ghost 第 k 步与新分支第 k 步的 x 就会错开。
+     *
+     * 这里做一次「post-anchor 对齐」：把 ghost root slot 和 branch slot 按出现顺序成对，
+     * 第 k 步统一宽度 = max(ghostSpan_k, branchSpan_k)，从 forkBaseX 开始用统一宽度推进，
+     * 同步重写两边的 actionXBySortedIndex。后续 child session 绝对 x 在更下方一轮按 parent x
+     * 重新计算，会自动跟随。
+     */
+    const ghostRootSlots: { slotKey: string; firstSortTime: number }[] = []
+    for (let s = 0; s < nextRootSlot; s++) {
+      const slotKey = `root:${s}`
+      const indices = rootSlotIndices.get(slotKey) ?? []
+      if (indices.length === 0) continue
+      if (indices.every((idx) => sorted[idx]!.forkGhost === true)) {
+        let firstT = Infinity
+        for (const idx of indices) {
+          const t = sorted[idx]!.sortTime
+          if (t < firstT) firstT = t
+        }
+        ghostRootSlots.push({ slotKey, firstSortTime: firstT })
+      }
+    }
+    ghostRootSlots.sort((p, q) => p.firstSortTime - q.firstSortTime)
+
+    const stepCount = Math.max(ghostRootSlots.length, nextBranchSlot)
+    if (stepCount > 0) {
+      let unifiedCursor = 0
+      for (let k = 0; k < stepCount; k++) {
+        let span = MIN_W
+        if (k < ghostRootSlots.length) {
+          span = Math.max(span, rootSlotEffectiveSpan.get(ghostRootSlots[k]!.slotKey) ?? MIN_W)
+        }
+        if (k < nextBranchSlot) {
+          span = Math.max(span, branchSlotEffectiveSpan.get(`branch:${k}`) ?? MIN_W)
+        }
+        const stepX = forkBaseX + unifiedCursor
+        if (k < ghostRootSlots.length) {
+          const slotKey = ghostRootSlots[k]!.slotKey
+          const indices = rootSlotIndices.get(slotKey) ?? []
+          for (const idx of indices) {
+            actionXBySortedIndex.set(idx, stepX)
+          }
+        }
+        if (k < nextBranchSlot) {
+          const slotKey = `branch:${k}`
+          const indices = branchSlotIndices.get(slotKey) ?? []
+          for (const idx of indices) {
+            actionXBySortedIndex.set(idx, stepX)
+          }
+        }
+        unifiedCursor += span + TIMELINE_STEP_GAP
+      }
+      forkBranchRight = forkBaseX + Math.max(0, unifiedCursor - TIMELINE_STEP_GAP)
+    }
+  }
+
+  /**
+   * 子 session 绝对 x = 父 task 右缘 + gap + 本地相对 x。
+   * **必须放在 branch x 计算之后** —— 新分支的 task 父节点 x 在 branch 轨里设置，
+   * 否则 `actionXBySortedIndex.get(parentIdx)` 拿到的是 undefined / fallback。
+   */
+  for (const childSession of childKeys) {
+    const callID = childSession.slice('session:task:'.length)
+    const parentIdx = sorted.findIndex(
+      (a) => a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID === callID
+    )
+    if (parentIdx < 0) continue
+    const parent = sorted[parentIdx]!
+    const parentX = actionXBySortedIndex.get(parentIdx) ?? MARGIN_LEFT
+    const parentRight = parentX + blockWidth(durationMode, parent.durationMs)
+    const childBaseX = parentRight + TIMELINE_STEP_GAP
+    const childIndices = sorted
+      .map((a, idx) => ({ a, idx }))
+      .filter((x) => x.a.source === 'child-session' && actionSessionKey(x.a) === childSession)
+      .map((x) => x.idx)
+    for (const idx of childIndices) {
+      actionXBySortedIndex.set(idx, childBaseX + (childLocalXByIndex.get(idx) ?? 0))
+    }
   }
 
   /**
    * 两条支线各自的 end x：
-   *  - main：根轴当前游标（rootCursor 已经是「最右 root slot 的右缘 + TIMELINE_STEP_GAP」）
-   *  - fork-new-branch：分支右缘 + 一段 gap
+   *  - main：根轴游标（rootCursor 已是最右 root slot 右缘 + TIMELINE_STEP_GAP）。
+   *    需要进一步拉到「所有非新分支动作」的实际最右（包括历史子 session 末端）以避免线条穿过子 session。
+   *  - fork-new-branch：分支右缘 + 一段 gap（forkBranchRight 已包含新分支 Subagent 的子 session 宽度）。
    */
-  const endXMain = rootCursor
-  const endXForkBranch = hasForkNewBranch ? forkBranchRight + TIMELINE_STEP_GAP : rootCursor
+  let historicalRightmost = rootCursor - TIMELINE_STEP_GAP
+  for (let i = 0; i < sorted.length; i++) {
+    const a = sorted[i]!
+    if (isNewBranchAction(a)) continue
+    const x = actionXBySortedIndex.get(i)
+    if (x == null) continue
+    const r = x + blockWidth(durationMode, a.durationMs)
+    if (r > historicalRightmost) historicalRightmost = r
+  }
+  const endXMain = historicalRightmost + TIMELINE_STEP_GAP
+  const endXForkBranch = hasNewBranchAction ? forkBranchRight + TIMELINE_STEP_GAP : endXMain
 
   const sessionTopY = new Map<string, number>()
   let sessionY = TOP_PAD
@@ -662,10 +815,11 @@ function computeLayout(
     const local = sorted.filter((a) => actionSessionKey(a) === session)
     let maxBottom = BLOCK_H
     for (const a of local) {
+      /** 区域内 y 仅由 row（kernel/tool）+ 并行 lane 决定；fork 区分已经体现为
+       *  「独立 session 区域 + sessionTopY」，不再额外加 FORK_COMPARE_ROW_GAP，
+       *  否则新分支会被多顶 88px，与历史轨迹中间出现一片空地。 */
       const yInSession =
-        actionLocalRowForLayout(a) * ROW_H +
-        laneOffsetY(a.parallelLaneIndex) +
-        (a.forkCompareRow ?? 0) * FORK_COMPARE_ROW_GAP
+        actionLocalRowForLayout(a) * ROW_H + laneOffsetY(a.parallelLaneIndex)
       maxBottom = Math.max(maxBottom, yInSession + BLOCK_H)
     }
     sessionY += maxBottom + SESSION_REGION_GAP
@@ -699,11 +853,8 @@ function computeLayout(
       const xNode = actionXBySortedIndex.get(i) ?? MARGIN_LEFT
       const session = actionSessionKey(a)
       const yBase = sessionTopY.get(session) ?? TOP_PAD
-      const y =
-        yBase +
-        actionLocalRowForLayout(a) * ROW_H +
-        laneOffsetY(a.parallelLaneIndex) +
-        (a.forkCompareRow ?? 0) * FORK_COMPARE_ROW_GAP
+      /** 与 sessionTopY 同步：y 不再加 forkCompareRow * FORK_COMPARE_ROW_GAP */
+      const y = yBase + actionLocalRowForLayout(a) * ROW_H + laneOffsetY(a.parallelLaneIndex)
       const cy = y + BLOCK_H / 2
       layout.push({ node, x: xNode, y, w, h: BLOCK_H, cx: xNode + w / 2, cy })
     }
@@ -726,6 +877,72 @@ function parallelSiblingSkip(pa: MappedAction, pb: MappedAction): boolean {
   if (pa.parallelGroupId !== pb.parallelGroupId) return false
   if (pa.parallelLaneIndex === undefined || pb.parallelLaneIndex === undefined) return false
   return pa.parallelLaneIndex !== pb.parallelLaneIndex
+}
+
+/**
+ * 一个前驱扇出到多个并行后继：所有 targets 共用同一 bundleX 作为「分叉竖轴」，
+ * 从而所有支线的竖直段都在同一 x 位置，不产生交叉。
+ * - Trunk（pred.right → bundleX，水平）：画一次，不带箭头
+ * - Branches（bundleX → target.cy（竖直）→ target.x（水平）+ 箭头）：每个 target 一条
+ */
+function appendOrthoFanOut(
+  content: d3.Selection<SVGGElement, unknown, null, undefined>,
+  source: FlowLayoutItem,
+  targets: FlowLayoutItem[],
+  markerUrl: string,
+  ghostMarkerUrl: string
+) {
+  if (targets.length === 0) return
+  const sna = source.node.kind === 'action' ? (source.node as MappedAction & { row: number }) : null
+  const baseStroke = sna?.forkGhost ? FORK_GHOST_STROKE : actionFlowPalette.arrow
+  const baseMarker = sna?.forkGhost ? ghostMarkerUrl : markerUrl
+
+  if (targets.length === 1) {
+    const t = targets[0]!
+    appendOrthoEdge(content, source.x + source.w, source.cy, t.x, t.cy, baseMarker, baseStroke, 1.2,
+      sna ? actionKey(sna) : null,
+      t.node.kind === 'action' ? actionKey(t.node as MappedAction & { row: number }) : null)
+    return
+  }
+
+  const minTargetX = Math.min(...targets.map((t) => t.x))
+  const bundleX = (source.x + source.w + minTargetX) / 2
+
+  /** Trunk: source.right → bundleX（只画一次，不带箭头，避免在同一 x 叠多根箭头） */
+  const trunk = d3.path()
+  trunk.moveTo(source.x + source.w, source.cy)
+  trunk.lineTo(bundleX, source.cy)
+  const tp = content
+    .append('path')
+    .attr('class', 'afv-edge')
+    .attr('d', trunk.toString())
+    .attr('fill', 'none')
+    .attr('stroke', baseStroke)
+    .attr('stroke-width', 1.2)
+    .attr('pointer-events', 'none')
+  if (sna) tp.attr('data-from-key', actionKey(sna))
+
+  /** Branches: (bundleX, source.cy) → (bundleX, target.cy) → (target.x, target.cy) + 箭头 */
+  for (const t of targets) {
+    const tna = t.node.kind === 'action' ? (t.node as MappedAction & { row: number }) : null
+    const stroke = tna?.forkGhost ? FORK_GHOST_STROKE : baseStroke
+    const m = tna?.forkGhost ? ghostMarkerUrl : baseMarker
+    const branch = d3.path()
+    branch.moveTo(bundleX, source.cy)
+    branch.lineTo(bundleX, t.cy)
+    branch.lineTo(t.x, t.cy)
+    const bp = content
+      .append('path')
+      .attr('class', 'afv-edge')
+      .attr('d', branch.toString())
+      .attr('fill', 'none')
+      .attr('stroke', stroke)
+      .attr('stroke-width', 1.2)
+      .attr('marker-end', m)
+      .attr('pointer-events', 'none')
+    if (sna) bp.attr('data-from-key', actionKey(sna))
+    if (tna) bp.attr('data-to-key', actionKey(tna))
+  }
 }
 
 function appendOrthoEdge(
@@ -809,16 +1026,27 @@ function appendOrthoFanIn(
     )
     return
   }
+  /**
+   * 多条并行支线汇入同一后继：所有 source 在同一 bundleX 处折弯，
+   * 共用「bundleX 竖直段 + bundleX → target 水平段 + 单个箭头」的主干，
+   * 否则 N 条完整折线会让最后一段水平和箭头叠 N 次（视觉上有重影 / 抖动）。
+   *
+   * - 各 source 的支线（feeder）：source.right → (bundleX, source.cy) → (bundleX, target.cy)
+   *   不带箭头，颜色按 source→target 的连线策略。
+   * - 主干（trunk）：(bundleX, target.cy) → (target.x, target.cy)，带箭头，画 **一次**。
+   *   颜色统一按「与 target 相邻」的非 ghost 走向（取首个非 ghost source；都是 ghost
+   *   则按 ghost 走向），保持视觉收口干净。
+   */
   const maxEnd = Math.max(...sources.map(s => s.x + s.w))
   const bundleX = (maxEnd + target.x) / 2
+
   for (const s of sources) {
     const na = s.node as MappedAction & { row: number }
-    const { stroke, markerUrl: m } = joinStrokeForFanIn(na, target.node, markerUrl, ghostMarkerUrl)
+    const { stroke } = joinStrokeForFanIn(na, target.node, markerUrl, ghostMarkerUrl)
     const path = d3.path()
     path.moveTo(s.x + s.w, s.cy)
     path.lineTo(bundleX, s.cy)
     path.lineTo(bundleX, target.cy)
-    path.lineTo(target.x, target.cy)
     const p = content
       .append('path')
       .attr('class', 'afv-edge')
@@ -826,11 +1054,34 @@ function appendOrthoFanIn(
       .attr('fill', 'none')
       .attr('stroke', stroke)
       .attr('stroke-width', 1.2)
-      .attr('marker-end', m)
       .attr('pointer-events', 'none')
       .attr('data-from-key', actionKey(na))
     if (targetKey) p.attr('data-to-key', targetKey)
   }
+
+  const trunkSource =
+    sources.find((s) => (s.node as MappedAction & { row: number }).forkGhost !== true) ??
+    sources[0]!
+  const trunkNa = trunkSource.node as MappedAction & { row: number }
+  const { stroke: trunkStroke, markerUrl: trunkMarker } = joinStrokeForFanIn(
+    trunkNa,
+    target.node,
+    markerUrl,
+    ghostMarkerUrl,
+  )
+  const trunk = d3.path()
+  trunk.moveTo(bundleX, target.cy)
+  trunk.lineTo(target.x, target.cy)
+  const tp = content
+    .append('path')
+    .attr('class', 'afv-edge')
+    .attr('d', trunk.toString())
+    .attr('fill', 'none')
+    .attr('stroke', trunkStroke)
+    .attr('stroke-width', 1.2)
+    .attr('marker-end', trunkMarker)
+    .attr('pointer-events', 'none')
+  if (targetKey) tp.attr('data-to-key', targetKey)
 }
 
 interface Props {
@@ -934,9 +1185,13 @@ export default function ActionFlowVisualization({
       includeEndNode: showFlowEndNode,
       forkAnchorActionKey,
     })
-    /** 是否处于 fork 对比模式：layout 中存在新分支动作 */
+    /** 是否处于 fork 对比模式：layout 中存在任意「新分支」动作（含新分支里的 task / 子 session）。
+     *  注意不能用 actionSessionKey===session:fork-new-branch 判断 —— 新分支 Subagent 的
+     *  session key 已变成 task 子区域。 */
     const hasForkNewBranchInLayout = layout.some(
-      (item) => item.node.kind === 'action' && actionSessionKey(item.node as MappedAction & { row: number }) === 'session:fork-new-branch'
+      (item) =>
+        item.node.kind === 'action' &&
+        isNewBranchAction(item.node as MappedAction & { row: number }),
     )
     const offsetY = verticalCenterOffsetY(layout, totalH)
     const highlightActive =
@@ -984,6 +1239,8 @@ export default function ActionFlowVisualization({
 
     /** 并行多 lane 汇入同一后继时由 `appendOrthoFanIn` 绘制，此处跳过避免重复折线 */
     const parallelJoinSkip = new Set<string>()
+    /** 并行 fan-out 由 `appendOrthoFanOut` 统一画，跳过 main sequential loop 的重复边 */
+    const parallelFanOutSkip = new Set<string>()
 
     /** 并行组：lane 内连线、前驱→各 lane 首、各 lane 末→后继（多源汇入同一 bundleX） */
     const groupIdToIndices = new Map<string, number[]>()
@@ -1010,15 +1267,54 @@ export default function ActionFlowVisualization({
       const groupMaxT = Math.max(...groupActions.map((g) => g.node.sortTime))
       const indexSet = new Set(indices)
 
-      /** 并行组的前驱/后继搜索须限制在同一 session 区域（避免跨越 fork 分叉） */
-      const groupSession = actionSessionKey(groupActions[0]!.node)
+      /**
+       * 并行组前驱/后继的「搜索 session」。
+       *
+       * 问题根源：并行 Subagent task 的 actionSessionKey = 'session:task:callID'，
+       * 而它们真正的前驱/后继在 session:main（或父 task 的 session）里——用 groupSession
+       * 过滤会把真正的 pred/succ 全部排除，导致只有主循环画了一条相邻边，第二条永远缺失。
+       *
+       * 修正策略：
+       * - Subagent（非 child-session）：它们由外部 session 发起，搜索范围 = 'session:main'
+       *   （或更准确地：根节点发起的就是 main，嵌套的以 parentTaskCallID 定位）
+       * - child-session 里的并行 action：搜索范围 = 'session:task:parentTaskCallID'
+       * - 普通 main action：直接用 actionSessionKey
+       *
+       * 此外，fork 边界（ghost / new-branch）仍须单独过滤，防止跨分支。
+       */
+      const firstNode = groupActions[0]!.node
+      const groupIsGhost = firstNode.forkGhost === true
+      const groupIsNewBranch = isNewBranchAction(firstNode)
+
+      /** 并行组的 "发起方 session"：pred/succ 所在的 session */
+      const groupSearchSession: string = (() => {
+        if (
+          firstNode.actionType === 'Subagent' &&
+          firstNode.source !== 'child-session' &&
+          firstNode.callID &&
+          firstNode.childSessionID
+        ) {
+          return 'session:main'
+        }
+        return actionSessionKey(firstNode)
+      })()
+
+      /** 是否通过 fork 边界检查（只限于同一分叉轨道） */
+      const passForkBoundary = (na: MappedAction & { row: number }): boolean => {
+        if (groupIsGhost) return na.forkGhost === true
+        if (groupIsNewBranch) return isNewBranchAction(na)
+        return na.forkGhost !== true && !isNewBranchAction(na)
+      }
+
       let predItem: (typeof layout)[0] | undefined
       let predIdx = -1
-      for (let i = 0; i < layout.length - 1; i++) {
+      for (let i = 0; i < layout.length; i++) {
+        if (indexSet.has(i)) continue
         const it = layout[i]!
         if (it.node.kind !== 'action') continue
         const na = it.node as MappedAction & { row: number }
-        if (actionSessionKey(na) !== groupSession) continue
+        if (actionSessionKey(na) !== groupSearchSession) continue
+        if (!passForkBoundary(na)) continue
         if (na.sortTime < groupMinT) {
           predItem = it
           predIdx = i
@@ -1032,7 +1328,8 @@ export default function ActionFlowVisualization({
         const it = layout[i]!
         if (it.node.kind !== 'action') continue
         const na = it.node as MappedAction & { row: number }
-        if (actionSessionKey(na) !== groupSession) continue
+        if (actionSessionKey(na) !== groupSearchSession) continue
+        if (!passForkBoundary(na)) continue
         if (na.sortTime > groupMaxT) {
           succItem = it
           succIdx = i
@@ -1053,7 +1350,8 @@ export default function ActionFlowVisualization({
             it.node.sessionRegion === 'fork-new-branch'
               ? 'session:fork-new-branch'
               : 'session:main'
-          if (endRegion === groupSession) {
+          const targetEndRegion = groupIsNewBranch ? 'session:fork-new-branch' : 'session:main'
+          if (endRegion === targetEndRegion) {
             succItem = it
             succIdx = i
             break
@@ -1073,6 +1371,7 @@ export default function ActionFlowVisualization({
         list.push(idx)
       }
 
+      const firstIndices: number[] = []
       const lastIndices: number[] = []
       for (const laneIndices of byLane.values()) {
         const sortedIdx = [...laneIndices].sort((a, b) => {
@@ -1080,6 +1379,7 @@ export default function ActionFlowVisualization({
           const tb = (layout[b]!.node as MappedAction & { row: number }).sortTime
           return ta - tb
         })
+        /** 泳道内相邻连线 */
         for (let i = 0; i < sortedIdx.length - 1; i++) {
           const fromIdx = sortedIdx[i]!
           const toIdx = sortedIdx[i + 1]!
@@ -1097,25 +1397,28 @@ export default function ActionFlowVisualization({
             1.2
           )
         }
-        const firstIdx = sortedIdx[0]!
-        if (predItem && predIdx >= 0 && predIdx + 1 !== firstIdx) {
-          const na = layout[predIdx]!.node as MappedAction & { row: number }
-          const nb = layout[firstIdx]!.node as MappedAction & { row: number }
-          const { stroke: forkStroke, markerUrl: forkMarker } = edgeStrokeAndMarker(na, nb, markerUrl, ghostMarkerUrl)
-          appendOrthoEdge(
-            content,
-            predItem.x + predItem.w,
-            predItem.cy,
-            layout[firstIdx]!.x,
-            layout[firstIdx]!.cy,
-            forkMarker,
-            forkStroke,
-            1.2
-          )
-        }
+        firstIndices.push(sortedIdx[0]!)
         lastIndices.push(sortedIdx[sortedIdx.length - 1]!)
       }
 
+      /**
+       * Fan-out：pred → 各 lane 首，使用 appendOrthoFanOut 共享 bundleX，
+       * 同时把所有 predIdx-firstIdx 对加入 parallelFanOutSkip，防止主循环重复画。
+       */
+      if (predItem && predIdx >= 0 && firstIndices.length > 0) {
+        for (const fi of firstIndices) {
+          parallelFanOutSkip.add(`${predIdx}-${fi}`)
+        }
+        appendOrthoFanOut(
+          content,
+          predItem,
+          firstIndices.map((fi) => layout[fi]!),
+          markerUrl,
+          ghostMarkerUrl
+        )
+      }
+
+      /** Fan-in：各 lane 末 → succ，使用 appendOrthoFanIn 共享 bundleX */
       if (succItem && succIdx >= 0 && lastIndices.length > 0) {
         for (const li of lastIndices) {
           parallelJoinSkip.add(`${li}-${succIdx}`)
@@ -1130,6 +1433,12 @@ export default function ActionFlowVisualization({
       }
     }
 
+    /** 是否属于 fork 之后的「分叉双轨」（ghost 历史尾迹 / 新分支）—— 这两条轨上的 sortTime
+     *  会在合并后的 layout 里交错排列，「相邻成对」连线会被 cross-branch skip 全部杀掉，
+     *  必须改用专门的「按 sortTime 在自身支线内」扫一遍。 */
+    const isPostAnchor = (a: MappedAction & { row: number }) =>
+      a.forkGhost === true || isNewBranchAction(a)
+
     for (let i = 0; i < layout.length - 1; i++) {
       const a = layout[i]!
       const b = layout[i + 1]!
@@ -1137,13 +1446,19 @@ export default function ActionFlowVisualization({
         const pa = a.node as MappedAction & { row: number }
         const pb = b.node as MappedAction & { row: number }
         /**
-         * Fork 比对：跨越「主轴 / 灰色幽灵」与「fork-new-branch」之间的隐式相邻边一律跳过。
-         * - anchor → 第一条 new-branch 动作 由后续显式分叉边绘制（与父 task→子会话同款）；
-         * - 末尾 ghost → 第一条 new-branch 不是真实连续关系（两条平行支线），不画。
+         * Post-anchor 的相邻边一律跳过 —— ghost 与新分支因 sortTime 交错而错位，
+         * 用相邻关系连线会漏掉同支线内的真正后继。两条支线的内部连线由后面专门的
+         * `connectPostAnchorTrack` 各扫一次。
          */
-        const aInForkBranch = actionSessionKey(pa) === 'session:fork-new-branch'
-        const bInForkBranch = actionSessionKey(pb) === 'session:fork-new-branch'
-        if (aInForkBranch !== bInForkBranch) continue
+        if (isPostAnchor(pa) && isPostAnchor(pb)) continue
+        /**
+         * Fork 比对：跨越「历史轨迹」与「新分支」之间的隐式相邻边一律跳过。
+         * - anchor → 第一条新分支动作 由后续显式分叉边绘制；
+         * - 末尾 ghost → 第一条新分支动作 不是真实连续关系（两条平行支线），不画。
+         */
+        const aIsNewBranch = isNewBranchAction(pa)
+        const bIsNewBranch = isNewBranchAction(pb)
+        if (aIsNewBranch !== bIsNewBranch) continue
         if (
           pa.actionType === 'Subagent' &&
           pa.childSessionID &&
@@ -1157,6 +1472,7 @@ export default function ActionFlowVisualization({
         if (parallelSiblingSkip(pa, pb)) continue
       }
       if (parallelJoinSkip.has(`${i}-${i + 1}`)) continue
+      if (parallelFanOutSkip.has(`${i}-${i + 1}`)) continue
       /**
        * 进入 end 节点的隐式相邻边一律跳过 —— end 的连接由后面「显式收尾」段统一画，
        * 既兼容普通模式（一个 end），也兼容 fork 对比（两个 end，各自只连本泳道最后一条 action）。
@@ -1197,6 +1513,66 @@ export default function ActionFlowVisualization({
       if (fromKey) p.attr('data-from-key', fromKey)
       if (toKey) p.attr('data-to-key', toKey)
     }
+
+    /**
+     * 分叉支线内部按 sortTime 扫一遍，连相邻 action。
+     * - ghost 历史尾迹（forkGhost=true）独立成轨；
+     * - 新分支（forkCompareRow=2）独立成轨；
+     * - 同一轨上不区分 session（与 fork 之前 main→Subagent→主流恢复 的视觉一致）；
+     * - 跳过：Subagent→子会话首节点（由专门的紫色分叉边绘制）、并行同组兄弟、并行 fan-in
+     *   已收走的对。
+     */
+    const connectPostAnchorTrack = (
+      predicate: (a: MappedAction & { row: number }) => boolean,
+    ) => {
+      const indices: number[] = []
+      for (let i = 0; i < layout.length; i++) {
+        const it = layout[i]!
+        if (it.node.kind !== 'action') continue
+        if (!predicate(it.node as MappedAction & { row: number })) continue
+        indices.push(i)
+      }
+      indices.sort((p, q) => {
+        const ta = (layout[p]!.node as MappedAction & { row: number }).sortTime
+        const tb = (layout[q]!.node as MappedAction & { row: number }).sortTime
+        return ta - tb
+      })
+      for (let k = 0; k < indices.length - 1; k++) {
+        const i = indices[k]!
+        const j = indices[k + 1]!
+        const ai = layout[i]!
+        const bi = layout[j]!
+        const pa = ai.node as MappedAction & { row: number }
+        const pb = bi.node as MappedAction & { row: number }
+        if (
+          pa.actionType === 'Subagent' &&
+          pa.childSessionID &&
+          pa.callID &&
+          pb.source === 'child-session' &&
+          pb.parentTaskCallID === pa.callID &&
+          pb.branchChildSessionID === pa.childSessionID
+        ) {
+          continue
+        }
+        if (parallelSiblingSkip(pa, pb)) continue
+        if (parallelJoinSkip.has(`${i}-${j}`)) continue
+        const { stroke, markerUrl: m } = edgeStrokeAndMarker(pa, pb, markerUrl, ghostMarkerUrl)
+        appendOrthoEdge(
+          content,
+          ai.x + ai.w,
+          ai.cy,
+          bi.x,
+          bi.cy,
+          m,
+          stroke,
+          1.2,
+          actionKey(pa),
+          actionKey(pb),
+        )
+      }
+    }
+    connectPostAnchorTrack((a) => a.forkGhost === true)
+    connectPostAnchorTrack(isNewBranchAction)
 
     layout.forEach((item, layoutIndex) => {
       const { node, x: nx, y: ny, w, h } = item
@@ -1266,6 +1642,7 @@ export default function ActionFlowVisualization({
         .attr('class', 'afv-action')
         .attr('data-action-type', act.actionType)
         .attr('data-action-key', ak)
+        .style('opacity', '1')
       const rect = actionG
         .append('rect')
         .attr('x', nx)
@@ -1286,10 +1663,8 @@ export default function ActionFlowVisualization({
           onSelectAction(ak)
         })
       }
-      /** duration 不达标先标记，在统一 dim 流中处理（不再走 rect.opacity + 黑遮罩 + 蓝环的旧风格） */
-      if (!matchesDurationHighlight) {
-        actionG.attr('data-duration-dim', '1')
-      }
+      /** duration 过滤状态显式写入，避免旧 DOM 复用时出现残留 dim */
+      actionG.attr('data-duration-dim', matchesDurationHighlight ? '0' : '1')
       const durationMeta = durationWidthMeta(durationMode, act.durationMs)
       const overDurationThreshold = !isGhost && durationMeta.overThreshold
       const canContext =
@@ -1377,27 +1752,28 @@ export default function ActionFlowVisualization({
     })
 
     /**
-     * 显式「收尾」连线：每个 end 节点 ← 本泳道最右一条 action（按 x+w 取最右）。
+     * 显式「收尾」连线：每个 end 节点 ← 本支线最右一条 action（按 x+w 取最右）。
      *  - 普通模式：唯一 main end ← 主会话最右 action。
      *  - Fork 对比：
-     *      ghost end (sessionRegion='main') ← 主轴（含锚点 + 灰幽灵）最右 action；
-     *      new branch end (sessionRegion='fork-new-branch') ← fork-new-branch 最右 action。
+     *      ghost end (sessionRegion='main') ← 历史最右 action（包括历史 task 子 session 末端）；
+     *      new branch end (sessionRegion='fork-new-branch') ← 新分支最右 action（包括新分支
+     *      task 子 session 末端）。
+     *    判别用 forkCompareRow=2，而不是 actionSessionKey —— 否则新分支 task 区域里的最末
+     *    动作会漏掉。
      *  - 已被并行组 fan-in 收走的 end 跳过（避免重复折线）。
      */
     for (let endIdx = 0; endIdx < layout.length; endIdx++) {
       const endItem = layout[endIdx]!
       if (endItem.node.kind !== 'end') continue
-      const endRegion =
-        endItem.node.sessionRegion === 'fork-new-branch'
-          ? 'session:fork-new-branch'
-          : 'session:main'
+      const endIsForkBranch = endItem.node.sessionRegion === 'fork-new-branch'
       let lastIdx = -1
       let lastRight = -Infinity
       for (let j = 0; j < layout.length; j++) {
         const it = layout[j]!
         if (it.node.kind !== 'action') continue
-        const sess = actionSessionKey(it.node as MappedAction & { row: number })
-        if (sess !== endRegion) continue
+        const a = it.node as MappedAction & { row: number }
+        const aIsNewBranch = isNewBranchAction(a)
+        if (aIsNewBranch !== endIsForkBranch) continue
         const right = it.x + it.w
         if (right > lastRight) {
           lastRight = right
@@ -1408,7 +1784,7 @@ export default function ActionFlowVisualization({
       if (parallelJoinSkip.has(`${lastIdx}-${endIdx}`)) continue
       const lastItem = layout[lastIdx]!
       const lastAct = lastItem.node as MappedAction & { row: number }
-      const isGhostEnd = endRegion === 'session:main' && hasForkNewBranchInLayout
+      const isGhostEnd = !endIsForkBranch && hasForkNewBranchInLayout
       const stroke = isGhostEnd || lastAct.forkGhost ? FORK_GHOST_STROKE : actionFlowPalette.arrow
       const marker = isGhostEnd || lastAct.forkGhost ? ghostMarkerUrl : markerUrl
       appendOrthoEdge(
@@ -1426,8 +1802,10 @@ export default function ActionFlowVisualization({
     }
 
     /**
-     * Fork 对比显式分叉边：anchor → 第一条 fork-new-branch 动作。
-     * 类似父 task → 子会话首节点的紫色分叉，但走「主轴右缘垂直下沉至新分支泳道」的折线。
+     * Fork 对比显式分叉边：anchor → 新分支最早的 action（按 sortTime 取，排除 child-session
+     * 因为它们一定晚于其父 Subagent）。
+     * 不再要求第一条新分支动作必须落在 'session:fork-new-branch' 内 —— 当新分支只有
+     * task / 子 session 时，第一条动作的 session key 是 'session:task:<callID>'。
      */
     if (hasForkNewBranchInLayout && forkAnchorActionKey) {
       let anchorItem: (typeof layout)[number] | undefined
@@ -1439,13 +1817,14 @@ export default function ActionFlowVisualization({
         }
       }
       let firstNewBranchItem: (typeof layout)[number] | undefined
-      let firstNewBranchX = Infinity
+      let firstNewBranchSortTime = Infinity
       for (const item of layout) {
         if (item.node.kind !== 'action') continue
         const a = item.node as MappedAction & { row: number }
-        if (actionSessionKey(a) !== 'session:fork-new-branch') continue
-        if (item.x < firstNewBranchX) {
-          firstNewBranchX = item.x
+        if (!isNewBranchAction(a)) continue
+        if (a.source === 'child-session') continue
+        if (a.sortTime < firstNewBranchSortTime) {
+          firstNewBranchSortTime = a.sortTime
           firstNewBranchItem = item
         }
       }
@@ -1657,6 +2036,8 @@ export default function ActionFlowVisualization({
     const groups = Array.from(svg.querySelectorAll<SVGGElement>('g.afv-action[data-action-key]'))
     const edges = Array.from(svg.querySelectorAll<SVGPathElement>('path.afv-edge'))
     const DIM = '0.18'
+    const durationFilterActive =
+      durationHighlightMinMs != null && Number.isFinite(durationHighlightMinMs)
 
     if (dimAll) {
       svg.style.opacity = '0.35'
@@ -1678,11 +2059,20 @@ export default function ActionFlowVisualization({
       }
     }
 
+    if (highlightSet === null && !durationFilterActive) {
+      for (const g of groups) g.style.opacity = '1'
+      for (const e of edges) e.style.opacity = '1'
+      return
+    }
+
     for (const g of groups) {
       const k = g.getAttribute('data-action-key') ?? ''
-      const durationDim = g.getAttribute('data-duration-dim') === '1'
+      const durationDimActive =
+        highlightSet === null &&
+        durationFilterActive &&
+        g.getAttribute('data-duration-dim') === '1'
       const selDim = highlightSet !== null && !highlightSet.has(k)
-      g.style.opacity = (selDim || durationDim) ? DIM : ''
+      g.style.opacity = (selDim || durationDimActive) ? DIM : '1'
     }
 
     for (const e of edges) {
@@ -1694,8 +2084,8 @@ export default function ActionFlowVisualization({
         const toHit = tk !== null && highlightSet.has(tk)
         dim = !fromHit && !toHit
       }
-      /** 连线也尊重 duration dim：两端都不达标则 dim */
-      if (!dim && (fk || tk)) {
+      /** 连线也尊重 duration dim：两端都不达标则 dim（仅在 duration 过滤开启时生效） */
+      if (!dim && highlightSet === null && durationFilterActive && (fk || tk)) {
         const esc = (s: string) =>
           typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\"')
         const fromGroup = fk ? svg.querySelector<SVGGElement>(`g.afv-action[data-action-key="${esc(fk)}"]`) : null
@@ -1704,7 +2094,7 @@ export default function ActionFlowVisualization({
         const toDur = toGroup?.getAttribute('data-duration-dim') === '1'
         if (fromDur && toDur) dim = true
       }
-      e.style.opacity = dim ? DIM : ''
+      e.style.opacity = dim ? DIM : '1'
     }
   }, [highlightedActionType, highlightedActionKey, dimAll, actions, durationHighlightMinMs])
 
@@ -1726,6 +2116,7 @@ export default function ActionFlowVisualization({
   const scrollInner = (
     <div
       className={hideScrollbar ? 'action-flow-scroll--hide-scrollbar' : undefined}
+      onClick={() => onSelectAction?.(null)}
       style={{
         boxSizing: 'border-box',
         overflowX: 'auto',
