@@ -21,7 +21,8 @@ const MARGIN_LEFT = 24
 const GAP = 12
 /**
  * 垂直布局（与 `actionMapping` 一致）：
- * - 每个 session 块内 2 个基础 layer：layer0 = kernel（Think/Response/Plan…），layer1 = 工具与父级 task rect；
+ * - 每个 session 块内 2 个基础 layer：layer0 = kernel（Think/Response/Plan…），layer1 = 工具等；
+ * - 父侧 task（Subagent）：一旦解析出 `childSessionID`，整块 rect 归入 **`session:task:` 子会话区域**（不再出现在主 session 内）；
  * - 同一 layer 上并行动作用 parallelLaneIndex 再向下错开，故「行数」随并行度增高；
  * - 子会话块在 main 下方，内部同样 layer + lane，高度亦非定值。
  */
@@ -115,19 +116,34 @@ function laneOffsetY(parallelLaneIndex?: number): number {
 
 /**
  * 会话垂直分区：
- * - `session:main`：主会话内所有「父侧」动作（含 reason/text/todo、工具、以及 **父消息里的 task/Subagent rect**）。
- *   并行 task 在第二行内用 `parallelLaneIndex` 纵向堆叠，行数不固定。
- * - `session:task:<parentTaskCallID>`：**仅**子会话拉取的动作（`child-session`），叠在 main 下方；
- *   每个子 session 块高度由该块内 layer + 并行 lane 决定，可随子会话内并行变高。
+ * - `session:main`：主进程会话内动作；**不含**已解析出子 session 的父 task（后者单独占一块「子会话区域」）。
+ * - `session:task:<parentTaskCallID>`：**整块**子会话区域（父侧 task 节点 + `child-session` 动作），叠在 main 下方。
  */
 function actionSessionKey(a: MappedAction & { row: number }): string {
   if (a.source === 'child-session' && a.parentTaskCallID) {
     return `session:task:${a.parentTaskCallID}`
   }
+  if (
+    a.actionType === 'Subagent' &&
+    a.source !== 'child-session' &&
+    a.callID &&
+    a.childSessionID
+  ) {
+    return `session:task:${a.callID}`
+  }
   return 'session:main'
 }
 
-function actionLocalRow(a: MappedAction & { row: number }): number {
+/** 父 task 在数据里仍是 layer1；在子会话 **区域** 内绘制时固定为第一行（新开 session 的顶轨） */
+function actionLocalRowForLayout(a: MappedAction & { row: number }): number {
+  if (
+    a.actionType === 'Subagent' &&
+    a.source !== 'child-session' &&
+    a.callID &&
+    a.childSessionID
+  ) {
+    return 0
+  }
   return Math.max(0, a.row % 2)
 }
 
@@ -368,7 +384,7 @@ function computeLayout(
     let maxBottom = BLOCK_H
     for (const a of local) {
       const yInSession =
-        actionLocalRow(a) * ROW_H +
+        actionLocalRowForLayout(a) * ROW_H +
         laneOffsetY(a.parallelLaneIndex) +
         (a.forkCompareRow ?? 0) * FORK_COMPARE_ROW_GAP
       maxBottom = Math.max(maxBottom, yInSession + BLOCK_H)
@@ -414,7 +430,7 @@ function computeLayout(
       const yBase = sessionTopY.get(session) ?? TOP_PAD
       const y =
         yBase +
-        actionLocalRow(a) * ROW_H +
+        actionLocalRowForLayout(a) * ROW_H +
         laneOffsetY(a.parallelLaneIndex) +
         (a.forkCompareRow ?? 0) * FORK_COMPARE_ROW_GAP
       const cy = y + BLOCK_H / 2
