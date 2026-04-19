@@ -276,6 +276,8 @@ function App() {
         }
         return { kind: 'type', subtaskIndex, actionType }
       })
+      /** treemap / rect 选中同一子任务 → 同步触发 todo 高亮联动（与点击子任务卡片一致） */
+      if (actionType !== null) setLinkedSubtaskIndex(subtaskIndex)
     },
     [],
   )
@@ -293,6 +295,7 @@ function App() {
         }
         return { kind: 'action', subtaskIndex, actionKey }
       })
+      if (actionKey !== null) setLinkedSubtaskIndex(subtaskIndex)
     },
     [],
   )

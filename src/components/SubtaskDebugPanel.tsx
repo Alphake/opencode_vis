@@ -90,10 +90,11 @@ export default function SubtaskDebugPanel({
                   ? selection.actionKey
                   : null
               }
-              /** 跨子任务 dim：选中位于其他 card 时，本 card 内所有 action 暗化 */
-              otherSubtaskHasSelection={
-                selection !== null && selection.subtaskIndex !== sourceIndex
-              }
+              /**
+               * 跨子任务 dim 已取消：treemap / rect 选中只影响命中所在子任务卡片，
+               * 其它卡片完全保持正常显示，避免「点一个 rect 整页都暗下去」。
+               */
+              otherSubtaskHasSelection={false}
               onSelectActionType={
                 onSelectActionType
                   ? (type) => onSelectActionType(sourceIndex, type)

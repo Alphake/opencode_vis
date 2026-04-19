@@ -18,15 +18,13 @@ import ActionFlowVisualization from './ActionFlowVisualization'
 import SubtaskActionTypeTreemap from './SubtaskActionTypeTreemap'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import { getMessages } from '../services/opencodeApi'
+import { actionKey } from '../utils/actionKey'
 
 const fontSans =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
 
 /** 子任务卡片最小高度；内容（如分叉可视化）变高时卡片随内容增高 */
 const CARD_MIN_HEIGHT = 220
-/** Fork 双栏：单行 lane 可视上限；略抬高减少误触纵向滚动（边框不再占内容区后仍留余量） */
-const FORK_LANE_VIEWPORT_MAX_PX = 178
-const FORK_PANEL_OUTER_MAX_PX = 370
 const LONG_RUNNING_MS = 60_000
 
 interface SubtaskCardProps {
@@ -271,26 +269,63 @@ export default function SubtaskCard({
       ? durationHighlightMinMs
       : null
 
-  /** Fork 后：同一滚动面板内上下两栏 — 灰历史快照 / 当前会话（便于对照） */
-  const forkStackLanes = useMemo(() => {
-    if (!forkPanelSnapshotBundle || forkPanelSnapshotBundle.version !== 2) {
-      return null
-    }
-    const b = forkPanelSnapshotBundle
-    if (b.forkOriginSubtaskId !== subtask.subtask_id && b.forkOriginDisplayIndex !== displayIndex) {
-      return null
-    }
-    return {
-      historyActions: b.snapshot.flowActions.map((a) => ({ ...a, forkGhost: true })),
-      historyTooltips: b.snapshot.tooltipMessages,
-    }
-  }, [forkPanelSnapshotBundle, subtask.subtask_id, displayIndex])
-
   /** 与 `flowActions` 中 `partId` 查找一致：父段消息 + 子会话拉取消息 */
   const tooltipLookupMessages = useMemo(
     () => mergeMessagesForActionTooltipLookup(segmentMessages, childBranchMessages),
     [segmentMessages, childBranchMessages],
   )
+
+  /**
+   * Fork 后：在同一 SVG 内合并「fork 前共享前缀」+「锚点后旧轨迹（灰幽灵）」+「新分支」。
+   *
+   * 关键约束：
+   * - 历史轨迹（前缀 + 锚点 + 锚点后灰幽灵）一律来自 snapshot —— 新 session 通常并不
+   *   回填 fork 之前的消息，依赖「在新 session 里也能找到锚点」会直接 return null，
+   *   导致整段历史画不出来。改为只要 snapshot 里能定位到锚点即可进入合并模式。
+   * - 新分支：当前 session 的 flowActions 中 messageID 不在 snapshot 共享前缀的部分；
+   *   若新 session 自带共享前缀（同 messageID），自动去重；否则全部视为新分支。
+   * - 锚点 actionKey 透传 ActionFlowVisualization，用于「锚点 → 第一条新分支」分叉边。
+   */
+  const forkMergedFlow = useMemo(() => {
+    if (!forkPanelSnapshotBundle || forkPanelSnapshotBundle.version !== 2) return null
+    const b = forkPanelSnapshotBundle
+    if (b.forkOriginSubtaskId !== subtask.subtask_id && b.forkOriginDisplayIndex !== displayIndex) {
+      return null
+    }
+    const anchorMessageId = b.forkAnchorMessageId
+    const anchorPartId = b.forkAnchorPartId
+    const matchAnchor = (a: MappedAction & { row: number }) =>
+      a.messageID === anchorMessageId && (anchorPartId ? a.partId === anchorPartId : true)
+
+    const oldActions = b.snapshot.flowActions
+    const oldAnchorIdx = oldActions.findIndex(matchAnchor)
+    /** 锚点必须能在 snapshot 中定位；找不到时不进入合并模式 */
+    if (oldAnchorIdx < 0) return null
+
+    /** 历史前缀（含锚点）：snapshot 数据，正常配色 */
+    const preForkAndAnchor = oldActions.slice(0, oldAnchorIdx + 1)
+    const anchorActionKey = actionKey(preForkAndAnchor[oldAnchorIdx]!)
+    /** 锚点之后的旧轨迹：snapshot 数据，灰幽灵 */
+    const ghostSuffix = oldActions
+      .slice(oldAnchorIdx + 1)
+      .map((a) => ({ ...a, forkGhost: true }))
+
+    /** 新分支：剔除新 session 中与共享前缀 messageID 重叠的部分（若有） */
+    const sharedMessageIds = new Set(
+      preForkAndAnchor
+        .map((a) => a.messageID)
+        .filter((id): id is string => Boolean(id)),
+    )
+    const newBranch = flowActions
+      .filter((a) => !a.messageID || !sharedMessageIds.has(a.messageID))
+      .map((a) => ({ ...a, forkCompareRow: 2 as const }))
+
+    const merged = [...preForkAndAnchor, ...ghostSuffix, ...newBranch].sort(
+      (x, y) => x.sortTime - y.sortTime,
+    )
+    const mergedTooltips = [...b.snapshot.tooltipMessages, ...tooltipLookupMessages]
+    return { merged, mergedTooltips, anchorActionKey }
+  }, [forkPanelSnapshotBundle, subtask.subtask_id, displayIndex, flowActions, tooltipLookupMessages])
   const hasActiveRunningAction = useMemo(
     () => flowActions.some((a) => a.status === 'running' || a.status === 'pending'),
     [flowActions],
@@ -305,7 +340,12 @@ export default function SubtaskCard({
 
   useEffect(() => {
     if (!hasActiveRunningAction) return
-    const id = window.setInterval(() => setNowTick(Date.now()), 1000)
+    /**
+     * 2s 一次 tick：每次 tick 会让 parentFlowActions / flowActions 引用刷新，
+     * ActionFlowVisualization 的 d3 effect 整张 SVG 重建一次（视觉上是一次闪烁）。
+     * 1Hz 太密（生成时连续闪），2s 在「duration 实时感」与「不刺眼」之间更平衡。
+     */
+    const id = window.setInterval(() => setNowTick(Date.now()), 2000)
     return () => window.clearInterval(id)
   }, [hasActiveRunningAction])
 
@@ -314,6 +354,43 @@ export default function SubtaskCard({
   /** 无进行中 action 时才显示流程终点黄点（避免子任务一开始就出现「收尾」） */
   const showFlowEndNode = !hasActiveRunningAction && flowActions.length > 0
   const showLeadingTreemap = typeof leadingTreemapSize === 'number' && leadingTreemapSize > 0
+
+  /**
+   * 稳化 flowEndSummary 引用 —— inline 字面量每次 render 都是新对象，会让
+   * ActionFlowVisualization 第一个 useLayoutEffect 误以为「数据变了」从而
+   * `selectAll('*').remove()` 重建整个 SVG，造成点击 / nowTick 时所有 rect 闪烁。
+   */
+  const flowEndSummary = useMemo(
+    () => ({
+      readFileTotalCount: m.readFilesCount,
+      readFilePaths: m.readFilePaths,
+      globMatchFileCount: m.globMatchFileCount,
+      webSearchCount: m.webSearchCallCount,
+      webSearchQueries: m.webSearchQueries,
+      writeFileCount: m.mutatedFileCount,
+      changedFilePaths: m.mutatedFilePaths,
+    }),
+    [
+      m.readFilesCount,
+      m.readFilePaths,
+      m.globMatchFileCount,
+      m.webSearchCallCount,
+      m.webSearchQueries,
+      m.mutatedFileCount,
+      m.mutatedFilePaths,
+    ],
+  )
+
+  /** 同样原因稳化：onForkFromAction 包装的箭头函数 */
+  const handleForkFromActionWrapped = useMemo(() => {
+    if (!onForkFromAction) return undefined
+    return (act: MappedAction & { row: number }) =>
+      onForkFromAction(act, {
+        subtaskId: subtask.subtask_id,
+        subtaskDisplayIndex: displayIndex,
+        assistantMessageIndices: subtask.assistantMessageIndices,
+      })
+  }, [onForkFromAction, subtask.subtask_id, subtask.assistantMessageIndices, displayIndex])
 
   const bodyContent = (
     <>
@@ -538,111 +615,34 @@ export default function SubtaskCard({
           flexDirection: 'column',
         }}
       >
-        {forkStackLanes ? (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              boxSizing: 'border-box',
-              overflow: 'auto',
-              border: '1px solid #E8E8E8',
-              borderRadius: 8,
-              background: '#FCFCFC',
-              width: '100%',
-              maxHeight: FORK_PANEL_OUTER_MAX_PX,
-              minHeight: 0,
-              flexShrink: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 0,
-            }}
-          >
-            {/*
-              同一 panel 内上下两行：上行灰色历史（独立 SVG 链路），下行当前会话（独立 SVG），互不连线
-            */}
-            <div
-              style={{
-                flexShrink: 0,
-                background: '#EDEDED',
-                padding: '2px 4px',
-              }}
-            >
-              <ActionFlowVisualization
-                embedded
-                viewportMaxHeight={FORK_LANE_VIEWPORT_MAX_PX}
-                actions={forkStackLanes.historyActions}
-                durationMode={actionsDurationOn}
-                colorMode={colorBy === 'status' ? 'status' : 'tokens'}
-                tooltipMessages={forkStackLanes.historyTooltips}
-                showFlowEndNode={false}
-              />
-            </div>
-            <div style={{ flexShrink: 0, background: '#FCFCFC', padding: '2px 4px' }}>
-              <ActionFlowVisualization
-                embedded
-                viewportMaxHeight={FORK_LANE_VIEWPORT_MAX_PX}
-                actions={flowActions}
-                durationMode={actionsDurationOn}
-                colorMode={colorBy === 'status' ? 'status' : 'tokens'}
-                durationHighlightMinMs={durationHighlightForFlow}
-                tooltipMessages={tooltipLookupMessages}
-                onForkFromAction={
-                  onForkFromAction
-                    ? (act) =>
-                        onForkFromAction(act, {
-                          subtaskId: subtask.subtask_id,
-                          subtaskDisplayIndex: displayIndex,
-                          assistantMessageIndices: subtask.assistantMessageIndices,
-                        })
-                    : undefined
-                }
-                onAnalyzeFromAction={onAnalyzeFromAction}
-                showFlowEndNode={showFlowEndNode}
-                flowEndSummary={{
-                  readFileTotalCount: m.readFilesCount,
-                  readFilePaths: m.readFilePaths,
-                  globMatchFileCount: m.globMatchFileCount,
-                  webSearchCount: m.webSearchCallCount,
-                  webSearchQueries: m.webSearchQueries,
-                  writeFileCount: m.mutatedFileCount,
-                  changedFilePaths: m.mutatedFilePaths,
-                }}
-              />
-            </div>
-          </div>
-        ) : (
-          <ActionFlowVisualization
-            actions={flowActions}
-            durationMode={actionsDurationOn}
-            colorMode={colorBy === 'status' ? 'status' : 'tokens'}
-            durationHighlightMinMs={durationHighlightForFlow}
-            tooltipMessages={tooltipLookupMessages}
-            highlightedActionType={selectedActionType}
-            highlightedActionKey={selectedActionKey}
-            dimAll={otherSubtaskHasSelection}
-            onSelectAction={onSelectAction}
-            onForkFromAction={
-              onForkFromAction
-                ? (act) =>
-                    onForkFromAction(act, {
-                      subtaskId: subtask.subtask_id,
-                      subtaskDisplayIndex: displayIndex,
-                      assistantMessageIndices: subtask.assistantMessageIndices,
-                    })
-                : undefined
-            }
-            onAnalyzeFromAction={onAnalyzeFromAction}
-            showFlowEndNode={showFlowEndNode}
-            flowEndSummary={{
-              readFileTotalCount: m.readFilesCount,
-              readFilePaths: m.readFilePaths,
-              globMatchFileCount: m.globMatchFileCount,
-              webSearchCount: m.webSearchCallCount,
-              webSearchQueries: m.webSearchQueries,
-              writeFileCount: m.mutatedFileCount,
-              changedFilePaths: m.mutatedFilePaths,
-            }}
-          />
-        )}
+        {(() => {
+          /**
+           * Fork 比对模式：把灰色幽灵 + 新分支合并到一个 ActionFlowVisualization；
+           * 否则正常使用当前 session 的 flowActions。
+           */
+          const useForkMerged = forkMergedFlow != null
+          const renderActions = useForkMerged ? forkMergedFlow!.merged : flowActions
+          const renderTooltips = useForkMerged ? forkMergedFlow!.mergedTooltips : tooltipLookupMessages
+          const forkAnchor = useForkMerged ? forkMergedFlow!.anchorActionKey : null
+          return (
+            <ActionFlowVisualization
+              actions={renderActions}
+              durationMode={actionsDurationOn}
+              colorMode={colorBy === 'status' ? 'status' : 'tokens'}
+              durationHighlightMinMs={durationHighlightForFlow}
+              tooltipMessages={renderTooltips}
+              highlightedActionType={selectedActionType}
+              highlightedActionKey={selectedActionKey}
+              dimAll={otherSubtaskHasSelection}
+              onSelectAction={onSelectAction}
+              forkAnchorActionKey={forkAnchor}
+              onForkFromAction={handleForkFromActionWrapped}
+              onAnalyzeFromAction={onAnalyzeFromAction}
+              showFlowEndNode={showFlowEndNode}
+              flowEndSummary={flowEndSummary}
+            />
+          )
+        })()}
       </div>
 
       <div

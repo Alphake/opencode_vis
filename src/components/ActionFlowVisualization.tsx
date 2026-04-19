@@ -15,7 +15,7 @@ import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './Action
 import { actionKey } from '../utils/actionKey'
 
 type FlowNode =
-  | { kind: 'end'; row: number }
+  | { kind: 'end'; row: number; sessionRegion: 'main' | 'fork-new-branch' }
   | (MappedAction & { row: number; kind: 'action' })
 
 /** `computeLayout` 输出的每一项，用于连线 bundling */
@@ -158,8 +158,13 @@ function laneOffsetY(parallelLaneIndex?: number): number {
  * 会话垂直分区：
  * - `session:main`：主进程会话内动作；**不含**已解析出子 session 的父 task（后者单独占一块「子会话区域」）。
  * - `session:task:<parentTaskCallID>`：**整块**子会话区域（父侧 task 节点 + `child-session` 动作），叠在 main 下方。
+ * - `session:fork-new-branch`：fork 后新会话的分支动作（`forkCompareRow === 2`），与父会话同 SVG，
+ *   x 从 fork 锚点右缘起算独立推进，y 放在主会话/子会话之下作为「下一条泳道」。
  */
 function actionSessionKey(a: MappedAction & { row: number }): string {
+  if (a.forkCompareRow === 2 && a.source !== 'child-session') {
+    return 'session:fork-new-branch'
+  }
   if (a.source === 'child-session' && a.parentTaskCallID) {
     return `session:task:${a.parentTaskCallID}`
   }
@@ -332,14 +337,11 @@ ${writeList.html}${writeMore}
 function computeLayout(
   actions: (MappedAction & { row: number })[],
   durationMode: boolean,
-  layoutOpts?: { includeEndNode?: boolean }
+  layoutOpts?: { includeEndNode?: boolean; forkAnchorActionKey?: string | null }
 ) {
   const includeEndNode = layoutOpts?.includeEndNode !== false
+  const forkAnchorActionKey = layoutOpts?.forkAnchorActionKey ?? null
   const sorted = [...actions].sort((a, b) => a.sortTime - b.sortTime)
-  const seq: FlowNode[] = sorted.map(a => ({ ...a, kind: 'action' as const }))
-  if (includeEndNode) {
-    seq.push({ kind: 'end', row: 1 })
-  }
 
   /** step 间距收紧：顺序推进时不拉太开 */
   const TIMELINE_STEP_GAP = 10
@@ -348,7 +350,24 @@ function computeLayout(
   sorted.forEach((a) => sessionKeySet.add(actionSessionKey(a)))
   const sessionOrder: string[] = []
   if (sessionKeySet.has('session:main')) sessionOrder.push('session:main')
-  const childKeys = [...sessionKeySet].filter((k) => k !== 'session:main')
+  const hasForkNewBranch = sessionKeySet.has('session:fork-new-branch')
+
+  /**
+   * Fork 对比模式下两条平行支线，每条独立终点：
+   *  - 历史轨迹（main，含锚点 + 灰幽灵）→ 灰色 end（嵌在主泳道右端）
+   *  - 新分支（fork-new-branch）→ 正常 end（嵌在新泳道右端）
+   * 普通模式仍然只有一个 main end。
+   */
+  const seq: FlowNode[] = sorted.map(a => ({ ...a, kind: 'action' as const }))
+  if (includeEndNode) {
+    seq.push({ kind: 'end', row: 1, sessionRegion: 'main' })
+    if (hasForkNewBranch) {
+      seq.push({ kind: 'end', row: 1, sessionRegion: 'fork-new-branch' })
+    }
+  }
+  const childKeys = [...sessionKeySet].filter(
+    (k) => k !== 'session:main' && k !== 'session:fork-new-branch'
+  )
   childKeys.sort((ka, kb) => {
     const actionsA = sorted.filter((a) => actionSessionKey(a) === ka)
     const actionsB = sorted.filter((a) => actionSessionKey(a) === kb)
@@ -363,14 +382,20 @@ function computeLayout(
     return minA - minB
   })
   sessionOrder.push(...childKeys)
+  /** fork-new-branch 始终放在最底（作为「分叉后下一条泳道」） */
+  if (hasForkNewBranch) sessionOrder.push('session:fork-new-branch')
   if (sessionOrder.length === 0) sessionOrder.push('session:main')
 
   /** 全局画布上的 x（索引 -> x） */
   const actionXBySortedIndex = new Map<number, number>()
 
+  /**
+   * 根轴：主会话内 + fork 锚点之前 / 灰幽灵的全部动作（与原始时间线同步）。
+   * fork-new-branch 区域不进根轴，单独走「分叉新分支」的本地 x 轨。
+   */
   const rootIndices = sorted
     .map((a, idx) => ({ a, idx }))
-    .filter((x) => x.a.source !== 'child-session')
+    .filter((x) => x.a.source !== 'child-session' && actionSessionKey(x.a) !== 'session:fork-new-branch')
     .map((x) => x.idx)
 
   /** 根轴 slot（统一时间轴） */
@@ -532,7 +557,103 @@ function computeLayout(
     }
   }
 
-  const endNodeX = rootCursor
+  /**
+   * Fork 新分支：作为根轴上 anchor 右缘 + gap 起算的独立 x 轨。
+   * - 与 anchor 之后的「灰色幽灵后缀」共享相同的起点 x，但在不同 session 区域（垂直分开），
+   *   形成「同一 SVG 内的两条平行支线」视觉效果。
+   * - 若没有显式 anchor 或没有任何幽灵动作，回退到主轴右端起算。
+   */
+  let forkBranchRight = MARGIN_LEFT
+  if (hasForkNewBranch) {
+    /** 1. 解析 anchor 在主轴上的右缘 */
+    let anchorRight: number | null = null
+    if (forkAnchorActionKey) {
+      for (let i = 0; i < sorted.length; i++) {
+        const a = sorted[i]!
+        if (actionKey(a) === forkAnchorActionKey) {
+          const x = actionXBySortedIndex.get(i)
+          if (x != null) anchorRight = x + blockWidth(durationMode, a.durationMs)
+          break
+        }
+      }
+    }
+    if (anchorRight == null) {
+      /** 兜底：取主轴最右非 fork-new-branch 动作的右缘 */
+      for (let i = 0; i < sorted.length; i++) {
+        const a = sorted[i]!
+        if (actionSessionKey(a) === 'session:fork-new-branch') continue
+        const x = actionXBySortedIndex.get(i)
+        if (x == null) continue
+        const r = x + blockWidth(durationMode, a.durationMs)
+        if (anchorRight == null || r > anchorRight) anchorRight = r
+      }
+    }
+    const forkBaseX = (anchorRight ?? MARGIN_LEFT) + TIMELINE_STEP_GAP
+
+    /** 2. fork-new-branch 内部本地 x（按 sortTime 顺序，与子 session 类似的 slot 结构，复用 parallelGroupId/laneIndex） */
+    const branchIndices = sorted
+      .map((a, idx) => ({ a, idx }))
+      .filter((x) => actionSessionKey(x.a) === 'session:fork-new-branch')
+      .map((x) => x.idx)
+
+    const branchSlotByIndex = new Map<number, string>()
+    const branchGroupStepToSlot = new Map<string, Map<number, string>>()
+    const branchGroupLaneStepCounter = new Map<string, Map<number, number>>()
+    let nextBranchSlot = 0
+    for (const idx of branchIndices) {
+      const a = sorted[idx]!
+      let slotKey: string
+      if (!a.parallelGroupId) {
+        slotKey = `branch:${nextBranchSlot++}`
+      } else {
+        const groupKey = a.parallelGroupId
+        const lane = a.parallelLaneIndex ?? 0
+        let laneCounter = branchGroupLaneStepCounter.get(groupKey)
+        if (!laneCounter) {
+          laneCounter = new Map<number, number>()
+          branchGroupLaneStepCounter.set(groupKey, laneCounter)
+        }
+        const step = laneCounter.get(lane) ?? 0
+        laneCounter.set(lane, step + 1)
+        let stepSlots = branchGroupStepToSlot.get(groupKey)
+        if (!stepSlots) {
+          stepSlots = new Map<number, string>()
+          branchGroupStepToSlot.set(groupKey, stepSlots)
+        }
+        if (!stepSlots.has(step)) stepSlots.set(step, `branch:${nextBranchSlot++}`)
+        slotKey = stepSlots.get(step)!
+      }
+      branchSlotByIndex.set(idx, slotKey)
+    }
+    const branchSlotWidth = new Map<string, number>()
+    for (const idx of branchIndices) {
+      const slotKey = branchSlotByIndex.get(idx)
+      if (!slotKey) continue
+      const w = blockWidth(durationMode, sorted[idx]!.durationMs)
+      branchSlotWidth.set(slotKey, Math.max(branchSlotWidth.get(slotKey) ?? 0, w))
+    }
+    const branchSlotStartX = new Map<string, number>()
+    let branchCursor = 0
+    for (let s = 0; s < nextBranchSlot; s++) {
+      const slotKey = `branch:${s}`
+      branchSlotStartX.set(slotKey, branchCursor)
+      branchCursor += (branchSlotWidth.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
+    }
+    for (const idx of branchIndices) {
+      const slotKey = branchSlotByIndex.get(idx)
+      const localX = slotKey ? (branchSlotStartX.get(slotKey) ?? 0) : 0
+      actionXBySortedIndex.set(idx, forkBaseX + localX)
+    }
+    forkBranchRight = forkBaseX + Math.max(0, branchCursor - TIMELINE_STEP_GAP)
+  }
+
+  /**
+   * 两条支线各自的 end x：
+   *  - main：根轴当前游标（rootCursor 已经是「最右 root slot 的右缘 + TIMELINE_STEP_GAP」）
+   *  - fork-new-branch：分支右缘 + 一段 gap
+   */
+  const endXMain = rootCursor
+  const endXForkBranch = hasForkNewBranch ? forkBranchRight + TIMELINE_STEP_GAP : rootCursor
 
   const sessionTopY = new Map<string, number>()
   let sessionY = TOP_PAD
@@ -561,9 +682,15 @@ function computeLayout(
     const node = seq[i]!
     if (node.kind === 'end') {
       const w = MIN_W
-      const xNode = endNodeX
-      /** 终点黄点固定在主会话第一行（kernel / layer 0） */
-      const y = sessionTopY.get('session:main') ?? TOP_PAD
+      /**
+       * 每条支线 end 各占自己泳道的第一行：
+       *  - sessionRegion='main' → 历史轨迹的 end（普通模式 / 历史灰端）
+       *  - sessionRegion='fork-new-branch' → 新分支的 end
+       */
+      const isForkEnd = node.sessionRegion === 'fork-new-branch'
+      const xNode = isForkEnd ? endXForkBranch : endXMain
+      const regionKey = isForkEnd ? 'session:fork-new-branch' : 'session:main'
+      const y = sessionTopY.get(regionKey) ?? sessionTopY.get('session:main') ?? TOP_PAD
       const cy = y + BLOCK_H / 2
       layout.push({ node, x: xNode, y, w, h: BLOCK_H, cx: xNode + w / 2, cy })
     } else {
@@ -587,7 +714,9 @@ function computeLayout(
     const w = blockWidth(durationMode, a.durationMs)
     return Math.max(maxR, x + w)
   }, MARGIN_LEFT)
-  const totalTimelineRight = includeEndNode ? Math.max(maxActionRight, endNodeX + MIN_W) : maxActionRight
+  const totalTimelineRight = includeEndNode
+    ? Math.max(maxActionRight, endXMain + MIN_W, endXForkBranch + MIN_W)
+    : maxActionRight
   const totalW = Math.max(totalTimelineRight + MARGIN_LEFT, 360)
   return { layout, totalW, totalH }
 }
@@ -752,6 +881,12 @@ interface Props {
   dimAll?: boolean
   /** ActionFlow rect 单击 → action-level 选中 */
   onSelectAction?: (actionKey: string | null) => void
+  /**
+   * Fork 对比模式：与 `actions` 中带 `forkCompareRow === 2` 的「新分支」动作配合 —
+   * 传入 fork 锚点 action 的 `actionKey()`，layout 会从锚点右缘起算新分支独立 x 轨，
+   * 并在锚点 → 第一条新分支动作之间绘制专门的「下沉」分叉边。
+   */
+  forkAnchorActionKey?: string | null
 }
 
 export default function ActionFlowVisualization({
@@ -773,6 +908,7 @@ export default function ActionFlowVisualization({
   highlightedActionKey = null,
   dimAll = false,
   onSelectAction,
+  forkAnchorActionKey = null,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -781,8 +917,8 @@ export default function ActionFlowVisualization({
   const markerId = `action-flow-arrow-${reactId}`
   const tooltipId = `action-flow-tip-${reactId}`
   const layoutEstimate = useMemo(
-    () => computeLayout(actions, durationMode, { includeEndNode: showFlowEndNode }),
-    [actions, durationMode, showFlowEndNode]
+    () => computeLayout(actions, durationMode, { includeEndNode: showFlowEndNode, forkAnchorActionKey }),
+    [actions, durationMode, showFlowEndNode, forkAnchorActionKey]
   )
 
   useLayoutEffect(() => {
@@ -796,7 +932,12 @@ export default function ActionFlowVisualization({
 
     const { layout, totalW, totalH } = computeLayout(actions, durationMode, {
       includeEndNode: showFlowEndNode,
+      forkAnchorActionKey,
     })
+    /** 是否处于 fork 对比模式：layout 中存在新分支动作 */
+    const hasForkNewBranchInLayout = layout.some(
+      (item) => item.node.kind === 'action' && actionSessionKey(item.node as MappedAction & { row: number }) === 'session:fork-new-branch'
+    )
     const offsetY = verticalCenterOffsetY(layout, totalH)
     const highlightActive =
       durationHighlightMinMs != null && Number.isFinite(durationHighlightMinMs)
@@ -869,12 +1010,15 @@ export default function ActionFlowVisualization({
       const groupMaxT = Math.max(...groupActions.map((g) => g.node.sortTime))
       const indexSet = new Set(indices)
 
+      /** 并行组的前驱/后继搜索须限制在同一 session 区域（避免跨越 fork 分叉） */
+      const groupSession = actionSessionKey(groupActions[0]!.node)
       let predItem: (typeof layout)[0] | undefined
       let predIdx = -1
       for (let i = 0; i < layout.length - 1; i++) {
         const it = layout[i]!
         if (it.node.kind !== 'action') continue
         const na = it.node as MappedAction & { row: number }
+        if (actionSessionKey(na) !== groupSession) continue
         if (na.sortTime < groupMinT) {
           predItem = it
           predIdx = i
@@ -888,6 +1032,7 @@ export default function ActionFlowVisualization({
         const it = layout[i]!
         if (it.node.kind !== 'action') continue
         const na = it.node as MappedAction & { row: number }
+        if (actionSessionKey(na) !== groupSession) continue
         if (na.sortTime > groupMaxT) {
           succItem = it
           succIdx = i
@@ -895,10 +1040,20 @@ export default function ActionFlowVisualization({
         }
       }
       if (succIdx < 0) {
+        /**
+         * 并行组没有显式后继时连到「自己泳道」的 end：
+         *  - 普通模式：唯一一个 main end；
+         *  - Fork 对比：main 组接 ghost end，fork-new-branch 组接 new branch end。
+         */
         for (let i = 0; i < layout.length; i++) {
           if (indexSet.has(i)) continue
           const it = layout[i]!
-          if (it.node.kind === 'end') {
+          if (it.node.kind !== 'end') continue
+          const endRegion =
+            it.node.sessionRegion === 'fork-new-branch'
+              ? 'session:fork-new-branch'
+              : 'session:main'
+          if (endRegion === groupSession) {
             succItem = it
             succIdx = i
             break
@@ -981,25 +1136,14 @@ export default function ActionFlowVisualization({
       if (a.node.kind === 'action' && b.node.kind === 'action') {
         const pa = a.node as MappedAction & { row: number }
         const pb = b.node as MappedAction & { row: number }
-        const ra = pa.forkCompareRow ?? 0
-        const rb = pb.forkCompareRow ?? 0
-        if (ra !== rb) {
-          const x1 = a.x + a.w
-          const y1 = a.cy
-          const x2 = b.x
-          const y2 = b.cy
-          let segStroke = FORK_GHOST_STROKE
-          let segMarker = ghostMarkerUrl
-          if (ra === 0 && rb === 2) {
-            segStroke = actionFlowPalette.arrow
-            segMarker = markerUrl
-          } else if (ra === 1 && rb === 2) {
-            segStroke = actionFlowPalette.arrow
-            segMarker = markerUrl
-          }
-          appendOrthoEdge(content, x1, y1, x2, y2, segMarker, segStroke, 1.2)
-          continue
-        }
+        /**
+         * Fork 比对：跨越「主轴 / 灰色幽灵」与「fork-new-branch」之间的隐式相邻边一律跳过。
+         * - anchor → 第一条 new-branch 动作 由后续显式分叉边绘制（与父 task→子会话同款）；
+         * - 末尾 ghost → 第一条 new-branch 不是真实连续关系（两条平行支线），不画。
+         */
+        const aInForkBranch = actionSessionKey(pa) === 'session:fork-new-branch'
+        const bInForkBranch = actionSessionKey(pb) === 'session:fork-new-branch'
+        if (aInForkBranch !== bInForkBranch) continue
         if (
           pa.actionType === 'Subagent' &&
           pa.childSessionID &&
@@ -1013,6 +1157,11 @@ export default function ActionFlowVisualization({
         if (parallelSiblingSkip(pa, pb)) continue
       }
       if (parallelJoinSkip.has(`${i}-${i + 1}`)) continue
+      /**
+       * 进入 end 节点的隐式相邻边一律跳过 —— end 的连接由后面「显式收尾」段统一画，
+       * 既兼容普通模式（一个 end），也兼容 fork 对比（两个 end，各自只连本泳道最后一条 action）。
+       */
+      if (b.node.kind === 'end') continue
       const x1 = a.x + a.w
       const y1 = a.cy
       const x2 = b.x
@@ -1052,14 +1201,23 @@ export default function ActionFlowVisualization({
     layout.forEach((item, layoutIndex) => {
       const { node, x: nx, y: ny, w, h } = item
       if (node.kind === 'end') {
-        const endTip = flowEndSummary ? buildFlowEndTooltipHtml(flowEndSummary) : ''
+        /**
+         * Fork 对比模式下的「历史端」(sessionRegion='main' 且存在新分支) 用灰色圆，
+         * 表示这是 fork 之前的旧轨迹收尾；新分支端 / 普通模式仍用 palette.end 黄色。
+         * 历史端不显示 summary tooltip（数据是当下新 session 的，挂上去会误导）。
+         */
+        const isGhostEnd =
+          node.sessionRegion === 'main' && hasForkNewBranchInLayout
+        const fill = isGhostEnd ? '#E8E8E8' : actionFlowPalette.end.fill
+        const stroke = isGhostEnd ? '#BFBFBF' : actionFlowPalette.end.stroke
+        const endTip = !isGhostEnd && flowEndSummary ? buildFlowEndTooltipHtml(flowEndSummary) : ''
         const circle = content
           .append('circle')
           .attr('cx', nx + w / 2)
           .attr('cy', ny + h / 2)
           .attr('r', h / 2 - 2)
-          .attr('fill', actionFlowPalette.end.fill)
-          .attr('stroke', actionFlowPalette.end.stroke)
+          .attr('fill', fill)
+          .attr('stroke', stroke)
           .attr('stroke-width', 1.5)
           .style('cursor', endTip ? 'pointer' : 'default')
         if (endTip) {
@@ -1217,6 +1375,107 @@ export default function ActionFlowVisualization({
         })
       }
     })
+
+    /**
+     * 显式「收尾」连线：每个 end 节点 ← 本泳道最右一条 action（按 x+w 取最右）。
+     *  - 普通模式：唯一 main end ← 主会话最右 action。
+     *  - Fork 对比：
+     *      ghost end (sessionRegion='main') ← 主轴（含锚点 + 灰幽灵）最右 action；
+     *      new branch end (sessionRegion='fork-new-branch') ← fork-new-branch 最右 action。
+     *  - 已被并行组 fan-in 收走的 end 跳过（避免重复折线）。
+     */
+    for (let endIdx = 0; endIdx < layout.length; endIdx++) {
+      const endItem = layout[endIdx]!
+      if (endItem.node.kind !== 'end') continue
+      const endRegion =
+        endItem.node.sessionRegion === 'fork-new-branch'
+          ? 'session:fork-new-branch'
+          : 'session:main'
+      let lastIdx = -1
+      let lastRight = -Infinity
+      for (let j = 0; j < layout.length; j++) {
+        const it = layout[j]!
+        if (it.node.kind !== 'action') continue
+        const sess = actionSessionKey(it.node as MappedAction & { row: number })
+        if (sess !== endRegion) continue
+        const right = it.x + it.w
+        if (right > lastRight) {
+          lastRight = right
+          lastIdx = j
+        }
+      }
+      if (lastIdx < 0) continue
+      if (parallelJoinSkip.has(`${lastIdx}-${endIdx}`)) continue
+      const lastItem = layout[lastIdx]!
+      const lastAct = lastItem.node as MappedAction & { row: number }
+      const isGhostEnd = endRegion === 'session:main' && hasForkNewBranchInLayout
+      const stroke = isGhostEnd || lastAct.forkGhost ? FORK_GHOST_STROKE : actionFlowPalette.arrow
+      const marker = isGhostEnd || lastAct.forkGhost ? ghostMarkerUrl : markerUrl
+      appendOrthoEdge(
+        content,
+        lastItem.x + lastItem.w,
+        lastItem.cy,
+        endItem.x,
+        endItem.cy,
+        marker,
+        stroke,
+        1.2,
+        actionKey(lastAct),
+        null,
+      )
+    }
+
+    /**
+     * Fork 对比显式分叉边：anchor → 第一条 fork-new-branch 动作。
+     * 类似父 task → 子会话首节点的紫色分叉，但走「主轴右缘垂直下沉至新分支泳道」的折线。
+     */
+    if (hasForkNewBranchInLayout && forkAnchorActionKey) {
+      let anchorItem: (typeof layout)[number] | undefined
+      for (const item of layout) {
+        if (item.node.kind !== 'action') continue
+        if (actionKey(item.node as MappedAction & { row: number }) === forkAnchorActionKey) {
+          anchorItem = item
+          break
+        }
+      }
+      let firstNewBranchItem: (typeof layout)[number] | undefined
+      let firstNewBranchX = Infinity
+      for (const item of layout) {
+        if (item.node.kind !== 'action') continue
+        const a = item.node as MappedAction & { row: number }
+        if (actionSessionKey(a) !== 'session:fork-new-branch') continue
+        if (item.x < firstNewBranchX) {
+          firstNewBranchX = item.x
+          firstNewBranchItem = item
+        }
+      }
+      if (anchorItem && firstNewBranchItem) {
+        const x1 = anchorItem.x + anchorItem.w
+        const y1 = anchorItem.cy
+        const x2 = firstNewBranchItem.x
+        const y2 = firstNewBranchItem.cy
+        const mid = (x1 + x2) / 2
+        const branchPath = d3.path()
+        branchPath.moveTo(x1, y1)
+        branchPath.lineTo(mid, y1)
+        branchPath.lineTo(mid, y2)
+        branchPath.lineTo(x2, y2)
+        const anchorAct = anchorItem.node as MappedAction & { row: number }
+        const firstAct = firstNewBranchItem.node as MappedAction & { row: number }
+        const p = content
+          .append('path')
+          .attr('class', 'afv-edge')
+          .attr('d', branchPath.toString())
+          .attr('fill', 'none')
+          .attr('stroke', actionFlowPalette.arrow)
+          .attr('stroke-width', 1.2)
+          .attr('marker-end', markerUrl)
+          .attr('pointer-events', 'none')
+          .attr('data-from-key', actionKey(anchorAct))
+          .attr('data-to-key', actionKey(firstAct))
+        void p
+      }
+    }
 
     /** 父 Subagent(task) → 子会话首节点 的紫色分叉 */
     for (let i = 0; i < layout.length - 1; i++) {
@@ -1378,6 +1637,7 @@ export default function ActionFlowVisualization({
     flowEndSummary,
     embedded,
     viewportMaxHeight,
+    forkAnchorActionKey,
   ])
 
   /**
