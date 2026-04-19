@@ -12,6 +12,7 @@ import {
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './ActionFlowContextMenu'
+import { actionKey } from '../utils/actionKey'
 
 type FlowNode =
   | { kind: 'end'; row: number }
@@ -606,7 +607,10 @@ function appendOrthoEdge(
   y2: number,
   markerUrl: string,
   stroke: string,
-  strokeWidth: number
+  strokeWidth: number,
+  /** 联动用：from / to action key（end 节点等无 key 时传 null） */
+  fromKey: string | null = null,
+  toKey: string | null = null
 ) {
   const mid = (x1 + x2) / 2
   const path = d3.path()
@@ -614,8 +618,9 @@ function appendOrthoEdge(
   path.lineTo(mid, y1)
   path.lineTo(mid, y2)
   path.lineTo(x2, y2)
-  content
+  const p = content
     .append('path')
+    .attr('class', 'afv-edge')
     .attr('d', path.toString())
     .attr('fill', 'none')
     .attr('stroke', stroke)
@@ -623,6 +628,8 @@ function appendOrthoEdge(
     .attr('marker-end', markerUrl)
     /** 避免边线盖住 action rect，否则悬停/右键命中 path 而非 rect */
     .attr('pointer-events', 'none')
+  if (fromKey) p.attr('data-from-key', fromKey)
+  if (toKey) p.attr('data-to-key', toKey)
 }
 
 function joinStrokeForFanIn(
@@ -651,11 +658,26 @@ function appendOrthoFanIn(
   ghostMarkerUrl: string
 ) {
   if (sources.length === 0) return
+  const targetKey =
+    target.node.kind === 'action'
+      ? actionKey(target.node as MappedAction & { row: number })
+      : null
   if (sources.length === 1) {
     const s = sources[0]!
     const na = s.node as MappedAction & { row: number }
     const { stroke, markerUrl: m } = joinStrokeForFanIn(na, target.node, markerUrl, ghostMarkerUrl)
-    appendOrthoEdge(content, s.x + s.w, s.cy, target.x, target.cy, m, stroke, 1.2)
+    appendOrthoEdge(
+      content,
+      s.x + s.w,
+      s.cy,
+      target.x,
+      target.cy,
+      m,
+      stroke,
+      1.2,
+      actionKey(na),
+      targetKey,
+    )
     return
   }
   const maxEnd = Math.max(...sources.map(s => s.x + s.w))
@@ -668,14 +690,17 @@ function appendOrthoFanIn(
     path.lineTo(bundleX, s.cy)
     path.lineTo(bundleX, target.cy)
     path.lineTo(target.x, target.cy)
-    content
+    const p = content
       .append('path')
+      .attr('class', 'afv-edge')
       .attr('d', path.toString())
       .attr('fill', 'none')
       .attr('stroke', stroke)
       .attr('stroke-width', 1.2)
       .attr('marker-end', m)
       .attr('pointer-events', 'none')
+      .attr('data-from-key', actionKey(na))
+    if (targetKey) p.attr('data-to-key', targetKey)
   }
 }
 
@@ -714,6 +739,19 @@ interface Props {
    * 为 true 时用 CSS 隐藏滚动条（仍可用滚轮滚动）。默认 false，保留系统滚动条以便可见溢出。
    */
   hideScrollbar?: boolean
+  /**
+   * 与左侧 treemap 联动：type-level 选中。匹配的 action group 保持原样，其他 group dim。
+   */
+  highlightedActionType?: string | null
+  /**
+   * 与左侧 treemap 联动：action-level 选中（单个 action 的 actionKey）。
+   * 优先级高于 highlightedActionType；命中时仅该 action 高亮，其他暗化。
+   */
+  highlightedActionKey?: string | null
+  /** 选中位于其他子任务时，本 ActionFlow 整体 dim */
+  dimAll?: boolean
+  /** ActionFlow rect 单击 → action-level 选中 */
+  onSelectAction?: (actionKey: string | null) => void
 }
 
 export default function ActionFlowVisualization({
@@ -731,6 +769,10 @@ export default function ActionFlowVisualization({
   embedded = false,
   viewportMaxHeight,
   hideScrollbar = false,
+  highlightedActionType = null,
+  highlightedActionKey = null,
+  dimAll = false,
+  onSelectAction,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -990,14 +1032,21 @@ export default function ActionFlowVisualization({
               ghostMarkerUrl
             )
           : { stroke: actionFlowPalette.arrow, markerUrl }
-      content
+      const fromKey =
+        a.node.kind === 'action' ? actionKey(a.node as MappedAction & { row: number }) : null
+      const toKey =
+        b.node.kind === 'action' ? actionKey(b.node as MappedAction & { row: number }) : null
+      const p = content
         .append('path')
+        .attr('class', 'afv-edge')
         .attr('d', path.toString())
         .attr('fill', 'none')
         .attr('stroke', segStroke)
         .attr('stroke-width', 1.2)
         .attr('marker-end', segMarker)
         .attr('pointer-events', 'none')
+      if (fromKey) p.attr('data-from-key', fromKey)
+      if (toKey) p.attr('data-to-key', toKey)
     }
 
     layout.forEach((item, layoutIndex) => {
@@ -1026,11 +1075,6 @@ export default function ActionFlowVisualization({
         !highlightActive ||
         !Number.isFinite(act.durationMs) ||
         act.durationMs >= (durationHighlightMinMs as number)
-      const showDurationFocusRing =
-        highlightActive &&
-        matchesDurationHighlight &&
-        !isGhost &&
-        !ghostError
       const tc = tokenColor(colorScale, act.tokenEstimate)
       const sc = effectiveStatusColors(act.status, act.durationMs)
       const errPalette = statusColors('error')
@@ -1057,7 +1101,14 @@ export default function ActionFlowVisualization({
         iconFill = colorMode === 'status' ? sc.icon : actionFlowPalette.green.icon
       }
 
-      const rect = content
+      /** 每个 action 包一个 group：data-action-type 用于 type-level dim；data-action-key 用于 action-level dim 与点击 */
+      const ak = actionKey(act)
+      const actionG = content
+        .append('g')
+        .attr('class', 'afv-action')
+        .attr('data-action-type', act.actionType)
+        .attr('data-action-key', ak)
+      const rect = actionG
         .append('rect')
         .attr('x', nx)
         .attr('y', ny)
@@ -1071,10 +1122,15 @@ export default function ActionFlowVisualization({
         .attr('data-tooltip-id', tooltipId)
         .attr('data-tooltip-html', buildCompactActionTooltipHtml(act, tooltipMessages))
         .attr('data-tooltip-place', 'top')
+      if (onSelectAction) {
+        rect.on('click', (ev: MouseEvent) => {
+          ev.stopPropagation()
+          onSelectAction(ak)
+        })
+      }
+      /** duration 不达标先标记，在统一 dim 流中处理（不再走 rect.opacity + 黑遮罩 + 蓝环的旧风格） */
       if (!matchesDurationHighlight) {
-        rect.attr('opacity', 0.12)
-      } else if (highlightActive) {
-        rect.attr('opacity', 1)
+        actionG.attr('data-duration-dim', '1')
       }
       const durationMeta = durationWidthMeta(durationMode, act.durationMs)
       const overDurationThreshold = !isGhost && durationMeta.overThreshold
@@ -1097,23 +1153,10 @@ export default function ActionFlowVisualization({
         rect.attr('class', sc.isLongRunning ? 'action-flow-running-long' : 'action-flow-running')
       }
 
-      if (showDurationFocusRing) {
-        content
-          .append('rect')
-          .attr('x', nx - 2)
-          .attr('y', ny - 2)
-          .attr('width', w + 4)
-          .attr('height', h + 4)
-          .attr('rx', 6)
-          .attr('fill', 'none')
-          .attr('stroke', '#2563EB')
-          .attr('stroke-width', 2.25)
-          .attr('pointer-events', 'none')
-      }
-
-      if (contentNode) {
+      const actionGNode = actionG.node() as SVGGElement | null
+      if (actionGNode) {
         appendActionFlowIcon(
-          contentNode,
+          actionGNode,
           getActionFlowIconSvg(act.actionType),
           nx + w / 2,
           ny + h / 2,
@@ -1121,21 +1164,10 @@ export default function ActionFlowVisualization({
           `${reactId}-${layoutIndex}-`
         )
       }
-      if (!matchesDurationHighlight) {
-        content
-          .append('rect')
-          .attr('x', nx)
-          .attr('y', ny)
-          .attr('width', w)
-          .attr('height', h)
-          .attr('rx', 4)
-          .attr('fill', '#0f172a')
-          .attr('opacity', 0.5)
-          .attr('pointer-events', 'none')
-      }
+      /** 旧的黑色 50% 遮罩已废弃，duration 不达标统一走 dim 流 */
 
       if (overDurationThreshold && w >= 66) {
-        content
+        actionG
           .append('text')
           .attr('x', nx + 6)
           .attr('y', ny + 10)
@@ -1148,7 +1180,7 @@ export default function ActionFlowVisualization({
       }
 
       if (canContext && w >= MORE_BTN_MIN_W) {
-        const moreG = content
+        const moreG = actionG
           .append('g')
           .attr('class', 'action-flow-more')
           .style('cursor', 'pointer')
@@ -1347,6 +1379,74 @@ export default function ActionFlowVisualization({
     embedded,
     viewportMaxHeight,
   ])
+
+  /**
+   * 统一 dim 流：合并 selection（type / action）、duration 过滤、跨子任务 dim_All。
+   * - dimAll：整张 ActionFlow 整体降透（其他子任务正在被选中）
+   * - selection：type 命中或 action 命中 → 不在命中集合的 group dim
+   * - duration：data-duration-dim=1 的 group dim（旧蓝环 / 黑遮罩 已被替换为这套统一 dim）
+   * - 连线：仅当至少一端在命中集合 → 不 dim；否则 dim
+   * 命中规则：
+   *   - 优先 highlightedActionKey（action 级）→ 命中集合 = { 该 key }
+   *   - 否则 highlightedActionType（type 级）→ 命中集合 = data-action-type === t 的所有 key
+   *   - 都无 → 命中集合 = null（不做联动 dim，仅 duration dim 生效）
+   */
+  useLayoutEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const groups = Array.from(svg.querySelectorAll<SVGGElement>('g.afv-action[data-action-key]'))
+    const edges = Array.from(svg.querySelectorAll<SVGPathElement>('path.afv-edge'))
+    const DIM = '0.18'
+
+    if (dimAll) {
+      svg.style.opacity = '0.35'
+    } else {
+      svg.style.opacity = ''
+    }
+
+    /** 命中集合（action 级直接是单 key；type 级聚合所有同 type 的 key） */
+    let highlightSet: Set<string> | null = null
+    if (highlightedActionKey) {
+      highlightSet = new Set([highlightedActionKey])
+    } else if (highlightedActionType) {
+      highlightSet = new Set()
+      for (const g of groups) {
+        if (g.getAttribute('data-action-type') === highlightedActionType) {
+          const k = g.getAttribute('data-action-key')
+          if (k) highlightSet.add(k)
+        }
+      }
+    }
+
+    for (const g of groups) {
+      const k = g.getAttribute('data-action-key') ?? ''
+      const durationDim = g.getAttribute('data-duration-dim') === '1'
+      const selDim = highlightSet !== null && !highlightSet.has(k)
+      g.style.opacity = (selDim || durationDim) ? DIM : ''
+    }
+
+    for (const e of edges) {
+      const fk = e.getAttribute('data-from-key')
+      const tk = e.getAttribute('data-to-key')
+      let dim = false
+      if (highlightSet !== null) {
+        const fromHit = fk !== null && highlightSet.has(fk)
+        const toHit = tk !== null && highlightSet.has(tk)
+        dim = !fromHit && !toHit
+      }
+      /** 连线也尊重 duration dim：两端都不达标则 dim */
+      if (!dim && (fk || tk)) {
+        const esc = (s: string) =>
+          typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\"')
+        const fromGroup = fk ? svg.querySelector<SVGGElement>(`g.afv-action[data-action-key="${esc(fk)}"]`) : null
+        const toGroup = tk ? svg.querySelector<SVGGElement>(`g.afv-action[data-action-key="${esc(tk)}"]`) : null
+        const fromDur = fromGroup?.getAttribute('data-duration-dim') === '1'
+        const toDur = toGroup?.getAttribute('data-duration-dim') === '1'
+        if (fromDur && toDur) dim = true
+      }
+      e.style.opacity = dim ? DIM : ''
+    }
+  }, [highlightedActionType, highlightedActionKey, dimAll, actions, durationHighlightMinMs])
 
   const mockOffset = mockBranchForkActionIndex !== undefined ? ROW_H : 0
   const contentHeight = layoutEstimate.totalH + mockOffset

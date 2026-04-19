@@ -75,19 +75,74 @@ function withDirectoryHeaders(base: Record<string, string>, directory?: string):
   return out
 }
 
+function normalizeDirectoryLike(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const t = raw.trim()
+  if (!t) return null
+  return t.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function extractProjectDirectory(item: unknown): string | null {
+  if (!item || typeof item !== 'object') return null
+  const obj = item as Record<string, unknown>
+  const candidates = [
+    obj.worktree,
+    obj.directory,
+    obj.path,
+    obj.root,
+    obj.cwd,
+    (obj.path as Record<string, unknown> | undefined)?.directory,
+  ]
+  for (const c of candidates) {
+    const n = normalizeDirectoryLike(c)
+    if (n) return n
+  }
+  return null
+}
+
 // ===== REST API =====
 
 export async function getSessions(options?: { directory?: string }): Promise<OcSession[]> {
-  const params = new URLSearchParams()
-  if (options?.directory) params.set('directory', options.directory)
-  const qs = params.toString()
-  const url = qs ? `${BASE}/session?${qs}` : `${BASE}/session`
+  const url = `${BASE}/session`
   console.log(`${LOG.http} GET 会话列表`, url, options?.directory ? { directory: options.directory } : '')
   const res = await fetch(url, { headers: withDirectoryHeaders({}, options?.directory) })
   if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.status}`)
   const data = await res.json()
   console.log(`${LOG.http} GET /session 响应`, Array.isArray(data) ? `${data.length} sessions` : data)
   return data
+}
+
+/** 从官方 `/project` + `/project/current` 构建项目目录列表（用于左栏目录来源）。 */
+export async function getProjectDirectories(): Promise<string[]> {
+  const set = new Set<string>()
+
+  const pull = async (url: string, label: string) => {
+    const res = await fetch(url, { headers: withDirectoryHeaders({}) })
+    if (!res.ok) {
+      throw new Error(`${label} failed: ${res.status}`)
+    }
+    const data = await res.json()
+    const list = Array.isArray(data) ? data : [data]
+    for (const item of list) {
+      const dir = extractProjectDirectory(item)
+      if (dir) set.add(dir)
+    }
+  }
+
+  try {
+    await pull(`${BASE}/project`, 'GET /project')
+  } catch (e) {
+    console.warn(`${LOG.http} GET /project 失败，忽略并继续`, e)
+  }
+  try {
+    await pull(`${BASE}/project/current`, 'GET /project/current')
+  } catch (e) {
+    console.warn(`${LOG.http} GET /project/current 失败，忽略并继续`, e)
+  }
+
+  const out = [...set]
+  console.log(`${LOG.http} 项目目录列表`, out.length, out)
+  return out
 }
 
 /**

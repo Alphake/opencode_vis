@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { OcSession } from './types/opencode'
 import {
+  getProjectDirectories,
   getSessions,
   getTodos,
   getMessages,
@@ -15,12 +16,16 @@ import {
   subscribeGlobalEvents,
   subscribeWorkspaceEvents,
 } from './services/opencodeApi'
-import { normalizeSessionDirectory, uniqueDirectoriesFromSessions } from './utils/sessionFolders'
+import {
+  normalizeSessionDirectory,
+  uniqueDirectoriesFromSessions,
+} from './utils/sessionFolders'
 import type { MappedAction, OcMessage, OcPendingQuestionRequest, OcTodo } from './types/opencode'
 import type { MessageSendPayload } from './components/MessageInput'
 import Sidebar from './components/Sidebar'
 import MessagePanel from './components/MessagePanel'
 import SubtaskDebugPanel from './components/SubtaskDebugPanel'
+import FullscreenSubtaskPanel from './components/FullscreenSubtaskPanel'
 import ActionAnalysisModal from './components/ActionAnalysisModal'
 import ForkSessionModal from './components/ForkSessionModal'
 import SubtaskMessageConnector from './components/SubtaskMessageConnector'
@@ -51,6 +56,14 @@ const AUTO_ABORT_STUCK_RUNNING_AFTER_MS = 24 * 60 * 60 * 1000
 /** 发送后若 SSE 未及时刷新，轮询 GET /message 直到出现助手消息（与 OpenCode 流式/长耗时兼容） */
 const POLL_ASSISTANT_INTERVAL_MS = 2000
 const POLL_ASSISTANT_MAX_ROUNDS = 90
+
+function parseEnvDirectorySeeds(raw: unknown): string[] {
+  if (typeof raw !== 'string') return []
+  return raw
+    .split(/[;\n,]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
 
 async function pollUntilAssistantMessage(
   sessionId: string,
@@ -109,7 +122,44 @@ function formatMessageForConsole(msg: OcMessage | undefined, index: number) {
   }
 }
 
+function mergeSessionsById(lists: OcSession[][]): OcSession[] {
+  const map = new Map<string, OcSession>()
+  for (const list of lists) {
+    for (const s of list) {
+      const cur = map.get(s.id)
+      if (!cur || s.time.updated >= cur.time.updated) {
+        map.set(s.id, s)
+      }
+    }
+  }
+  return [...map.values()]
+}
+
+async function fetchSessionsAcrossDirectories(seedDirs: Array<string | undefined>): Promise<OcSession[]> {
+  const dedup = Array.from(
+    new Set(
+      seedDirs
+        .map((d) => (typeof d === 'string' ? d.trim() : ''))
+        .filter((d) => d.length > 0),
+    ),
+  )
+  const jobs = dedup.map(async (dir) => {
+    try {
+      return await getSessions({ directory: dir })
+    } catch (e) {
+      console.warn('[fetchSessionsAcrossDirectories] skip directory due to error:', dir, e)
+      return [] as OcSession[]
+    }
+  })
+  const lists = await Promise.all(jobs)
+  return mergeSessionsById(lists)
+}
+
 function App() {
+  const envDirectorySeeds = useMemo(
+    () => parseEnvDirectorySeeds(import.meta.env.VITE_OPENCODE_DIRECTORY_SEEDS),
+    [],
+  )
   const [sessions, setSessions] = useState<OcSession[]>([])
   const [selectedSessionId, setSelectedSessionId] = useState<string>('')
   const [messages, setMessages] = useState<OcMessage[]>([])
@@ -141,6 +191,29 @@ function App() {
   const pendingForkRef = useRef(pendingFork)
   pendingForkRef.current = pendingFork
 
+  const sessionsRef = useRef(sessions)
+  sessionsRef.current = sessions
+
+  const refreshSessions = useCallback(
+    async (extraDirectories?: Array<string | undefined>) => {
+      const base = await getSessions()
+      const discovered = await getProjectDirectories().catch((e) => {
+        console.warn('[refreshSessions] getProjectDirectories failed:', e)
+        return [] as string[]
+      })
+      const extra = await fetchSessionsAcrossDirectories([
+        ...envDirectorySeeds,
+        ...(extraDirectories ?? []),
+        ...discovered,
+      ])
+      const merged = mergeSessionsById([base, extra])
+      setSessions(merged)
+      setApiConnected(true)
+      return merged
+    },
+    [envDirectorySeeds],
+  )
+
   const directories = useMemo(() => {
     const u = uniqueDirectoriesFromSessions(sessions)
     return u.length > 0 ? u : ['']
@@ -156,9 +229,6 @@ function App() {
   const messageScrollRef = useRef<HTMLDivElement>(null)
   const todoPanelScrollRef = useRef<HTMLDivElement>(null)
   const subtaskScrollRef = useRef<HTMLDivElement>(null)
-  const sessionsRef = useRef(sessions)
-  sessionsRef.current = sessions
-
   const selectedSessionIdRef = useRef(selectedSessionId)
   selectedSessionIdRef.current = selectedSessionId
 
@@ -177,12 +247,60 @@ function App() {
     [selectedSessionId],
   )
 
+  /** 子任务 Packing View 全屏开关（独立的 dialog 模式） */
+  const [subtaskFullscreenOpen, setSubtaskFullscreenOpen] = useState(false)
+  /** 子任务面板扩展模式：原地拉宽，每张卡片左侧出 treemap，并接管联动 */
+  const [subtaskPanelExpanded, setSubtaskPanelExpanded] = useState(false)
+  /**
+   * 联动选中：
+   *   - kind 'type'   → 高亮整个 actionType 的所有 action（treemap cell + 所有同类 rect）
+   *   - kind 'action' → 仅高亮单个 action（treemap 该 mini-block + 该 rect）
+   * subtaskIndex 之外的子任务全部 dim。
+   */
+  const [selection, setSelection] = useState<
+    | { kind: 'type'; subtaskIndex: number; actionType: string }
+    | { kind: 'action'; subtaskIndex: number; actionKey: string }
+    | null
+  >(null)
+  const handleSelectActionType = useCallback(
+    (subtaskIndex: number, actionType: string | null) => {
+      setSelection((prev) => {
+        if (actionType === null) return null
+        if (
+          prev &&
+          prev.kind === 'type' &&
+          prev.subtaskIndex === subtaskIndex &&
+          prev.actionType === actionType
+        ) {
+          return null
+        }
+        return { kind: 'type', subtaskIndex, actionType }
+      })
+    },
+    [],
+  )
+  const handleSelectAction = useCallback(
+    (subtaskIndex: number, actionKey: string | null) => {
+      setSelection((prev) => {
+        if (actionKey === null) return null
+        if (
+          prev &&
+          prev.kind === 'action' &&
+          prev.subtaskIndex === subtaskIndex &&
+          prev.actionKey === actionKey
+        ) {
+          return null
+        }
+        return { kind: 'action', subtaskIndex, actionKey }
+      })
+    },
+    [],
+  )
+
   // Load sessions on mount
   useEffect(() => {
-    getSessions()
+    refreshSessions()
       .then((data) => {
-        setSessions(data)
-        setApiConnected(true)
         const sorted = [...data].sort((a, b) => b.time.updated - a.time.updated)
         if (sorted.length > 0) {
           const first = sorted[0]!
@@ -191,7 +309,7 @@ function App() {
         }
       })
       .catch(() => setApiConnected(false))
-  }, [])
+  }, [refreshSessions])
 
   /** 当前选中的 session 已从列表消失时，回退到同文件夹或全局最新；文件夹内无会话且未选中时保持空白 */
   useEffect(() => {
@@ -270,7 +388,9 @@ function App() {
 
       if (eventType.startsWith('message') || eventType.startsWith('session')) {
         console.log('[OpenCode · App] SSE 事件触发刷新消息列表', eventType)
-        getSessions()
+        const root = event as { directory?: string }
+        const eventDir = typeof root.directory === 'string' ? root.directory : undefined
+        refreshSessions(eventDir ? [eventDir] : undefined)
           .then(setSessions)
           .catch(err => console.warn('[SSE] Failed to refresh sessions:', err))
         const dir = sessionsRef.current.find(s => s.id === selectedSessionId)?.directory
@@ -292,7 +412,7 @@ function App() {
     })
 
     return unsubscribe
-  }, [selectedSessionId])
+  }, [selectedSessionId, refreshSessions])
 
   // 并行监听当前 workspace 的 GET /event（仅控制台有输出；handler 空避免与 global 重复刷新 UI）
   useEffect(() => {
@@ -355,7 +475,7 @@ function App() {
       try {
         await abortSession(selectedSessionId, dir)
         const [list, msgs] = await Promise.all([
-          getSessions(),
+          refreshSessions(),
           getMessages(selectedSessionId, 'auto abort stuck running >24h', dir),
         ])
         setSessions(list)
@@ -367,7 +487,7 @@ function App() {
         setAborting(false)
       }
     })()
-  }, [messages, selectedSessionId, aborting])
+  }, [messages, selectedSessionId, aborting, refreshSessions])
 
   useEffect(() => {
     setTodosSnapshotAtMessageIndex({})
@@ -484,6 +604,7 @@ function App() {
   useEffect(() => {
     setLinkedSubtaskIndex(null)
     setTodoPanelRevealGeneration(0)
+    setSelection(null)
   }, [selectedSessionId])
 
   useEffect(() => {
@@ -547,10 +668,10 @@ function App() {
       if (!selectedSessionId) return
       const dir = sessions.find(s => s.id === selectedSessionId)?.directory
       await updateSessionTitle(selectedSessionId, title, dir)
-      const list = await getSessions()
+      const list = await refreshSessions()
       setSessions(list)
     },
-    [selectedSessionId, sessions],
+    [selectedSessionId, sessions, refreshSessions],
   )
 
   const handleQuestionReply = useCallback(async (answers: string[][]) => {
@@ -651,7 +772,7 @@ function App() {
     try {
       await abortSession(selectedSessionId, dir)
       const [list, msgs] = await Promise.all([
-        getSessions(),
+        refreshSessions(),
         getMessages(selectedSessionId, 'abort 后刷新', dir),
       ])
       setSessions(list)
@@ -659,7 +780,7 @@ function App() {
     } finally {
       setAborting(false)
     }
-  }, [selectedSessionId, sessions])
+  }, [selectedSessionId, sessions, refreshSessions])
 
   const selectedSession = sessions.find(s => s.id === selectedSessionId)
 
@@ -683,7 +804,7 @@ function App() {
     try {
       const dir = selectedDirectory || undefined
       const created = await createSession(dir)
-      const list = await getSessions()
+      const list = await refreshSessions([created.directory])
       setSessions(list)
       setApiConnected(true)
       setSelectedDirectory(normalizeSessionDirectory(created.directory))
@@ -694,7 +815,7 @@ function App() {
     } finally {
       setCreatingSession(false)
     }
-  }, [selectedDirectory])
+  }, [selectedDirectory, refreshSessions])
 
   const handleArchiveSession = useCallback(
     async (sessionId: string) => {
@@ -715,7 +836,7 @@ function App() {
           const { [sessionId]: _, ...rest } = prev
           return rest
         })
-        const list = await getSessions()
+        const list = await refreshSessions()
         setSessions(list)
         setApiConnected(true)
         if (list.length === 0) {
@@ -735,7 +856,7 @@ function App() {
         setArchivingSessionId(null)
       }
     },
-    [sessions, selectedSessionId],
+    [sessions, selectedSessionId, refreshSessions],
   )
 
   const handleForkFromAction = useCallback(
@@ -787,7 +908,7 @@ function App() {
           saveForkPanelSnapshotBundle(forked.id, bundle)
         }
 
-        const list = await getSessions()
+        const list = await refreshSessions([forked.directory])
         setSessions(list)
         setApiConnected(true)
         setSelectedDirectory(normalizeSessionDirectory(forked.directory))
@@ -842,7 +963,7 @@ function App() {
         setForkBusy(false)
       }
     },
-    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks],
+    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks, refreshSessions],
   )
 
   const handleAnalyzeFromAction = useCallback((action: MappedAction & { row: number }) => {
@@ -940,12 +1061,13 @@ function App() {
 
         <div
           style={{
-            width: 600,
+            width: subtaskPanelExpanded ? 'min(65vw, 1200px)' : 600,
             flexShrink: 0,
             background: '#FFFFFF',
             borderLeft: '1px solid #E8E8E8',
             display: 'flex',
             flexDirection: 'column',
+            transition: 'width 0.25s ease',
           }}
         >
           <div
@@ -954,13 +1076,96 @@ function App() {
               padding: '0 14px',
               display: 'flex',
               alignItems: 'center',
+              justifyContent: 'space-between',
               borderBottom: '1px solid #E8E8E8',
               fontSize: 12,
               fontWeight: 500,
               color: '#171717',
             }}
           >
-            子任务分组（调试）
+            <span>子任务分组（调试）</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setSubtaskPanelExpanded((v) => !v)
+                  if (subtaskPanelExpanded) setSelection(null)
+                }}
+                aria-label={subtaskPanelExpanded ? '收起 Overview' : '展开 Overview'}
+                title={subtaskPanelExpanded ? '收起 Overview' : '展开 Overview（拉宽面板 + Treemap + 联动）'}
+                disabled={visibleSubtasks.length === 0}
+                style={{
+                  width: 26,
+                  height: 26,
+                  border: 'none',
+                  background: subtaskPanelExpanded ? '#EEF1E5' : 'transparent',
+                  cursor: visibleSubtasks.length === 0 ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: 6,
+                  color: visibleSubtasks.length === 0
+                    ? '#C6C6C6'
+                    : (subtaskPanelExpanded ? '#5A6B41' : '#5C5C5C'),
+                }}
+                onMouseEnter={(e) => {
+                  if (visibleSubtasks.length === 0) return
+                  if (!subtaskPanelExpanded) e.currentTarget.style.background = '#F3F3F3'
+                }}
+                onMouseLeave={(e) => {
+                  if (!subtaskPanelExpanded) e.currentTarget.style.background = 'transparent'
+                }}
+              >
+                {subtaskPanelExpanded ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 3h6v6" />
+                    <path d="M9 21H3v-6" />
+                    <path d="M21 3l-7 7" />
+                    <path d="M3 21l7-7" />
+                  </svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 3H3v6" />
+                    <path d="M15 21h6v-6" />
+                    <path d="M3 3l7 7" />
+                    <path d="M21 21l-7-7" />
+                  </svg>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubtaskFullscreenOpen(true)}
+                aria-label="全屏 Packing View"
+                title="全屏 Packing View"
+                disabled={visibleSubtasks.length === 0}
+                style={{
+                  width: 26,
+                  height: 26,
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: visibleSubtasks.length === 0 ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: 6,
+                  color: visibleSubtasks.length === 0 ? '#C6C6C6' : '#5C5C5C',
+                }}
+                onMouseEnter={(e) => {
+                  if (visibleSubtasks.length === 0) return
+                  e.currentTarget.style.background = '#F3F3F3'
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent'
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 9V3h6" />
+                  <path d="M21 9V3h-6" />
+                  <path d="M3 15v6h6" />
+                  <path d="M21 15v6h-6" />
+                </svg>
+              </button>
+            </div>
           </div>
           <div
             style={{
@@ -982,6 +1187,10 @@ function App() {
               listScrollRef={subtaskScrollRef}
               sessionDirectory={activeSessionDirectory}
               forkPanelSnapshotBundle={forkPanelSnapshotBundle}
+              leadingTreemapSize={subtaskPanelExpanded ? 200 : undefined}
+              selection={selection}
+              onSelectActionType={handleSelectActionType}
+              onSelectAction={handleSelectAction}
             />
           </div>
         </div>
@@ -1005,6 +1214,19 @@ function App() {
         {analysisAction ? (
           <ActionAnalysisModal action={analysisAction} onClose={() => setAnalysisAction(null)} />
         ) : null}
+
+        <FullscreenSubtaskPanel
+          open={subtaskFullscreenOpen}
+          onClose={() => setSubtaskFullscreenOpen(false)}
+          messages={messages}
+          visibleSubtasks={visibleSubtasks}
+          linkedSubtaskIndex={linkedSubtaskIndex}
+          onSelectSubtask={toggleSubtaskLink}
+          onForkFromAction={handleForkFromAction}
+          onAnalyzeFromAction={handleAnalyzeFromAction}
+          sessionDirectory={activeSessionDirectory}
+          forkPanelSnapshotBundle={forkPanelSnapshotBundle}
+        />
       </div>
     </div>
   )

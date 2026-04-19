@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
@@ -15,6 +15,7 @@ import {
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
 import { mergeMessagesForActionTooltipLookup } from '../utils/actionTooltipMapping'
 import ActionFlowVisualization from './ActionFlowVisualization'
+import SubtaskActionTypeTreemap from './SubtaskActionTypeTreemap'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import { getMessages } from '../services/opencodeApi'
 
@@ -42,6 +43,21 @@ interface SubtaskCardProps {
   sessionDirectory?: string
   /** Forked session: local read-only snapshot for comparison (not in model context) */
   forkPanelSnapshotBundle?: ForkPanelSnapshotBundle | null
+  /**
+   * 全屏 packing view 模式：传入正数则在卡片左侧前置一个方形 action-type treemap，
+   * 颜色与右侧 ActionFlow 内每个 block 1:1 一致（共享 colorBy / durationMode 状态）。
+   */
+  leadingTreemapSize?: number
+  /** 当前选中的 actionType（来自 App 的联动状态）；同 type 在 ActionFlow 加亮，其他暗化 */
+  selectedActionType?: string | null
+  /** 当前选中的单个 action key；优先级高于 selectedActionType */
+  selectedActionKey?: string | null
+  /** 选中位于其他子任务卡片时，本卡所有 action 应整体 dim */
+  otherSubtaskHasSelection?: boolean
+  /** treemap cell 点击：传 null 取消选中 */
+  onSelectActionType?: (actionType: string | null) => void
+  /** treemap mini-block 或 ActionFlow rect 单击：传 null 取消选中 */
+  onSelectAction?: (actionKey: string | null) => void
 }
 
 type ColorByMode = 'status' | 'tokens'
@@ -106,10 +122,18 @@ export default function SubtaskCard({
   onAnalyzeFromAction,
   sessionDirectory,
   forkPanelSnapshotBundle = null,
+  leadingTreemapSize,
+  selectedActionType = null,
+  selectedActionKey = null,
+  otherSubtaskHasSelection = false,
+  onSelectActionType,
+  onSelectAction,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [colorBy, setColorBy] = useState<ColorByMode>('status')
+  /** 仅用于 DOM 锚点（fork/scroll 等需要时取 outer wrapper） */
+  const cardRef = useRef<HTMLDivElement | null>(null)
   const [childBranchActions, setChildBranchActions] = useState<(MappedAction & { row: number })[]>([])
   /** task 子会话原文，用于 Changes 合并统计 write/edit 路径 */
   const [childBranchMessages, setChildBranchMessages] = useState<OcMessage[]>([])
@@ -289,37 +313,10 @@ export default function SubtaskCard({
   const changesLabel = String(m.mutatedFileCount)
   /** 无进行中 action 时才显示流程终点黄点（避免子任务一开始就出现「收尾」） */
   const showFlowEndNode = !hasActiveRunningAction && flowActions.length > 0
+  const showLeadingTreemap = typeof leadingTreemapSize === 'number' && leadingTreemapSize > 0
 
-  return (
-    <div
-      data-subtask-card-index={cardIndex ?? displayIndex}
-      onClick={() => onSelectSubtask?.()}
-      style={{
-        boxSizing: 'border-box',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'stretch',
-        minHeight: CARD_MIN_HEIGHT,
-        height: 'auto',
-        flexShrink: 0,
-        padding: '12px 14px',
-        gap: 4,
-        width: '100%',
-        background: '#FCFCFC',
-        borderRadius: 14,
-        marginBottom: 8,
-        fontFamily: fontSans,
-        overflow: 'visible',
-        cursor: onSelectSubtask ? 'pointer' : 'default',
-        transition: 'box-shadow 0.15s ease, border-color 0.15s ease',
-        border: hasLongRunningAction
-          ? (isLinked ? '2px solid #FF6B6B' : '1px solid #FF6B6B')
-          : (isLinked ? `2px solid ${actionFlowPalette.green.stroke}` : '1px solid #DBDBDB'),
-        boxShadow: isLinked
-          ? `0 0 0 3px rgba(145, 163, 123, 0.22)`
-          : 'none',
-      }}
-    >
+  const bodyContent = (
+    <>
       <h3
         style={{
           margin: 0,
@@ -619,6 +616,10 @@ export default function SubtaskCard({
             colorMode={colorBy === 'status' ? 'status' : 'tokens'}
             durationHighlightMinMs={durationHighlightForFlow}
             tooltipMessages={tooltipLookupMessages}
+            highlightedActionType={selectedActionType}
+            highlightedActionKey={selectedActionKey}
+            dimAll={otherSubtaskHasSelection}
+            onSelectAction={onSelectAction}
             onForkFromAction={
               onForkFromAction
                 ? (act) =>
@@ -660,6 +661,93 @@ export default function SubtaskCard({
         <MetricBox label="Time" value={durationLabel} alert={hasLongRunningAction} />
         <MetricBox label="Total Tokens" value={String(m.tokensSegmentSum)} />
         <MetricBox label="Cost" value={formatSubtaskCostDisplay(m)} />
+      </div>
+    </>
+  )
+
+  /** 卡片本体样式（不含 treemap），leading 与 non-leading 共用 */
+  const cardInnerStyle: React.CSSProperties = {
+    boxSizing: 'border-box',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    minHeight: CARD_MIN_HEIGHT,
+    height: 'auto',
+    flexShrink: 0,
+    padding: '12px 14px',
+    gap: 4,
+    width: '100%',
+    minWidth: 0,
+    background: '#FCFCFC',
+    borderRadius: 14,
+    fontFamily: fontSans,
+    overflow: 'visible',
+    cursor: onSelectSubtask ? 'pointer' : 'default',
+    transition: 'box-shadow 0.15s ease, border-color 0.15s ease',
+    border: hasLongRunningAction
+      ? (isLinked ? '2px solid #FF6B6B' : '1px solid #FF6B6B')
+      : (isLinked ? `2px solid ${actionFlowPalette.green.stroke}` : '1px solid #DBDBDB'),
+    boxShadow: isLinked
+      ? `0 0 0 3px rgba(145, 163, 123, 0.22)`
+      : 'none',
+  }
+
+  if (!showLeadingTreemap) {
+    return (
+      <div
+        ref={cardRef}
+        data-subtask-card-index={cardIndex ?? displayIndex}
+        onClick={() => onSelectSubtask?.()}
+        style={{ ...cardInnerStyle, marginBottom: 8 }}
+      >
+        {bodyContent}
+      </div>
+    )
+  }
+
+  /** Leading 模式：treemap 是 card 的 sibling，跟卡片 y 轴居中对齐，挂在 card 框外 */
+  const treemapSide = leadingTreemapSize as number
+  return (
+    <div
+      ref={cardRef}
+      data-subtask-card-index={cardIndex ?? displayIndex}
+      style={{
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 14,
+        marginBottom: 8,
+        width: '100%',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: treemapSide,
+          height: treemapSide,
+          flexShrink: 0,
+          alignSelf: 'center',
+        }}
+      >
+        <SubtaskActionTypeTreemap
+          actions={flowActions}
+          colorMode={colorBy}
+          width={treemapSide}
+          height={treemapSide}
+          tooltipMessages={tooltipLookupMessages}
+          selectedType={selectedActionType}
+          selectedActionKey={selectedActionKey}
+          dimAll={otherSubtaskHasSelection}
+          onSelectType={onSelectActionType}
+          onSelectAction={onSelectAction}
+        />
+      </div>
+      <div
+        onClick={() => onSelectSubtask?.()}
+        style={{ ...cardInnerStyle, flex: 1, minWidth: 0 }}
+      >
+        {bodyContent}
       </div>
     </div>
   )

@@ -1,4 +1,4 @@
-import type { RefObject } from 'react'
+import { Fragment, type RefObject } from 'react'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
@@ -15,6 +15,17 @@ interface SubtaskDebugPanelProps {
   sessionDirectory?: string
   /** Fork 后新 session：本地保存的 fork 前子任务面板可视化快照 */
   forkPanelSnapshotBundle?: ForkPanelSnapshotBundle | null
+  /** 全屏 packing view：>0 时每张子任务卡左侧前置一个 actionType treemap */
+  leadingTreemapSize?: number
+  /** 联动选中：type 级 / action 级 / 无 */
+  selection?:
+    | { kind: 'type'; subtaskIndex: number; actionType: string }
+    | { kind: 'action'; subtaskIndex: number; actionKey: string }
+    | null
+  /** treemap cell 点击回调；传入 null 取消选中 */
+  onSelectActionType?: (subtaskIndex: number, actionType: string | null) => void
+  /** treemap mini-block 或 ActionFlow rect 单击 → action-level 选中 */
+  onSelectAction?: (subtaskIndex: number, actionKey: string | null) => void
 }
 
 export default function SubtaskDebugPanel({
@@ -27,6 +38,10 @@ export default function SubtaskDebugPanel({
   listScrollRef,
   sessionDirectory,
   forkPanelSnapshotBundle = null,
+  leadingTreemapSize,
+  selection = null,
+  onSelectActionType,
+  onSelectAction,
 }: SubtaskDebugPanelProps) {
   return (
     <div
@@ -52,8 +67,8 @@ export default function SubtaskDebugPanel({
           <span style={{ color: '#AAA', fontSize: 11 }}>暂无子任务</span>
         ) : (
           visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => (
+            <Fragment key={st.subtask_id}>
             <SubtaskCard
-              key={st.subtask_id}
               subtask={st}
               messages={messages}
               displayIndex={si}
@@ -64,7 +79,73 @@ export default function SubtaskDebugPanel({
               onAnalyzeFromAction={onAnalyzeFromAction}
               sessionDirectory={sessionDirectory}
               forkPanelSnapshotBundle={forkPanelSnapshotBundle}
+              leadingTreemapSize={leadingTreemapSize}
+              selectedActionType={
+                selection && selection.kind === 'type' && selection.subtaskIndex === sourceIndex
+                  ? selection.actionType
+                  : null
+              }
+              selectedActionKey={
+                selection && selection.kind === 'action' && selection.subtaskIndex === sourceIndex
+                  ? selection.actionKey
+                  : null
+              }
+              /** 跨子任务 dim：选中位于其他 card 时，本 card 内所有 action 暗化 */
+              otherSubtaskHasSelection={
+                selection !== null && selection.subtaskIndex !== sourceIndex
+              }
+              onSelectActionType={
+                onSelectActionType
+                  ? (type) => onSelectActionType(sourceIndex, type)
+                  : undefined
+              }
+              onSelectAction={
+                onSelectAction
+                  ? (key) => onSelectAction(sourceIndex, key)
+                  : undefined
+              }
             />
+            {/**
+             * 仅 leading-treemap 模式下：相邻 treemap 之间画一条向下箭头，提示
+             * 子任务从上到下的时序流转。位置对齐 treemap 列水平中点，与卡片 wrapper 内
+             * 的 treemap 起点（左侧 0）+ treemap_size/2 重合。
+             */}
+            {leadingTreemapSize && si < visibleSubtasks.length - 1 ? (
+              <div
+                aria-hidden
+                style={{
+                  width: '100%',
+                  height: 16,
+                  marginTop: -4,
+                  marginBottom: -4,
+                  pointerEvents: 'none',
+                }}
+              >
+                <svg
+                  width={leadingTreemapSize}
+                  height={16}
+                  style={{ display: 'block' }}
+                >
+                  <line
+                    x1={leadingTreemapSize / 2}
+                    y1={0}
+                    x2={leadingTreemapSize / 2}
+                    y2={11}
+                    stroke="#BFBFBF"
+                    strokeWidth={1.2}
+                  />
+                  <polyline
+                    points={`${leadingTreemapSize / 2 - 3.5},9 ${leadingTreemapSize / 2},14 ${leadingTreemapSize / 2 + 3.5},9`}
+                    fill="none"
+                    stroke="#BFBFBF"
+                    strokeWidth={1.2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
+            ) : null}
+            </Fragment>
           ))
         )}
       </div>
