@@ -49,9 +49,16 @@ const PARALLEL_LANE_DY = ROW_H
 const SESSION_REGION_GAP = 10
 const TOP_PAD = 4
 const MIN_W = 28
-const DURATION_LINEAR_THRESHOLD_MS = 60_000
-const DURATION_MAX_W = 200
-const DURATION_LINEAR_EXTRA_AT_THRESHOLD = 96
+/** Duration mode: √-scale 参考时长（2分钟）——超过此值仍可继续延伸，但增速减缓 */
+const DUR_SQRT_REF_MS = 120_000
+/** Duration mode: 在参考时长处的 block 宽度（仅锚点，无上限封顶） */
+const DUR_BLOCK_REF_W_PX = 160
+/** Duration mode: 间隔 gap scale 的参考时长（1分钟） */
+const DUR_GAP_REF_MS = 60_000
+/** Duration mode: block 间最小视觉间距 */
+const DUR_GAP_MIN_PX = 8
+/** Duration mode: 在参考间隔时长处的 gap 像素（仅锚点，无上限封顶） */
+const DUR_GAP_REF_PX = 80
 const BOTTOM_PAD = 6
 /** 至少两行泳道 + 两块 action 时的最小画布高度，避免空数据时 SVG 塌成几十像素 */
 const MIN_SVG_CONTENT_HEIGHT = TOP_PAD + 2 * ROW_H + 2 * BLOCK_H + BOTTOM_PAD
@@ -66,6 +73,26 @@ const MORE_BTN_MIN_W = 44
 /** 分叉快照中「已不在上下文」的幽灵段：rect / 连线 */
 const FORK_GHOST_STROKE = '#B8B8B8'
 const FORK_GHOST_MARKER_FILL = '#B8B8B8'
+
+/**
+ * Duration mode — block 宽度 √-scale。
+ * domain [0, 2min] → [MIN_W, DUR_BLOCK_REF_W_PX]，clamp=false（超过 2min 继续按 √ 增长）。
+ * √ 形状：相同倍数的时长差异在视觉上始终可见，并且不会像线性那样增长过猛。
+ * 示例（2min 参考）：5s≈45px  30s≈70px  60s≈87px  120s=160px  240s≈215px。
+ */
+const _durWidthScale = d3.scaleSqrt()
+  .domain([0, DUR_SQRT_REF_MS])
+  .range([MIN_W, DUR_BLOCK_REF_W_PX])
+
+/**
+ * Duration mode — 连续 action 之间的「空档时间」→ 视觉 gap px。
+ * domain [0, 1min] → [DUR_GAP_MIN_PX, DUR_GAP_REF_PX]，clamp=false。
+ * 连线长度即为此 gap px，自然编码了 idle 时间。
+ * 示例：0ms≈8px  5s≈28px  30s≈58px  60s≈80px  120s≈110px。
+ */
+const _durGapScale = d3.scaleSqrt()
+  .domain([0, DUR_GAP_REF_MS])
+  .range([DUR_GAP_MIN_PX, DUR_GAP_REF_PX])
 
 function edgeStrokeAndMarker(
   a: MappedAction & { row: number },
@@ -89,18 +116,15 @@ function durationWidthMeta(
 ): { w: number; overThreshold: boolean } {
   if (!durationMode) return { w: MIN_W, overThreshold: false }
   if (!Number.isFinite(durationMs) || durationMs <= 0) return { w: MIN_W, overThreshold: false }
-  const maxExtra = Math.max(0, DURATION_MAX_W - MIN_W)
-  const linearExtra = Math.min(DURATION_LINEAR_EXTRA_AT_THRESHOLD, maxExtra)
-  let extra: number
-  if (durationMs <= DURATION_LINEAR_THRESHOLD_MS) {
-    extra = (durationMs / DURATION_LINEAR_THRESHOLD_MS) * linearExtra
-  } else {
-    const overRatio = durationMs / DURATION_LINEAR_THRESHOLD_MS - 1
-    const softPart = (maxExtra - linearExtra) * (1 - Math.exp(-0.9 * overRatio))
-    extra = linearExtra + softPart
-  }
-  const w = Math.min(DURATION_MAX_W, MIN_W + Math.max(0, extra))
-  return { w, overThreshold: durationMs > DURATION_LINEAR_THRESHOLD_MS }
+  // √-scale：感知均匀，始终能体现差异，无硬阈值截断
+  return { w: _durWidthScale(durationMs), overThreshold: false }
+}
+
+/** Duration mode: 把“距离起点的经过时间”映射为 x 轴偏移（0ms -> 0px）。 */
+function durationElapsedToX(elapsedMs: number): number {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return 0
+  // _durGapScale(0) = DUR_GAP_MIN_PX，因此减去最小值作为原点平移
+  return Math.max(0, _durGapScale(elapsedMs) - DUR_GAP_MIN_PX)
 }
 
 function formatDurationMs(durationMs: number): string {
@@ -546,31 +570,56 @@ function computeLayout(
     }
 
     const childSlotWidth = new Map<string, number>()
+    /** Duration mode: 记录每个 child slot 的时间区间，用于计算相邻 slot 之间的 idle gap */
+    const childSlotTimeRange = new Map<string, { minStart: number; maxEnd: number }>()
     for (const idx of childIndices) {
       const slotKey = childSlotByIndex.get(idx)
       if (!slotKey) continue
-      const w = blockWidth(durationMode, sorted[idx]!.durationMs)
+      const a = sorted[idx]!
+      const w = blockWidth(durationMode, a.durationMs)
       childSlotWidth.set(slotKey, Math.max(childSlotWidth.get(slotKey) ?? 0, w))
+      if (durationMode) {
+        const cur = childSlotTimeRange.get(slotKey)
+        childSlotTimeRange.set(slotKey, {
+          minStart: Math.min(cur?.minStart ?? Infinity, a.sortTime),
+          maxEnd: Math.max(cur?.maxEnd ?? -Infinity, a.sortTime + Math.max(0, a.durationMs)),
+        })
+      }
     }
     const childSlotStartX = new Map<string, number>()
     let childCursor = 0
     for (let s = 0; s < nextChildSlot; s++) {
       const slotKey = `child:${s}`
       childSlotStartX.set(slotKey, childCursor)
-      childCursor += (childSlotWidth.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
+      let interSlotGap = TIMELINE_STEP_GAP
+      if (durationMode && s + 1 < nextChildSlot) {
+        const nextKey = `child:${s + 1}`
+        const thisRange = childSlotTimeRange.get(slotKey)
+        const nextRange = childSlotTimeRange.get(nextKey)
+        if (thisRange && nextRange) {
+          const gapMs = Math.max(0, nextRange.minStart - thisRange.maxEnd)
+          interSlotGap = _durGapScale(gapMs)
+        }
+      }
+      childCursor += (childSlotWidth.get(slotKey) ?? MIN_W) + interSlotGap
     }
     for (const idx of childIndices) {
       const slotKey = childSlotByIndex.get(idx)
       childLocalXByIndex.set(idx, slotKey ? (childSlotStartX.get(slotKey) ?? 0) : 0)
     }
-    const childSpanRight = Math.max(0, childCursor - TIMELINE_STEP_GAP)
+    const lastChildGap = durationMode ? DUR_GAP_MIN_PX : TIMELINE_STEP_GAP
+    const childSpanRight = Math.max(0, childCursor - lastChildGap)
     childSpanByCallID.set(callID, childSpanRight)
   }
 
   /** 根轴每个 slot 的有效跨度：max(父块宽, 父task->子session全程宽) */
   const rootSlotEffectiveSpan = new Map<string, number>()
+  /** Duration mode: 记录每个 root slot 的时间区间，用于计算相邻 slot 间的 idle gap */
+  const rootSlotTimeRange = new Map<string, { minStart: number; maxEnd: number }>()
   for (const [slotKey, indices] of rootSlotIndices.entries()) {
     let span = MIN_W
+    let minStart = Infinity
+    let maxEnd = -Infinity
     for (const idx of indices) {
       const a = sorted[idx]!
       const w = blockWidth(durationMode, a.durationMs)
@@ -579,8 +628,15 @@ function computeLayout(
         const childSpan = childSpanByCallID.get(a.callID) ?? 0
         span = Math.max(span, w + TIMELINE_STEP_GAP + childSpan)
       }
+      if (durationMode) {
+        minStart = Math.min(minStart, a.sortTime)
+        maxEnd = Math.max(maxEnd, a.sortTime + Math.max(0, a.durationMs))
+      }
     }
     rootSlotEffectiveSpan.set(slotKey, span)
+    if (durationMode && Number.isFinite(minStart)) {
+      rootSlotTimeRange.set(slotKey, { minStart, maxEnd })
+    }
   }
 
   const rootSlotStartX = new Map<string, number>()
@@ -588,7 +644,17 @@ function computeLayout(
   for (let s = 0; s < nextRootSlot; s++) {
     const slotKey = `root:${s}`
     rootSlotStartX.set(slotKey, rootCursor)
-    rootCursor += (rootSlotEffectiveSpan.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
+    let interSlotGap = TIMELINE_STEP_GAP
+    if (durationMode && s + 1 < nextRootSlot) {
+      const nextKey = `root:${s + 1}`
+      const thisRange = rootSlotTimeRange.get(slotKey)
+      const nextRange = rootSlotTimeRange.get(nextKey)
+      if (thisRange && nextRange) {
+        const gapMs = Math.max(0, nextRange.minStart - thisRange.maxEnd)
+        interSlotGap = _durGapScale(gapMs)
+      }
+    }
+    rootCursor += (rootSlotEffectiveSpan.get(slotKey) ?? MIN_W) + interSlotGap
   }
   for (const idx of rootIndices) {
     const slotKey = rootSlotByIndex.get(idx)
@@ -697,8 +763,12 @@ function computeLayout(
     /** branch slot 有效宽度需考虑「新分支 Subagent 的子 session 宽度」，否则下一个 branch slot
      *  会与子 session 横向重叠（与 root 轨同样的逻辑）。 */
     const branchSlotEffectiveSpan = new Map<string, number>()
+    /** Duration mode: 记录每个 branch slot 的时间区间 */
+    const branchSlotTimeRange = new Map<string, { minStart: number; maxEnd: number }>()
     for (const [slotKey, indices] of branchSlotIndices.entries()) {
       let span = MIN_W
+      let minStart = Infinity
+      let maxEnd = -Infinity
       for (const idx of indices) {
         const a = sorted[idx]!
         const w = blockWidth(durationMode, a.durationMs)
@@ -707,22 +777,40 @@ function computeLayout(
           const childSpan = childSpanByCallID.get(a.callID) ?? 0
           span = Math.max(span, w + TIMELINE_STEP_GAP + childSpan)
         }
+        if (durationMode) {
+          minStart = Math.min(minStart, a.sortTime)
+          maxEnd = Math.max(maxEnd, a.sortTime + Math.max(0, a.durationMs))
+        }
       }
       branchSlotEffectiveSpan.set(slotKey, span)
+      if (durationMode && Number.isFinite(minStart)) {
+        branchSlotTimeRange.set(slotKey, { minStart, maxEnd })
+      }
     }
     const branchSlotStartX = new Map<string, number>()
     let branchCursor = 0
     for (let s = 0; s < nextBranchSlot; s++) {
       const slotKey = `branch:${s}`
       branchSlotStartX.set(slotKey, branchCursor)
-      branchCursor += (branchSlotEffectiveSpan.get(slotKey) ?? MIN_W) + TIMELINE_STEP_GAP
+      let interSlotGap = TIMELINE_STEP_GAP
+      if (durationMode && s + 1 < nextBranchSlot) {
+        const nextKey = `branch:${s + 1}`
+        const thisRange = branchSlotTimeRange.get(slotKey)
+        const nextRange = branchSlotTimeRange.get(nextKey)
+        if (thisRange && nextRange) {
+          const gapMs = Math.max(0, nextRange.minStart - thisRange.maxEnd)
+          interSlotGap = _durGapScale(gapMs)
+        }
+      }
+      branchCursor += (branchSlotEffectiveSpan.get(slotKey) ?? MIN_W) + interSlotGap
     }
     for (const idx of branchIndices) {
       const slotKey = branchSlotByIndex.get(idx)
       const localX = slotKey ? (branchSlotStartX.get(slotKey) ?? 0) : 0
       actionXBySortedIndex.set(idx, forkBaseX + localX)
     }
-    forkBranchRight = forkBaseX + Math.max(0, branchCursor - TIMELINE_STEP_GAP)
+    const lastBranchGap = durationMode ? DUR_GAP_MIN_PX : TIMELINE_STEP_GAP
+    forkBranchRight = forkBaseX + Math.max(0, branchCursor - lastBranchGap)
 
     /**
      * 双轨对齐：ghost 走的根轴 slot 与新分支走的 branch slot 是两套独立累计的 cursor，
@@ -807,6 +895,20 @@ function computeLayout(
   }
 
   /**
+   * Duration mode：x 轴由真实开始时间决定（按 sortTime），不再要求并行 lane 左对齐。
+   * 这样同一时刻开始的动作才会对齐，稍晚开始的并行动作会自然向右偏移。
+   */
+  if (durationMode) {
+    const minStart = sorted.reduce((m, a) => Math.min(m, a.sortTime), Infinity)
+    const safeMinStart = Number.isFinite(minStart) ? minStart : 0
+    for (let i = 0; i < sorted.length; i++) {
+      const a = sorted[i]!
+      const elapsedMs = Math.max(0, a.sortTime - safeMinStart)
+      actionXBySortedIndex.set(i, MARGIN_LEFT + durationElapsedToX(elapsedMs))
+    }
+  }
+
+  /**
    * 两条支线各自的 end x：
    *  - main：根轴游标（rootCursor 已是最右 root slot 右缘 + TIMELINE_STEP_GAP）。
    *    需要进一步拉到「所有非新分支动作」的实际最右（包括历史子 session 末端）以避免线条穿过子 session。
@@ -822,7 +924,15 @@ function computeLayout(
     if (r > historicalRightmost) historicalRightmost = r
   }
   const endXMain = historicalRightmost + TIMELINE_STEP_GAP
-  const endXForkBranch = hasNewBranchAction ? forkBranchRight + TIMELINE_STEP_GAP : endXMain
+  const branchRightmost = sorted.reduce((maxR, a, idx) => {
+    if (!isNewBranchAction(a)) return maxR
+    const x = actionXBySortedIndex.get(idx)
+    if (x == null) return maxR
+    return Math.max(maxR, x + blockWidth(durationMode, a.durationMs))
+  }, MARGIN_LEFT)
+  const endXForkBranch = hasNewBranchAction
+    ? (durationMode ? branchRightmost + TIMELINE_STEP_GAP : forkBranchRight + TIMELINE_STEP_GAP)
+    : endXMain
 
   const sessionTopY = new Map<string, number>()
   let sessionY = TOP_PAD
@@ -1910,8 +2020,8 @@ export default function ActionFlowVisualization({
       }
       /** 过滤状态显式写入，避免旧 DOM 复用时出现残留 dim */
       actionG.attr('data-filter-dim', matchesHighlight ? '0' : '1')
-      const durationMeta = durationWidthMeta(durationMode, act.durationMs)
-      const overDurationThreshold = !isGhost && durationMeta.overThreshold
+      // durationWidthMeta 现在只在 packing 模式中使用；timeline duration 模式的宽度来自 layout
+      const overDurationThreshold = false
       const canContext =
         act.messageID && (onForkFromAction || onAnalyzeFromAction) && act.forkGhost !== true
       const rectEl = rect.node() as SVGRectElement
@@ -1944,18 +2054,17 @@ export default function ActionFlowVisualization({
           iconBox,
         )
       }
-      /** 旧的黑色 50% 遮罩已废弃，duration 不达标统一走 dim 流 */
-
-      if (overDurationThreshold && w >= 66) {
+      /** Duration mode: 块够宽时在左上角显示实际时长（替代旧的 >60s 阈值徽标） */
+      if (durationMode && !isGhost && !isPackingLayout && w >= 52 && act.durationMs > 0) {
         actionG
           .append('text')
           .attr('x', nx + 6)
           .attr('y', ny + 10)
           .attr('font-size', 9)
-          .attr('font-weight', 700)
-          .attr('fill', '#B45309')
+          .attr('font-weight', 600)
+          .attr('fill', '#64748B')
           .attr('font-family', SVG_FONT_SANS)
-          .text(`>${Math.round(DURATION_LINEAR_THRESHOLD_MS / 1000)}s`)
+          .text(formatDurationMs(act.durationMs))
           .attr('pointer-events', 'none')
       }
 
