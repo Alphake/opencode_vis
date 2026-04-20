@@ -60,9 +60,12 @@ interface SubtaskCardProps {
   onSelectAction?: (actionKey: string | null) => void
   /** ActionFlow rect 单击：仅同步 treemap 选中，不触发 flow 筛选 */
   onSelectActionFromFlow?: (actionKey: string | null) => void
+  /** 由父级统一控制：timeline / packing */
+  flowLayoutMode?: 'timeline' | 'packing'
 }
 
 type ColorByMode = 'status' | 'tokens'
+type FilterMode = 'duration' | 'tokens'
 
 function MetricBox({ label, value, alert }: { label: string; value: string; alert?: boolean }) {
   return (
@@ -132,10 +135,12 @@ export default function SubtaskCard({
   onSelectActionType,
   onSelectAction,
   onSelectActionFromFlow,
+  flowLayoutMode = 'timeline',
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [colorBy, setColorBy] = useState<ColorByMode>('status')
+  const [filterMode, setFilterMode] = useState<FilterMode>('duration')
   /** 仅用于 DOM 锚点（fork/scroll 等需要时取 outer wrapper） */
   const cardRef = useRef<HTMLDivElement | null>(null)
   const [childBranchActions, setChildBranchActions] = useState<(MappedAction & { row: number })[]>([])
@@ -248,8 +253,16 @@ export default function SubtaskCard({
     if (!vals.length) return null
     return { min: Math.min(...vals), max: Math.max(...vals) }
   }, [flowActions])
+  const tokenDomain = useMemo(() => {
+    const vals = flowActions
+      .map((a) => a.tokenEstimate)
+      .filter((v): v is number => Number.isFinite(v) && v >= 0)
+    if (!vals.length) return null
+    return { min: Math.min(...vals), max: Math.max(...vals) }
+  }, [flowActions])
   const [durationHighlightMinMs, setDurationHighlightMinMs] = useState(0)
-  const [durationFilterTouched, setDurationFilterTouched] = useState(false)
+  const [tokenHighlightMin, setTokenHighlightMin] = useState(0)
+  const [filterTouched, setFilterTouched] = useState(false)
   const subtaskSig = useMemo(() => {
     const ids = subtask.assistantMessageIndices
     const first = ids[0] ?? -1
@@ -257,8 +270,9 @@ export default function SubtaskCard({
     return `${subtask.subtask_id}:${first}:${last}:${ids.length}`
   }, [subtask.subtask_id, subtask.assistantMessageIndices])
   useEffect(() => {
-    setDurationFilterTouched(false)
+    setFilterTouched(false)
     setDurationHighlightMinMs(0)
+    setTokenHighlightMin(0)
   }, [subtaskSig])
   useEffect(() => {
     if (!durationDomain) {
@@ -270,30 +284,62 @@ export default function SubtaskCard({
       return prev
     })
   }, [durationDomain])
+  useEffect(() => {
+    if (!tokenDomain) {
+      setTokenHighlightMin(0)
+      return
+    }
+    setTokenHighlightMin((prev) => {
+      if (prev < tokenDomain.min || prev > tokenDomain.max) return tokenDomain.min
+      return prev
+    })
+  }, [tokenDomain])
   const durationHighlightStep = useMemo(() => {
     if (!durationDomain) return 1
     return Math.max(1, Math.round((durationDomain.max - durationDomain.min) / 240))
   }, [durationDomain])
-  const effectiveDurationMin = useMemo(() => {
-    if (!durationDomain) return 0
-    return durationFilterTouched ? durationHighlightMinMs : durationDomain.min
-  }, [durationDomain, durationFilterTouched, durationHighlightMinMs])
-  const durationDisplayMs = useMemo(() => {
-    if (!durationDomain) return 0
-    return durationFilterTouched ? durationHighlightMinMs : durationDomain.max
-  }, [durationDomain, durationFilterTouched, durationHighlightMinMs])
-  const matchedLongActionCount = useMemo(() => {
-    if (!durationDomain) return flowActions.length
+  const tokenHighlightStep = useMemo(() => {
+    if (!tokenDomain) return 1
+    return Math.max(1, Math.round((tokenDomain.max - tokenDomain.min) / 240))
+  }, [tokenDomain])
+  const activeFilterDomain = filterMode === 'duration' ? durationDomain : tokenDomain
+  const activeFilterStep = filterMode === 'duration' ? durationHighlightStep : tokenHighlightStep
+  const activeFilterValue = filterMode === 'duration' ? durationHighlightMinMs : tokenHighlightMin
+  const effectiveFilterMin = useMemo(() => {
+    if (!activeFilterDomain) return 0
+    return filterTouched ? activeFilterValue : activeFilterDomain.min
+  }, [activeFilterDomain, filterTouched, activeFilterValue])
+  const matchedActionCount = useMemo(() => {
+    if (filterMode === 'duration') {
+      if (!durationDomain) return flowActions.length
+      return flowActions.filter(
+        (a) => Number.isFinite(a.durationMs) && a.durationMs >= effectiveFilterMin
+      ).length
+    }
+    if (!tokenDomain) return flowActions.length
     return flowActions.filter(
-      (a) => Number.isFinite(a.durationMs) && a.durationMs >= effectiveDurationMin
+      (a) => Number.isFinite(a.tokenEstimate) && a.tokenEstimate >= effectiveFilterMin
     ).length
-  }, [flowActions, durationDomain, effectiveDurationMin])
-  /** 仅当用户把阈值高于数据下界时才暗化/蓝环；停在默认下界时与未筛选一致 */
+  }, [filterMode, flowActions, durationDomain, tokenDomain, effectiveFilterMin])
+  const activeFilterMaxLabel = useMemo(() => {
+    if (!activeFilterDomain) return ''
+    if (filterMode === 'duration') return formatDurationMs(activeFilterDomain.max)
+    return `${Math.round(activeFilterDomain.max)} tok`
+  }, [filterMode, activeFilterDomain])
+  /** 仅当用户把阈值高于数据下界时才触发 dim；停在默认下界时与未筛选一致 */
   const durationHighlightForFlow =
-    durationFilterTouched &&
+    filterMode === 'duration' &&
+    filterTouched &&
     durationDomain != null &&
     durationHighlightMinMs > durationDomain.min
       ? durationHighlightMinMs
+      : null
+  const tokenHighlightForFlow =
+    filterMode === 'tokens' &&
+    filterTouched &&
+    tokenDomain != null &&
+    tokenHighlightMin > tokenDomain.min
+      ? tokenHighlightMin
       : null
 
   /** 与 `flowActions` 中 `partId` 查找一致：父段消息 + 子会话拉取消息 */
@@ -346,6 +392,10 @@ export default function SubtaskCard({
     }
 
     const anchorActionKey = actionKey(preForkAndAnchor[preForkAndAnchor.length - 1]!)
+    /** 当前 session 语义：fork 前 + 当前分支（用于 treemap / 统计 / 选中联动） */
+    const sessionActions = [...preForkAndAnchor, ...postAnchorCurrent].sort(
+      (x, y) => x.sortTime - y.sortTime,
+    )
 
     /** 锚点之后的旧轨迹：snapshot 数据，打 forkGhost 标 */
     const ghostSuffix = oldActions
@@ -359,7 +409,7 @@ export default function SubtaskCard({
       (x, y) => x.sortTime - y.sortTime,
     )
     const mergedTooltips = [...b.snapshot.tooltipMessages, ...tooltipLookupMessages]
-    return { merged, mergedTooltips, anchorActionKey }
+    return { merged, mergedTooltips, anchorActionKey, sessionActions }
   }, [forkPanelSnapshotBundle, subtask.subtask_id, displayIndex, flowActions, tooltipLookupMessages])
   const hasActiveRunningAction = useMemo(
     () => flowActions.some((a) => a.status === 'running' || a.status === 'pending'),
@@ -453,7 +503,6 @@ export default function SubtaskCard({
           width: '100%',
           flexShrink: 0,
           minWidth: 0,
-          overflowX: 'auto',
         }}
       >
         <div
@@ -461,185 +510,276 @@ export default function SubtaskCard({
             display: 'flex',
             flexDirection: 'row',
             alignItems: 'center',
+            flexWrap: 'nowrap',
             gap: 8,
             flexShrink: 0,
           }}
         >
-          <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
-            Actions duration
-          </span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={actionsDurationOn}
-            onClick={() => setActionsDurationOn(v => !v)}
+          <div
             style={{
-              width: 26,
-              height: 13,
-              borderRadius: 80,
-              background: actionsDurationOn ? '#2B2B2B' : '#8A8A8A',
-              border: 'none',
-              padding: 2,
-              cursor: 'pointer',
               display: 'flex',
+              flexDirection: 'row',
               alignItems: 'center',
-              justifyContent: actionsDurationOn ? 'flex-end' : 'flex-start',
+              gap: 8,
             }}
           >
-            <span
-              style={{
-                width: 9,
-                height: 9,
-                borderRadius: '50%',
-                background: '#FFFFFF',
-                display: 'block',
-                flexShrink: 0,
-              }}
-            />
-          </button>
-        </div>
-
-        <div
-          style={{
-            width: 1,
-            height: 14,
-            background: '#DBDBDB',
-            flexShrink: 0,
-          }}
-        />
-
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 6,
-            flexShrink: 0,
-          }}
-        >
-          <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
-            Actions color
-          </span>
-          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
+              Actions duration
+            </span>
             <button
               type="button"
-              onClick={() => setColorBy('status')}
+              role="switch"
+              aria-checked={actionsDurationOn}
+              onClick={() => setActionsDurationOn(v => !v)}
               style={{
-                display: 'flex',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 4,
-                background: 'none',
+                width: 26,
+                height: 13,
+                borderRadius: 80,
+                background: actionsDurationOn ? '#2B2B2B' : '#8A8A8A',
                 border: 'none',
+                padding: 2,
                 cursor: 'pointer',
-                padding: 0,
-                fontFamily: fontSans,
-                fontSize: 11,
-                lineHeight: '16px',
-                color: '#2B2B2B',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: actionsDurationOn ? 'flex-end' : 'flex-start',
               }}
             >
               <span
                 style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 3,
-                  boxSizing: 'border-box',
-                  background: colorBy === 'status' ? '#C6C6C6' : 'transparent',
-                  border: colorBy === 'status' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
+                  width: 9,
+                  height: 9,
+                  borderRadius: '50%',
+                  background: '#FFFFFF',
+                  display: 'block',
+                  flexShrink: 0,
                 }}
               />
-              status
-            </button>
-            <button
-              type="button"
-              onClick={() => setColorBy('tokens')}
-              style={{
-                display: 'flex',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 4,
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                padding: 0,
-                fontFamily: fontSans,
-                fontSize: 11,
-                lineHeight: '16px',
-                color: colorBy === 'tokens' ? '#2B2B2B' : '#C6C6C6',
-              }}
-            >
-              <span
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 3,
-                  boxSizing: 'border-box',
-                  background: colorBy === 'tokens' ? '#C6C6C6' : 'transparent',
-                  border: colorBy === 'tokens' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
-                }}
-              />
-              tokens
             </button>
           </div>
-        </div>
-
-        {durationDomain && (
+          <div
+            style={{
+              width: 1,
+              height: 14,
+              background: '#DBDBDB',
+              flexShrink: 0,
+            }}
+          />
           <div
             style={{
               display: 'flex',
               flexDirection: 'row',
               alignItems: 'center',
               gap: 6,
+            }}
+          >
+            <span style={{ fontSize: 10, fontWeight: 400, lineHeight: '14px', color: '#2B2B2B' }}>
+              Actions color
+            </span>
+            <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setColorBy('status')}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                  fontFamily: fontSans,
+                  fontSize: 11,
+                  lineHeight: '16px',
+                  color: '#2B2B2B',
+                }}
+              >
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: 3,
+                    boxSizing: 'border-box',
+                    background: colorBy === 'status' ? '#C6C6C6' : 'transparent',
+                    border: colorBy === 'status' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
+                  }}
+                />
+                status
+              </button>
+              <button
+                type="button"
+                onClick={() => setColorBy('tokens')}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                  fontFamily: fontSans,
+                  fontSize: 11,
+                  lineHeight: '16px',
+                  color: colorBy === 'tokens' ? '#2B2B2B' : '#C6C6C6',
+                }}
+              >
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: 3,
+                    boxSizing: 'border-box',
+                    background: colorBy === 'tokens' ? '#C6C6C6' : 'transparent',
+                    border: colorBy === 'tokens' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
+                  }}
+                />
+                tokens
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {activeFilterDomain && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 5,
               minWidth: 0,
-              flexShrink: 1,
+              flexWrap: 'nowrap',
+              flex: '1 1 auto',
               marginLeft: 'auto',
             }}
           >
+            <div
+              style={{
+                width: 1,
+                height: 14,
+                background: '#DBDBDB',
+                flexShrink: 0,
+                marginRight: 2,
+              }}
+            />
             <span
               style={{
-                fontSize: 9,
-                fontWeight: 500,
-                lineHeight: '12px',
-                color: '#6A6A6A',
+                fontSize: 10,
+                fontWeight: 400,
+                lineHeight: '14px',
+                color: '#2B2B2B',
                 flexShrink: 0,
               }}
             >
               Filter
             </span>
+            <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <button
+                type="button"
+                onClick={() => setFilterMode('duration')}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 3,
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                  fontFamily: fontSans,
+                  fontSize: 10,
+                  lineHeight: '14px',
+                  color: filterMode === 'duration' ? '#2B2B2B' : '#C6C6C6',
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    boxSizing: 'border-box',
+                    background: filterMode === 'duration' ? '#C6C6C6' : 'transparent',
+                    border: filterMode === 'duration' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
+                  }}
+                />
+                duration
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilterMode('tokens')}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 3,
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                  fontFamily: fontSans,
+                  fontSize: 10,
+                  lineHeight: '14px',
+                  color: filterMode === 'tokens' ? '#2B2B2B' : '#C6C6C6',
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    boxSizing: 'border-box',
+                    background: filterMode === 'tokens' ? '#C6C6C6' : 'transparent',
+                    border: filterMode === 'tokens' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
+                  }}
+                />
+                tokens
+              </button>
+            </div>
             <input
               className="subtask-card-duration-filter-range"
               type="range"
-              min={durationDomain.min}
-              max={durationDomain.max}
-              step={durationHighlightStep}
-              value={durationHighlightMinMs}
+              min={activeFilterDomain.min}
+              max={activeFilterDomain.max}
+              step={activeFilterStep}
+              value={activeFilterValue}
               onChange={(e) => {
-                setDurationFilterTouched(true)
-                setDurationHighlightMinMs(Number(e.target.value))
+                setFilterTouched(true)
+                if (filterMode === 'duration') {
+                  setDurationHighlightMinMs(Number(e.target.value))
+                  return
+                }
+                setTokenHighlightMin(Number(e.target.value))
               }}
-              title="Time filter — minimum duration to highlight"
-              aria-label="Time filter: minimum duration to highlight"
+              title={
+                filterMode === 'duration'
+                  ? 'Time filter — minimum duration to highlight'
+                  : 'Token filter — minimum tokens to highlight'
+              }
+              aria-label={
+                filterMode === 'duration'
+                  ? 'Time filter: minimum duration to highlight'
+                  : 'Token filter: minimum tokens to highlight'
+              }
               style={{
-                width: 120,
-                minWidth: 64,
-                maxWidth: 200,
-                flex: '1 1 80px',
+                minWidth: 56,
+                flex: '1 1 96px',
+                maxWidth: 140,
                 height: 14,
                 verticalAlign: 'middle',
               }}
             />
             <span
               style={{
-                fontSize: 9,
+                fontSize: 10,
                 fontWeight: 500,
-                lineHeight: '12px',
+                lineHeight: '14px',
                 color: '#6A6A6A',
                 whiteSpace: 'nowrap',
-                flexShrink: 0,
+                flexShrink: 1,
+                minWidth: 0,
               }}
             >
-              {formatDurationMs(durationDisplayMs)} · {matchedLongActionCount}/{flowActions.length}
+              {activeFilterMaxLabel}·{matchedActionCount}/{flowActions.length}
             </span>
           </div>
         )}
@@ -668,15 +808,17 @@ export default function SubtaskCard({
               durationMode={actionsDurationOn}
               colorMode={colorBy === 'status' ? 'status' : 'tokens'}
               durationHighlightMinMs={durationHighlightForFlow}
+              tokenHighlightMin={tokenHighlightForFlow}
               tooltipMessages={renderTooltips}
               highlightedActionType={selectedActionType}
               highlightedActionKey={flowHighlightedActionKey}
               dimAll={otherSubtaskHasSelection}
               onSelectAction={onSelectActionFromFlow}
               forkAnchorActionKey={forkAnchor}
+              layoutMode={flowLayoutMode}
               onForkFromAction={handleForkFromActionWrapped}
               onAnalyzeFromAction={onAnalyzeFromAction}
-              showFlowEndNode={showFlowEndNode}
+              showFlowEndNode={flowLayoutMode === 'timeline' ? showFlowEndNode : false}
               flowEndSummary={flowEndSummary}
             />
           )
@@ -769,11 +911,11 @@ export default function SubtaskCard({
         }}
       >
         <SubtaskActionTypeTreemap
-          actions={flowActions}
+          actions={forkMergedFlow?.sessionActions ?? flowActions}
           colorMode={colorBy}
           width={treemapSide}
           height={treemapSide}
-          tooltipMessages={tooltipLookupMessages}
+          tooltipMessages={forkMergedFlow?.mergedTooltips ?? tooltipLookupMessages}
           selectedType={selectedActionType}
           selectedActionKey={selectedActionKey}
           dimAll={otherSubtaskHasSelection}

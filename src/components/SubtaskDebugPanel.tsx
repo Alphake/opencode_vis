@@ -30,6 +30,8 @@ interface SubtaskDebugPanelProps {
     actionKey: string | null,
     source?: 'treemap' | 'flow',
   ) => void
+  /** 全局布局模式（由子任务面板头部统一切换） */
+  flowLayoutMode?: 'timeline' | 'packing'
 }
 
 export default function SubtaskDebugPanel({
@@ -46,6 +48,7 @@ export default function SubtaskDebugPanel({
   selection = null,
   onSelectActionType,
   onSelectAction,
+  flowLayoutMode = 'timeline',
 }: SubtaskDebugPanelProps) {
   return (
     <div
@@ -124,6 +127,7 @@ export default function SubtaskDebugPanel({
                   ? (key) => onSelectAction(sourceIndex, key, 'flow')
                   : undefined
               }
+              flowLayoutMode={flowLayoutMode}
             />
             {/**
              * 仅 leading-treemap 模式下：相邻 treemap 之间画一条向下箭头，提示

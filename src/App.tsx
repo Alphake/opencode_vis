@@ -251,6 +251,8 @@ function App() {
   const [subtaskFullscreenOpen, setSubtaskFullscreenOpen] = useState(false)
   /** 子任务面板扩展模式：原地拉宽，每张卡片左侧出 treemap，并接管联动 */
   const [subtaskPanelExpanded, setSubtaskPanelExpanded] = useState(false)
+  /** 右侧子任务面板全局布局模式（作用于所有子任务卡） */
+  const [subtaskFlowLayoutMode, setSubtaskFlowLayoutMode] = useState<'timeline' | 'packing'>('timeline')
   /**
    * 联动选中：
    *   - kind 'type'   → 高亮整个 actionType 的所有 action（treemap cell + 所有同类 rect）
@@ -1065,7 +1067,7 @@ function App() {
 
         <div
           style={{
-            width: subtaskPanelExpanded ? 'min(65vw, 1200px)' : 600,
+            width: subtaskPanelExpanded ? 'min(70vw, 1260px)' : 630,
             flexShrink: 0,
             background: '#FFFFFF',
             borderLeft: '1px solid #E8E8E8',
@@ -1087,7 +1089,73 @@ function App() {
               color: '#171717',
             }}
           >
-            <span>子任务分组（调试）</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span>子任务分组（调试）</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setSubtaskFlowLayoutMode('timeline')}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: 0,
+                    fontSize: 11,
+                    lineHeight: '16px',
+                    color: subtaskFlowLayoutMode === 'timeline' ? '#2B2B2B' : '#A3A3A3',
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: 3,
+                      boxSizing: 'border-box',
+                      background: subtaskFlowLayoutMode === 'timeline' ? '#C6C6C6' : 'transparent',
+                      border:
+                        subtaskFlowLayoutMode === 'timeline'
+                          ? '1px solid #8A8A8A'
+                          : '1px solid #C6C6C6',
+                    }}
+                  />
+                  timeline
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSubtaskFlowLayoutMode('packing')}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: 0,
+                    fontSize: 11,
+                    lineHeight: '16px',
+                    color: subtaskFlowLayoutMode === 'packing' ? '#2B2B2B' : '#A3A3A3',
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: 3,
+                      boxSizing: 'border-box',
+                      background: subtaskFlowLayoutMode === 'packing' ? '#C6C6C6' : 'transparent',
+                      border:
+                        subtaskFlowLayoutMode === 'packing'
+                          ? '1px solid #8A8A8A'
+                          : '1px solid #C6C6C6',
+                    }}
+                  />
+                  packing
+                </button>
+              </div>
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <button
                 type="button"
@@ -1192,6 +1260,7 @@ function App() {
               sessionDirectory={activeSessionDirectory}
               forkPanelSnapshotBundle={forkPanelSnapshotBundle}
               leadingTreemapSize={subtaskPanelExpanded ? 200 : undefined}
+              flowLayoutMode={subtaskFlowLayoutMode}
               selection={selection}
               onSelectActionType={handleSelectActionType}
               onSelectAction={handleSelectAction}

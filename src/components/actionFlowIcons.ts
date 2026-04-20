@@ -143,7 +143,8 @@ export function appendActionFlowIcon(
   cx: number,
   cy: number,
   iconColor: string,
-  idPrefix: string
+  idPrefix: string,
+  iconBox: number = ICON_BOX
 ): void {
   const marked = prefixSvgIds(svgMarkup, idPrefix)
   const parser = new DOMParser()
@@ -154,7 +155,8 @@ export function appendActionFlowIcon(
   const parts = (svgEl.getAttribute('viewBox') || '0 0 16 16').trim().split(/\s+/)
   const vw = Number(parts[2]) || 16
   const vh = Number(parts[3]) || 16
-  const s = Math.min(ICON_BOX / vw, ICON_BOX / vh)
+  const targetBox = Math.max(4, iconBox)
+  const s = Math.min(targetBox / vw, targetBox / vh)
   const pw = vw * s
   const ph = vh * s
 

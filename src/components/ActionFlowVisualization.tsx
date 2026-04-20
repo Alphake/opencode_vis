@@ -29,7 +29,11 @@ type FlowLayoutItem = {
   cy: number
 }
 
+type FlowLayoutMode = 'timeline' | 'packing'
+
 const MARGIN_LEFT = 24
+const PACKING_MARGIN_LEFT = 8
+const PACKING_MARGIN_RIGHT = 8
 const GAP = 12
 /**
  * 垂直布局（与 `actionMapping` 一致）：
@@ -344,8 +348,20 @@ ${writeList.html}${writeMore}
 function computeLayout(
   actions: (MappedAction & { row: number })[],
   durationMode: boolean,
-  layoutOpts?: { includeEndNode?: boolean; forkAnchorActionKey?: string | null }
+  layoutOpts?: {
+    includeEndNode?: boolean
+    forkAnchorActionKey?: string | null
+    layoutMode?: FlowLayoutMode
+    packingFitWidthPx?: number | null
+  }
 ) {
+  const layoutMode = layoutOpts?.layoutMode ?? 'timeline'
+  if (layoutMode === 'packing') {
+    return computePackingLayout(actions, durationMode, {
+      forkAnchorActionKey: layoutOpts?.forkAnchorActionKey ?? null,
+      fitWidthPx: layoutOpts?.packingFitWidthPx ?? null,
+    })
+  }
   const includeEndNode = layoutOpts?.includeEndNode !== false
   const forkAnchorActionKey = layoutOpts?.forkAnchorActionKey ?? null
   const sorted = [...actions].sort((a, b) => a.sortTime - b.sortTime)
@@ -872,6 +888,174 @@ function computeLayout(
   return { layout, totalW, totalH }
 }
 
+function packingSessionKey(a: MappedAction & { row: number }): string {
+  if (a.source === 'child-session' && a.parentTaskCallID) {
+    return `session:task:${a.parentTaskCallID}`
+  }
+  if (a.forkCompareRow === 2) {
+    return 'session:fork-new-branch'
+  }
+  return 'session:main'
+}
+
+function computePackingLayout(
+  actions: (MappedAction & { row: number })[],
+  durationMode: boolean,
+  opts?: { forkAnchorActionKey?: string | null; fitWidthPx?: number | null }
+) {
+  const forkAnchorActionKey = opts?.forkAnchorActionKey ?? null
+  const fitWidthPx = opts?.fitWidthPx ?? null
+  const marginLeft = PACKING_MARGIN_LEFT
+  const marginRight = PACKING_MARGIN_RIGHT
+  const sorted = [...actions].sort((a, b) => a.sortTime - b.sortTime)
+  const rowPitch = BLOCK_H
+  if (sorted.length === 0) {
+    return {
+      layout: [] as FlowLayoutItem[],
+      totalW: 360,
+      totalH: TOP_PAD + rowPitch + BOTTOM_PAD,
+    }
+  }
+
+  const widthBySortedIndex = new Map<number, number>()
+  for (let i = 0; i < sorted.length; i++) {
+    widthBySortedIndex.set(i, blockWidth(durationMode, sorted[i]!.durationMs))
+  }
+
+  const sessionIndices = new Map<string, number[]>()
+  const sessionFirstSort = new Map<string, number>()
+  const parentIndexByCallID = new Map<string, number>()
+  for (let i = 0; i < sorted.length; i++) {
+    const a = sorted[i]!
+    const session = packingSessionKey(a)
+    const list = sessionIndices.get(session)
+    if (list) {
+      list.push(i)
+    } else {
+      sessionIndices.set(session, [i])
+    }
+    if (!sessionFirstSort.has(session)) {
+      sessionFirstSort.set(session, a.sortTime)
+    }
+    if (a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID) {
+      parentIndexByCallID.set(a.callID, i)
+    }
+  }
+
+  const sessionOrder: string[] = []
+  if (sessionIndices.has('session:main')) {
+    sessionOrder.push('session:main')
+  }
+  const otherSessions = [...sessionIndices.keys()]
+    .filter((s) => s !== 'session:main')
+    .sort((sa, sb) => {
+      const ta = sessionFirstSort.get(sa) ?? Number.POSITIVE_INFINITY
+      const tb = sessionFirstSort.get(sb) ?? Number.POSITIVE_INFINITY
+      if (ta !== tb) return ta - tb
+      return sa.localeCompare(sb)
+    })
+  sessionOrder.push(...otherSessions)
+  if (sessionOrder.length === 0) {
+    sessionOrder.push('session:main')
+  }
+
+  const actionXBySortedIndex = new Map<number, number>()
+  let maxRight = marginLeft
+  const mainIndices = sessionIndices.get('session:main') ?? []
+  let mainCursor = marginLeft
+  for (const idx of mainIndices) {
+    const w = widthBySortedIndex.get(idx) ?? MIN_W
+    actionXBySortedIndex.set(idx, mainCursor)
+    mainCursor += w
+  }
+  maxRight = Math.max(maxRight, mainCursor)
+
+  const resolveForkAnchorRight = (): number => {
+    if (!forkAnchorActionKey) return mainCursor
+    const idx = sorted.findIndex((a) => actionKey(a) === forkAnchorActionKey)
+    if (idx < 0) return mainCursor
+    const anchorX = actionXBySortedIndex.get(idx)
+    if (anchorX == null) return mainCursor
+    const w = widthBySortedIndex.get(idx) ?? MIN_W
+    return anchorX + w
+  }
+
+  for (const session of sessionOrder) {
+    if (session === 'session:main') continue
+    const indices = sessionIndices.get(session) ?? []
+    if (indices.length === 0) continue
+    let cursor = mainCursor
+    if (session.startsWith('session:task:')) {
+      const callID = session.slice('session:task:'.length)
+      const parentIdx = parentIndexByCallID.get(callID)
+      if (parentIdx != null) {
+        const parentX = actionXBySortedIndex.get(parentIdx)
+        const parentW = widthBySortedIndex.get(parentIdx) ?? MIN_W
+        if (parentX != null) {
+          cursor = parentX + parentW
+        }
+      }
+    } else if (session === 'session:fork-new-branch') {
+      cursor = resolveForkAnchorRight()
+    }
+    for (const idx of indices) {
+      const w = widthBySortedIndex.get(idx) ?? MIN_W
+      actionXBySortedIndex.set(idx, cursor)
+      cursor += w
+    }
+    maxRight = Math.max(maxRight, cursor)
+  }
+
+  const sessionTopY = new Map<string, number>()
+  for (let row = 0; row < sessionOrder.length; row++) {
+    sessionTopY.set(sessionOrder[row]!, TOP_PAD + row * rowPitch)
+  }
+
+  const layout: FlowLayoutItem[] = []
+  for (let i = 0; i < sorted.length; i++) {
+    const a = sorted[i]!
+    const session = packingSessionKey(a)
+    const x = actionXBySortedIndex.get(i) ?? marginLeft
+    const y = sessionTopY.get(session) ?? TOP_PAD
+    const w = widthBySortedIndex.get(i) ?? MIN_W
+    const h = BLOCK_H
+    layout.push({
+      node: { ...a, kind: 'action' as const },
+      x,
+      y,
+      w,
+      h,
+      cx: x + w / 2,
+      cy: y + h / 2,
+    })
+  }
+
+  let totalW = Math.max(maxRight + marginRight, 220)
+  if (fitWidthPx != null && Number.isFinite(fitWidthPx) && fitWidthPx > 0) {
+    const targetTotalW = Math.max(220, fitWidthPx)
+    const naturalSpan = Math.max(1, maxRight - marginLeft)
+    const availableSpan = Math.max(1, targetTotalW - marginLeft - marginRight)
+    const scale = Math.min(1, availableSpan / naturalSpan)
+    if (scale < 1) {
+      for (const item of layout) {
+        const left = marginLeft + (item.x - marginLeft) * scale
+        item.x = left
+        item.w = Math.max(2, item.w * scale)
+        item.y = TOP_PAD + (item.y - TOP_PAD) * scale
+        item.h = Math.max(2, item.h * scale)
+        item.cx = item.x + item.w / 2
+        item.cy = item.y + item.h / 2
+      }
+      totalW = targetTotalW
+    } else {
+      totalW = Math.min(totalW, targetTotalW)
+    }
+  }
+  const maxBottom = layout.reduce((m, it) => Math.max(m, it.y + it.h), TOP_PAD)
+  const totalH = Math.max(maxBottom + BOTTOM_PAD, TOP_PAD + rowPitch + BOTTOM_PAD)
+  return { layout, totalW, totalH }
+}
+
 function parallelSiblingSkip(pa: MappedAction, pb: MappedAction): boolean {
   if (!pa.parallelGroupId || !pb.parallelGroupId) return false
   if (pa.parallelGroupId !== pb.parallelGroupId) return false
@@ -1093,6 +1277,8 @@ interface Props {
    * 更短的 action 暗化（与 `durationMode` / `colorMode` 无关）。
    */
   durationHighlightMinMs?: number | null
+  /** 突出「更高 token」：仅当 `tokenEstimate >= tokenHighlightMin` 时保持正常亮度。 */
+  tokenHighlightMin?: number | null
   /** 有阈值时自动滚动到第一个命中的 action（默认 true） */
   autoScrollFirstFilteredMatch?: boolean
   /**
@@ -1138,6 +1324,8 @@ interface Props {
    * 并在锚点 → 第一条新分支动作之间绘制专门的「下沉」分叉边。
    */
   forkAnchorActionKey?: string | null
+  /** 布局模式：timeline 为原始时序视图，packing 为紧凑堆叠视图。 */
+  layoutMode?: FlowLayoutMode
 }
 
 export default function ActionFlowVisualization({
@@ -1145,6 +1333,7 @@ export default function ActionFlowVisualization({
   durationMode,
   colorMode,
   durationHighlightMinMs = null,
+  tokenHighlightMin = null,
   autoScrollFirstFilteredMatch = true,
   tooltipMessages,
   onForkFromAction,
@@ -1160,17 +1349,64 @@ export default function ActionFlowVisualization({
   dimAll = false,
   onSelectAction,
   forkAnchorActionKey = null,
+  layoutMode = 'timeline',
 }: Props) {
+  const isPackingLayout = layoutMode === 'packing'
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const [packingFitWidthPx, setPackingFitWidthPx] = useState<number | null>(null)
   const [contextMenu, setContextMenu] = useState<ActionFlowContextMenuState | null>(null)
   const reactId = useId().replace(/:/g, '')
   const markerId = `action-flow-arrow-${reactId}`
   const tooltipId = `action-flow-tip-${reactId}`
   const layoutEstimate = useMemo(
-    () => computeLayout(actions, durationMode, { includeEndNode: showFlowEndNode, forkAnchorActionKey }),
+    () =>
+      computeLayout(actions, durationMode, {
+        includeEndNode: showFlowEndNode && !isPackingLayout,
+        forkAnchorActionKey,
+        layoutMode,
+        packingFitWidthPx: isPackingLayout ? packingFitWidthPx : null,
+      }),
+    [
+      actions,
+      durationMode,
+      showFlowEndNode,
+      forkAnchorActionKey,
+      layoutMode,
+      isPackingLayout,
+      packingFitWidthPx,
+    ]
+  )
+  /**
+   * 维持容器高度稳定：packing 仅压缩内部内容，不改变 ActionFlow 可视区域高度。
+   * 基线高度取同一数据在 timeline 模式下的估算值，避免下方 MetricBox 行上移。
+   */
+  const timelineLayoutEstimate = useMemo(
+    () =>
+      computeLayout(actions, durationMode, {
+        includeEndNode: showFlowEndNode,
+        forkAnchorActionKey,
+        layoutMode: 'timeline',
+      }),
     [actions, durationMode, showFlowEndNode, forkAnchorActionKey]
   )
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el || !isPackingLayout) {
+      setPackingFitWidthPx(null)
+      return
+    }
+    const update = () => {
+      const next = Math.max(220, Math.floor(el.clientWidth))
+      setPackingFitWidthPx(prev => (prev === next ? prev : next))
+    }
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => update())
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [isPackingLayout])
 
   useLayoutEffect(() => {
     const svg = svgRef.current
@@ -1182,8 +1418,10 @@ export default function ActionFlowVisualization({
     const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxTok])
 
     const { layout, totalW, totalH } = computeLayout(actions, durationMode, {
-      includeEndNode: showFlowEndNode,
+      includeEndNode: showFlowEndNode && !isPackingLayout,
       forkAnchorActionKey,
+      layoutMode,
+      packingFitWidthPx: isPackingLayout ? packingFitWidthPx : null,
     })
     /** 是否处于 fork 对比模式：layout 中存在任意「新分支」动作（含新分支里的 task / 子 session）。
      *  注意不能用 actionSessionKey===session:fork-new-branch 判断 —— 新分支 Subagent 的
@@ -1194,8 +1432,11 @@ export default function ActionFlowVisualization({
         isNewBranchAction(item.node as MappedAction & { row: number }),
     )
     const offsetY = verticalCenterOffsetY(layout, totalH)
-    const highlightActive =
+    const durationFilterActive =
       durationHighlightMinMs != null && Number.isFinite(durationHighlightMinMs)
+    const tokenFilterActive =
+      tokenHighlightMin != null && Number.isFinite(tokenHighlightMin)
+    const filterMode = durationFilterActive ? 'duration' : tokenFilterActive ? 'tokens' : null
 
     const defs = root.append('defs')
     defs
@@ -1242,22 +1483,23 @@ export default function ActionFlowVisualization({
     /** 并行 fan-out 由 `appendOrthoFanOut` 统一画，跳过 main sequential loop 的重复边 */
     const parallelFanOutSkip = new Set<string>()
 
-    /** 并行组：lane 内连线、前驱→各 lane 首、各 lane 末→后继（多源汇入同一 bundleX） */
-    const groupIdToIndices = new Map<string, number[]>()
-    for (let i = 0; i < layout.length; i++) {
-      const item = layout[i]!
-      if (item.node.kind !== 'action') continue
-      const act = item.node as MappedAction & { row: number }
-      const gid = act.parallelGroupId
-      if (!gid) continue
-      let arr = groupIdToIndices.get(gid)
-      if (!arr) {
-        arr = []
-        groupIdToIndices.set(gid, arr)
+    if (!isPackingLayout) {
+      /** 并行组：lane 内连线、前驱→各 lane 首、各 lane 末→后继（多源汇入同一 bundleX） */
+      const groupIdToIndices = new Map<string, number[]>()
+      for (let i = 0; i < layout.length; i++) {
+        const item = layout[i]!
+        if (item.node.kind !== 'action') continue
+        const act = item.node as MappedAction & { row: number }
+        const gid = act.parallelGroupId
+        if (!gid) continue
+        let arr = groupIdToIndices.get(gid)
+        if (!arr) {
+          arr = []
+          groupIdToIndices.set(gid, arr)
+        }
+        arr.push(i)
       }
-      arr.push(i)
-    }
-    for (const indices of groupIdToIndices.values()) {
+      for (const indices of groupIdToIndices.values()) {
       if (indices.length < 2) continue
       const groupActions = indices.map((idx) => ({
         idx,
@@ -1571,8 +1813,9 @@ export default function ActionFlowVisualization({
         )
       }
     }
-    connectPostAnchorTrack((a) => a.forkGhost === true)
-    connectPostAnchorTrack(isNewBranchAction)
+      connectPostAnchorTrack((a) => a.forkGhost === true)
+      connectPostAnchorTrack(isNewBranchAction)
+    }
 
     layout.forEach((item, layoutIndex) => {
       const { node, x: nx, y: ny, w, h } = item
@@ -1605,10 +1848,12 @@ export default function ActionFlowVisualization({
       const act = node as MappedAction & { row: number }
       const isGhost = act.forkGhost === true
       const ghostError = isGhost && act.status === 'error'
-      const matchesDurationHighlight =
-        !highlightActive ||
-        !Number.isFinite(act.durationMs) ||
-        act.durationMs >= (durationHighlightMinMs as number)
+      const matchesHighlight =
+        filterMode === null
+          ? true
+          : filterMode === 'duration'
+            ? !Number.isFinite(act.durationMs) || act.durationMs >= (durationHighlightMinMs as number)
+            : !Number.isFinite(act.tokenEstimate) || act.tokenEstimate >= (tokenHighlightMin as number)
       const tc = tokenColor(colorScale, act.tokenEstimate)
       const sc = effectiveStatusColors(act.status, act.durationMs)
       const errPalette = statusColors('error')
@@ -1649,7 +1894,7 @@ export default function ActionFlowVisualization({
         .attr('y', ny)
         .attr('width', w)
         .attr('height', h)
-        .attr('rx', 4)
+        .attr('rx', Math.max(1.5, Math.min(4, Math.min(w, h) * 0.22)))
         .attr('fill', fill)
         .attr('stroke', stroke)
         .attr('stroke-width', isGhost ? 1.5 : isChildBranch ? 1.65 : 1.5)
@@ -1663,8 +1908,8 @@ export default function ActionFlowVisualization({
           onSelectAction(ak)
         })
       }
-      /** duration 过滤状态显式写入，避免旧 DOM 复用时出现残留 dim */
-      actionG.attr('data-duration-dim', matchesDurationHighlight ? '0' : '1')
+      /** 过滤状态显式写入，避免旧 DOM 复用时出现残留 dim */
+      actionG.attr('data-filter-dim', matchesHighlight ? '0' : '1')
       const durationMeta = durationWidthMeta(durationMode, act.durationMs)
       const overDurationThreshold = !isGhost && durationMeta.overThreshold
       const canContext =
@@ -1687,14 +1932,16 @@ export default function ActionFlowVisualization({
       }
 
       const actionGNode = actionG.node() as SVGGElement | null
-      if (actionGNode) {
+      const iconBox = isPackingLayout ? Math.max(6, Math.min(16, Math.min(w, h) - 4)) : 16
+      if (actionGNode && (!isPackingLayout || iconBox >= 7)) {
         appendActionFlowIcon(
           actionGNode,
           getActionFlowIconSvg(act.actionType),
           nx + w / 2,
           ny + h / 2,
           iconFill,
-          `${reactId}-${layoutIndex}-`
+          `${reactId}-${layoutIndex}-`,
+          iconBox,
         )
       }
       /** 旧的黑色 50% 遮罩已废弃，duration 不达标统一走 dim 流 */
@@ -1751,18 +1998,19 @@ export default function ActionFlowVisualization({
       }
     })
 
-    /**
-     * 显式「收尾」连线：每个 end 节点 ← 本支线最右一条 action（按 x+w 取最右）。
-     *  - 普通模式：唯一 main end ← 主会话最右 action。
-     *  - Fork 对比：
-     *      ghost end (sessionRegion='main') ← 历史最右 action（包括历史 task 子 session 末端）；
-     *      new branch end (sessionRegion='fork-new-branch') ← 新分支最右 action（包括新分支
-     *      task 子 session 末端）。
-     *    判别用 forkCompareRow=2，而不是 actionSessionKey —— 否则新分支 task 区域里的最末
-     *    动作会漏掉。
-     *  - 已被并行组 fan-in 收走的 end 跳过（避免重复折线）。
-     */
-    for (let endIdx = 0; endIdx < layout.length; endIdx++) {
+    if (!isPackingLayout) {
+      /**
+       * 显式「收尾」连线：每个 end 节点 ← 本支线最右一条 action（按 x+w 取最右）。
+       *  - 普通模式：唯一 main end ← 主会话最右 action。
+       *  - Fork 对比：
+       *      ghost end (sessionRegion='main') ← 历史最右 action（包括历史 task 子 session 末端）；
+       *      new branch end (sessionRegion='fork-new-branch') ← 新分支最右 action（包括新分支
+       *      task 子 session 末端）。
+       *    判别用 forkCompareRow=2，而不是 actionSessionKey —— 否则新分支 task 区域里的最末
+       *    动作会漏掉。
+       *  - 已被并行组 fan-in 收走的 end 跳过（避免重复折线）。
+       */
+      for (let endIdx = 0; endIdx < layout.length; endIdx++) {
       const endItem = layout[endIdx]!
       if (endItem.node.kind !== 'end') continue
       const endIsForkBranch = endItem.node.sessionRegion === 'fork-new-branch'
@@ -1799,15 +2047,15 @@ export default function ActionFlowVisualization({
         actionKey(lastAct),
         null,
       )
-    }
+      }
 
-    /**
-     * Fork 对比显式分叉边：anchor → 新分支最早的 action（按 sortTime 取，排除 child-session
-     * 因为它们一定晚于其父 Subagent）。
-     * 不再要求第一条新分支动作必须落在 'session:fork-new-branch' 内 —— 当新分支只有
-     * task / 子 session 时，第一条动作的 session key 是 'session:task:<callID>'。
-     */
-    if (hasForkNewBranchInLayout && forkAnchorActionKey) {
+      /**
+       * Fork 对比显式分叉边：anchor → 新分支最早的 action（按 sortTime 取，排除 child-session
+       * 因为它们一定晚于其父 Subagent）。
+       * 不再要求第一条新分支动作必须落在 'session:fork-new-branch' 内 —— 当新分支只有
+       * task / 子 session 时，第一条动作的 session key 是 'session:task:<callID>'。
+       */
+      if (hasForkNewBranchInLayout && forkAnchorActionKey) {
       let anchorItem: (typeof layout)[number] | undefined
       for (const item of layout) {
         if (item.node.kind !== 'action') continue
@@ -1854,10 +2102,10 @@ export default function ActionFlowVisualization({
           .attr('data-to-key', actionKey(firstAct))
         void p
       }
-    }
+      }
 
-    /** 父 Subagent(task) → 子会话首节点 的紫色分叉 */
-    for (let i = 0; i < layout.length - 1; i++) {
+      /** 父 Subagent(task) → 子会话首节点 的紫色分叉 */
+      for (let i = 0; i < layout.length - 1; i++) {
       const item = layout[i]!
       const node = item.node
       if (node.kind !== 'action') continue
@@ -1903,11 +2151,11 @@ export default function ActionFlowVisualization({
         .attr('stroke-width', 1.2)
         .attr('marker-end', branchMarker)
         .attr('pointer-events', 'none')
-    }
+      }
 
-    if (canMockFork) {
-      const forkItem = layout[mockBranchForkActionIndex as number]
-      if (forkItem) {
+      if (canMockFork) {
+        const forkItem = layout[mockBranchForkActionIndex as number]
+        if (forkItem) {
         const historyTemplates = [
           { actionType: 'Think', status: 'completed', durationMs: 420, tokenEstimate: 24 },
           { actionType: 'Read', status: 'completed', durationMs: 560, tokenEstimate: 40 },
@@ -1980,6 +2228,7 @@ export default function ActionFlowVisualization({
           .attr('stroke-width', 1.2)
           .attr('marker-end', markerUrl)
           .attr('pointer-events', 'none')
+        }
       }
     }
 
@@ -1988,12 +2237,14 @@ export default function ActionFlowVisualization({
     root.attr('width', totalW).attr('height', desiredH)
     svg.removeAttribute('viewBox')
 
-    if (highlightActive && autoScrollFirstFilteredMatch) {
-      const thr = durationHighlightMinMs as number
+    if (filterMode !== null && autoScrollFirstFilteredMatch) {
       const firstMatched = layout.find((item) => {
         if (item.node.kind !== 'action') return false
         const a = item.node as MappedAction & { row: number }
-        return Number.isFinite(a.durationMs) && a.durationMs >= thr
+        if (filterMode === 'duration') {
+          return Number.isFinite(a.durationMs) && a.durationMs >= (durationHighlightMinMs as number)
+        }
+        return Number.isFinite(a.tokenEstimate) && a.tokenEstimate >= (tokenHighlightMin as number)
       })
       if (firstMatched && scrollRef.current) {
         const targetLeft = Math.max(0, firstMatched.x - 18)
@@ -2005,6 +2256,7 @@ export default function ActionFlowVisualization({
     durationMode,
     colorMode,
     durationHighlightMinMs,
+    tokenHighlightMin,
     autoScrollFirstFilteredMatch,
     tooltipMessages,
     markerId,
@@ -2017,10 +2269,13 @@ export default function ActionFlowVisualization({
     embedded,
     viewportMaxHeight,
     forkAnchorActionKey,
+    layoutMode,
+    isPackingLayout,
+    packingFitWidthPx,
   ])
 
   /**
-   * 统一 dim 流：合并 selection（type / action）、duration 过滤、跨子任务 dim_All。
+   * 统一 dim 流：合并 selection（type / action）、阈值过滤、跨子任务 dim_All。
    * - dimAll：整张 ActionFlow 整体降透（其他子任务正在被选中）
    * - selection：type 命中或 action 命中 → 不在命中集合的 group dim
    * - duration：data-duration-dim=1 的 group dim（旧蓝环 / 黑遮罩 已被替换为这套统一 dim）
@@ -2038,6 +2293,9 @@ export default function ActionFlowVisualization({
     const DIM = '0.18'
     const durationFilterActive =
       durationHighlightMinMs != null && Number.isFinite(durationHighlightMinMs)
+    const tokenFilterActive =
+      tokenHighlightMin != null && Number.isFinite(tokenHighlightMin)
+    const thresholdFilterActive = durationFilterActive || tokenFilterActive
 
     if (dimAll) {
       svg.style.opacity = '0.35'
@@ -2059,7 +2317,7 @@ export default function ActionFlowVisualization({
       }
     }
 
-    if (highlightSet === null && !durationFilterActive) {
+    if (highlightSet === null && !thresholdFilterActive) {
       for (const g of groups) g.style.opacity = '1'
       for (const e of edges) e.style.opacity = '1'
       return
@@ -2067,12 +2325,12 @@ export default function ActionFlowVisualization({
 
     for (const g of groups) {
       const k = g.getAttribute('data-action-key') ?? ''
-      const durationDimActive =
+      const filterDimActive =
         highlightSet === null &&
-        durationFilterActive &&
-        g.getAttribute('data-duration-dim') === '1'
+        thresholdFilterActive &&
+        g.getAttribute('data-filter-dim') === '1'
       const selDim = highlightSet !== null && !highlightSet.has(k)
-      g.style.opacity = (selDim || durationDimActive) ? DIM : '1'
+      g.style.opacity = (selDim || filterDimActive) ? DIM : '1'
     }
 
     for (const e of edges) {
@@ -2084,28 +2342,35 @@ export default function ActionFlowVisualization({
         const toHit = tk !== null && highlightSet.has(tk)
         dim = !fromHit && !toHit
       }
-      /** 连线也尊重 duration dim：两端都不达标则 dim（仅在 duration 过滤开启时生效） */
-      if (!dim && highlightSet === null && durationFilterActive && (fk || tk)) {
+      /** 连线也尊重阈值过滤：两端都不达标则 dim */
+      if (!dim && highlightSet === null && thresholdFilterActive && (fk || tk)) {
         const esc = (s: string) =>
           typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\"')
         const fromGroup = fk ? svg.querySelector<SVGGElement>(`g.afv-action[data-action-key="${esc(fk)}"]`) : null
         const toGroup = tk ? svg.querySelector<SVGGElement>(`g.afv-action[data-action-key="${esc(tk)}"]`) : null
-        const fromDur = fromGroup?.getAttribute('data-duration-dim') === '1'
-        const toDur = toGroup?.getAttribute('data-duration-dim') === '1'
-        if (fromDur && toDur) dim = true
+        const fromFiltered = fromGroup?.getAttribute('data-filter-dim') === '1'
+        const toFiltered = toGroup?.getAttribute('data-filter-dim') === '1'
+        if (fromFiltered && toFiltered) dim = true
       }
       e.style.opacity = dim ? DIM : '1'
     }
-  }, [highlightedActionType, highlightedActionKey, dimAll, actions, durationHighlightMinMs])
+  }, [highlightedActionType, highlightedActionKey, dimAll, actions, durationHighlightMinMs, tokenHighlightMin])
 
   const mockOffset = mockBranchForkActionIndex !== undefined ? ROW_H : 0
   const contentHeight = layoutEstimate.totalH + mockOffset
+  const timelineContentHeight = timelineLayoutEstimate.totalH + mockOffset
   /** 可视区域下限至少能容纳两行泳道，避免高度塌缩；上限仍限制最大可视高度，超出则内部滚动 */
+  const minContentHeight = MIN_SVG_CONTENT_HEIGHT
   const maxVisibleHeight = Math.max(
     TOP_PAD + MAX_VISIBLE_ROWS * ROW_H + BLOCK_H + BOTTOM_PAD,
-    MIN_SVG_CONTENT_HEIGHT
+    minContentHeight
   )
-  let viewportHeight = Math.min(Math.max(contentHeight, MIN_SVG_CONTENT_HEIGHT), maxVisibleHeight)
+  const normalViewportHeight = Math.min(Math.max(contentHeight, minContentHeight), maxVisibleHeight)
+  const stablePackingViewportHeight = Math.min(
+    Math.max(timelineContentHeight, minContentHeight),
+    maxVisibleHeight
+  )
+  let viewportHeight = isPackingLayout ? stablePackingViewportHeight : normalViewportHeight
   if (typeof viewportMaxHeight === 'number' && Number.isFinite(viewportMaxHeight) && viewportMaxHeight > 0) {
     viewportHeight = Math.min(viewportHeight, viewportMaxHeight)
   }
@@ -2119,12 +2384,16 @@ export default function ActionFlowVisualization({
       onClick={() => onSelectAction?.(null)}
       style={{
         boxSizing: 'border-box',
-        overflowX: 'auto',
+        overflowX: isPackingLayout ? 'hidden' : 'auto',
         overflowY: 'auto',
         width: '100%',
         height: 'auto',
         maxHeight: scrollAreaMaxHeight,
-        minHeight: 0,
+        /**
+         * packing 모드: SVG가 압축되어 작아져도 div 높이는 timeline 기준값 이하로
+         * 줄어들지 않도록 minHeight를 고정한다. 그래야 아래 MetricBox 행이 위로 올라가지 않는다.
+         */
+        minHeight: isPackingLayout ? stablePackingViewportHeight : 0,
         flexShrink: 0,
       }}
       ref={scrollRef}

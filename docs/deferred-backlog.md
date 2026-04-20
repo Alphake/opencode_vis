@@ -24,4 +24,21 @@
 
 ---
 
+## 3. Packing View 入口已下线（保留代码逻辑）
+
+**记录日期：** 2026-04-20
+
+**现状：** 右侧「子任务分组（调试）」头部不再展示两个入口按钮（展开 Overview / 全屏 Packing View），避免继续暴露该交互。
+
+**保留说明：** 仅下线入口，**底层逻辑与组件仍保留**，请勿轻易删除或重写，后续若要恢复入口可直接复用。
+
+**代码位置（请优先在这些位置检索与评估）：**
+- `src/App.tsx`：`subtaskPanelExpanded` / `subtaskFullscreenOpen` 状态、`SubtaskDebugPanel` 的 `leadingTreemapSize` 注入、`FullscreenSubtaskPanel` 渲染挂载。
+- `src/components/SubtaskDebugPanel.tsx`：packing 布局下子任务列表与联动透传。
+- `src/components/SubtaskCard.tsx`：`leadingTreemapSize` 触发左侧 treemap + ActionFlow 联动。
+- `src/components/FullscreenSubtaskPanel.tsx`：全屏 packing view 对话层主体实现。
+- `src/components/SubtaskActionTypeTreemap.tsx`：action type treemap 可视化与选中联动。
+
+---
+
 *记录用途：避免重复讨论「为什么现在是这样」；排期时从此列表拆任务。*
