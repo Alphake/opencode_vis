@@ -49,6 +49,8 @@ const PARALLEL_LANE_DY = ROW_H
 const SESSION_REGION_GAP = 10
 const TOP_PAD = 4
 const MIN_W = 28
+/** Duration mode: 小于等于该时长统一用最小宽度（单位 ms） */
+const DUR_WIDTH_BASE_MS = 10
 /** Duration mode: √-scale 参考时长（2分钟）——超过此值仍可继续延伸，但增速减缓 */
 const DUR_SQRT_REF_MS = 120_000
 /** Duration mode: 在参考时长处的 block 宽度（仅锚点，无上限封顶） */
@@ -73,16 +75,6 @@ const MORE_BTN_MIN_W = 44
 /** 分叉快照中「已不在上下文」的幽灵段：rect / 连线 */
 const FORK_GHOST_STROKE = '#B8B8B8'
 const FORK_GHOST_MARKER_FILL = '#B8B8B8'
-
-/**
- * Duration mode — block 宽度 √-scale。
- * domain [0, 2min] → [MIN_W, DUR_BLOCK_REF_W_PX]，clamp=false（超过 2min 继续按 √ 增长）。
- * √ 形状：相同倍数的时长差异在视觉上始终可见，并且不会像线性那样增长过猛。
- * 示例（2min 参考）：5s≈45px  30s≈70px  60s≈87px  120s=160px  240s≈215px。
- */
-const _durWidthScale = d3.scaleSqrt()
-  .domain([0, DUR_SQRT_REF_MS])
-  .range([MIN_W, DUR_BLOCK_REF_W_PX])
 
 /**
  * Duration mode — 连续 action 之间的「空档时间」→ 视觉 gap px。
@@ -116,15 +108,12 @@ function durationWidthMeta(
 ): { w: number; overThreshold: boolean } {
   if (!durationMode) return { w: MIN_W, overThreshold: false }
   if (!Number.isFinite(durationMs) || durationMs <= 0) return { w: MIN_W, overThreshold: false }
-  // √-scale：感知均匀，始终能体现差异，无硬阈值截断
-  return { w: _durWidthScale(durationMs), overThreshold: false }
-}
-
-/** Duration mode: 把“距离起点的经过时间”映射为 x 轴偏移（0ms -> 0px）。 */
-function durationElapsedToX(elapsedMs: number): number {
-  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return 0
-  // _durGapScale(0) = DUR_GAP_MIN_PX，因此减去最小值作为原点平移
-  return Math.max(0, _durGapScale(elapsedMs) - DUR_GAP_MIN_PX)
+  if (durationMs <= DUR_WIDTH_BASE_MS) return { w: MIN_W, overThreshold: false }
+  // 先扣除“最小时长基线”，再做 √ 映射：<=10ms 保持最小宽度，>10ms 才开始拉宽
+  const r = Math.max(1, DUR_SQRT_REF_MS - DUR_WIDTH_BASE_MS)
+  const x = Math.max(0, durationMs - DUR_WIDTH_BASE_MS) / r
+  const w = MIN_W + (DUR_BLOCK_REF_W_PX - MIN_W) * Math.sqrt(x)
+  return { w, overThreshold: false }
 }
 
 function formatDurationMs(durationMs: number): string {
@@ -490,7 +479,7 @@ function computeLayout(
   for (const idx of rootIndices) {
     const a = sorted[idx]!
     let slotKey: string
-    if (!a.parallelGroupId) {
+      if (durationMode || !a.parallelGroupId) {
       slotKey = `root:${nextRootSlot++}`
     } else {
       const session = actionSessionKey(a)
@@ -546,7 +535,7 @@ function computeLayout(
     for (const idx of childIndices) {
       const a = sorted[idx]!
       let slotKey: string
-      if (!a.parallelGroupId) {
+      if (durationMode || !a.parallelGroupId) {
         slotKey = `child:${nextChildSlot++}`
       } else {
         const groupKey = a.parallelGroupId
@@ -735,7 +724,7 @@ function computeLayout(
     for (const idx of branchIndices) {
       const a = sorted[idx]!
       let slotKey: string
-      if (!a.parallelGroupId) {
+      if (durationMode || !a.parallelGroupId) {
         slotKey = `branch:${nextBranchSlot++}`
       } else {
         const groupKey = a.parallelGroupId
@@ -891,20 +880,6 @@ function computeLayout(
       .map((x) => x.idx)
     for (const idx of childIndices) {
       actionXBySortedIndex.set(idx, childBaseX + (childLocalXByIndex.get(idx) ?? 0))
-    }
-  }
-
-  /**
-   * Duration mode：x 轴由真实开始时间决定（按 sortTime），不再要求并行 lane 左对齐。
-   * 这样同一时刻开始的动作才会对齐，稍晚开始的并行动作会自然向右偏移。
-   */
-  if (durationMode) {
-    const minStart = sorted.reduce((m, a) => Math.min(m, a.sortTime), Infinity)
-    const safeMinStart = Number.isFinite(minStart) ? minStart : 0
-    for (let i = 0; i < sorted.length; i++) {
-      const a = sorted[i]!
-      const elapsedMs = Math.max(0, a.sortTime - safeMinStart)
-      actionXBySortedIndex.set(i, MARGIN_LEFT + durationElapsedToX(elapsedMs))
     }
   }
 
@@ -2020,8 +1995,6 @@ export default function ActionFlowVisualization({
       }
       /** 过滤状态显式写入，避免旧 DOM 复用时出现残留 dim */
       actionG.attr('data-filter-dim', matchesHighlight ? '0' : '1')
-      // durationWidthMeta 现在只在 packing 模式中使用；timeline duration 模式的宽度来自 layout
-      const overDurationThreshold = false
       const canContext =
         act.messageID && (onForkFromAction || onAnalyzeFromAction) && act.forkGhost !== true
       const rectEl = rect.node() as SVGRectElement
