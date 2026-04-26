@@ -16,7 +16,9 @@ import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/fo
 import { mergeMessagesForActionTooltipLookup } from '../utils/actionTooltipMapping'
 import ActionFlowVisualization from './ActionFlowVisualization'
 import SubtaskActionTypeTreemap from './SubtaskActionTypeTreemap'
-import { actionFlowPalette } from '../styles/actionFlowPalette'
+import {
+  type ActionTypePaletteId,
+} from '../styles/actionTypePalettes'
 import { getMessages } from '../services/opencodeApi'
 import { actionKey } from '../utils/actionKey'
 
@@ -62,9 +64,14 @@ interface SubtaskCardProps {
   onSelectActionFromFlow?: (actionKey: string | null) => void
   /** 由父级统一控制：timeline / packing */
   flowLayoutMode?: 'timeline' | 'packing'
+  /** 全局共享颜色模式（由上层子任务面板控制） */
+  colorBy: ColorByMode
+  onColorByChange: (mode: ColorByMode) => void
+  /** 全局共享 type 调色盘（由上层子任务面板控制） */
+  actionTypePaletteId: ActionTypePaletteId
 }
 
-type ColorByMode = 'status' | 'tokens'
+type ColorByMode = 'status' | 'tokens' | 'type'
 type FilterMode = 'duration' | 'tokens'
 
 function MetricBox({ label, value, alert }: { label: string; value: string; alert?: boolean }) {
@@ -136,10 +143,12 @@ export default function SubtaskCard({
   onSelectAction,
   onSelectActionFromFlow,
   flowLayoutMode = 'timeline',
+  colorBy,
+  onColorByChange,
+  actionTypePaletteId,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
-  const [colorBy, setColorBy] = useState<ColorByMode>('status')
   const [filterMode, setFilterMode] = useState<FilterMode>('duration')
   /** 仅用于 DOM 锚点（fork/scroll 等需要时取 outer wrapper） */
   const cardRef = useRef<HTMLDivElement | null>(null)
@@ -578,7 +587,7 @@ export default function SubtaskCard({
             <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <button
                 type="button"
-                onClick={() => setColorBy('status')}
+                onClick={() => onColorByChange('status')}
                 style={{
                   display: 'flex',
                   flexDirection: 'row',
@@ -608,7 +617,7 @@ export default function SubtaskCard({
               </button>
               <button
                 type="button"
-                onClick={() => setColorBy('tokens')}
+                onClick={() => onColorByChange('tokens')}
                 style={{
                   display: 'flex',
                   flexDirection: 'row',
@@ -635,6 +644,36 @@ export default function SubtaskCard({
                   }}
                 />
                 tokens
+              </button>
+              <button
+                type="button"
+                onClick={() => onColorByChange('type')}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                  fontFamily: fontSans,
+                  fontSize: 11,
+                  lineHeight: '16px',
+                  color: colorBy === 'type' ? '#2B2B2B' : '#C6C6C6',
+                }}
+              >
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: 3,
+                    boxSizing: 'border-box',
+                    background: colorBy === 'type' ? '#C6C6C6' : 'transparent',
+                    border: colorBy === 'type' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
+                  }}
+                />
+                type
               </button>
             </div>
           </div>
@@ -806,7 +845,8 @@ export default function SubtaskCard({
             <ActionFlowVisualization
               actions={renderActions}
               durationMode={actionsDurationOn}
-              colorMode={colorBy === 'status' ? 'status' : 'tokens'}
+              colorMode={colorBy}
+              actionTypePaletteId={actionTypePaletteId}
               durationHighlightMinMs={durationHighlightForFlow}
               tokenHighlightMin={tokenHighlightForFlow}
               tooltipMessages={renderTooltips}
@@ -858,17 +898,17 @@ export default function SubtaskCard({
     gap: 4,
     width: '100%',
     minWidth: 0,
-    background: '#FCFCFC',
+    background: isLinked ? '#FFFFFF' : '#FCFCFC',
     borderRadius: 14,
     fontFamily: fontSans,
     overflow: 'visible',
     cursor: onSelectSubtask ? 'pointer' : 'default',
-    transition: 'box-shadow 0.15s ease, border-color 0.15s ease',
+    transition: 'box-shadow 0.15s ease, border-color 0.15s ease, background-color 0.15s ease',
     border: hasLongRunningAction
       ? (isLinked ? '2px solid #FF6B6B' : '1px solid #FF6B6B')
-      : (isLinked ? `2px solid ${actionFlowPalette.green.stroke}` : '1px solid #DBDBDB'),
+      : (isLinked ? '2px solid #5A8FFF' : '1px solid #DBDBDB'),
     boxShadow: isLinked
-      ? `0 0 0 3px rgba(145, 163, 123, 0.22)`
+      ? `0 0 0 3px rgba(90, 143, 255, 0.22), 0 6px 18px rgba(90, 143, 255, 0.12)`
       : 'none',
   }
 
@@ -913,6 +953,7 @@ export default function SubtaskCard({
         <SubtaskActionTypeTreemap
           actions={forkMergedFlow?.sessionActions ?? flowActions}
           colorMode={colorBy}
+          actionTypePaletteId={actionTypePaletteId}
           width={treemapSide}
           height={treemapSide}
           tooltipMessages={forkMergedFlow?.mergedTooltips ?? tooltipLookupMessages}

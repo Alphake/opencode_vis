@@ -1,8 +1,13 @@
-import { Fragment, type RefObject } from 'react'
+import { Fragment, type RefObject, useState } from 'react'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
 import SubtaskCard from './SubtaskCard'
+import ActionTypeColorLegend from './ActionTypeColorLegend'
+import {
+  type ActionTypePaletteId,
+  DEFAULT_ACTION_TYPE_PALETTE_ID,
+} from '../styles/actionTypePalettes'
 
 interface SubtaskDebugPanelProps {
   messages: OcMessage[]
@@ -50,6 +55,11 @@ export default function SubtaskDebugPanel({
   onSelectAction,
   flowLayoutMode = 'timeline',
 }: SubtaskDebugPanelProps) {
+  const [colorBy, setColorBy] = useState<'status' | 'tokens' | 'type'>('status')
+  const [actionTypePaletteId, setActionTypePaletteId] = useState<ActionTypePaletteId>(
+    DEFAULT_ACTION_TYPE_PALETTE_ID,
+  )
+
   return (
     <div
       style={{
@@ -60,6 +70,20 @@ export default function SubtaskDebugPanel({
         minHeight: 0,
       }}
     >
+      <div
+        style={{
+          flexShrink: 0,
+          padding: '0 0 8px',
+          borderBottom: '1px solid #E8E8E8',
+          marginBottom: 8,
+        }}
+      >
+        <ActionTypeColorLegend
+          paletteId={actionTypePaletteId}
+          onPaletteIdChange={setActionTypePaletteId}
+          includeStatusColors
+        />
+      </div>
       <div
         ref={listScrollRef}
         style={{
@@ -128,6 +152,9 @@ export default function SubtaskDebugPanel({
                   : undefined
               }
               flowLayoutMode={flowLayoutMode}
+              colorBy={colorBy}
+              onColorByChange={setColorBy}
+              actionTypePaletteId={actionTypePaletteId}
             />
             {/**
              * 仅 leading-treemap 模式下：相邻 treemap 之间画一条向下箭头，提示

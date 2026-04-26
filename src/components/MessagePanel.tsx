@@ -190,7 +190,7 @@ export default function MessagePanel({
                   borderRadius: 10,
                   padding: hl ? '6px 8px' : '2px 0',
                   margin: hl ? '2px -4px' : 0,
-                  outline: hl ? `2px solid ${actionFlowPalette.green.stroke}` : 'none',
+                  outline: hl ? `2px solid ${actionFlowPalette.completed.stroke}` : 'none',
                   outlineOffset: hl ? 1 : 0,
                   background: hl ? 'rgba(245, 255, 234, 0.55)' : 'transparent',
                   boxShadow: hl ? `0 0 0 1px rgba(145, 163, 123, 0.25)` : 'none',

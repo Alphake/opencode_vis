@@ -1,15 +1,17 @@
 import { useLayoutEffect, useRef, useId, useMemo, useState } from 'react'
 import * as d3 from 'd3'
 import { Tooltip } from 'react-tooltip'
-import type { ActionStatus, MappedAction, OcMessage } from '../types/opencode'
+import type { MappedAction, OcMessage } from '../types/opencode'
 import {
-  type TooltipKeyValue,
   buildEnglishTooltipContent,
-  formatEnglishTooltipContentHtml,
-  formatTooltipKeyValuesAsHtml,
   resolvePartForAction,
 } from '../utils/actionTooltipMapping'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
+import {
+  type ActionTypePaletteId,
+  DEFAULT_ACTION_TYPE_PALETTE_ID,
+} from '../styles/actionTypePalettes'
+import { effectiveStatusColors, resolveActionBlockColors } from '../utils/actionFlowColors'
 import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './ActionFlowContextMenu'
 import { actionKey } from '../utils/actionKey'
@@ -66,12 +68,9 @@ const BOTTOM_PAD = 6
 const MIN_SVG_CONTENT_HEIGHT = TOP_PAD + 2 * ROW_H + 2 * BLOCK_H + BOTTOM_PAD
 /** 视口上限：约 4 行（含上下 padding） */
 const MAX_VISIBLE_ROWS = 4
-const LONG_RUNNING_MS = 60_000
 /** 与右键菜单一致，用于 ⋯ 等 SVG 文字 */
 const SVG_FONT_SANS =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
-/** 块太窄时右上角 ⋯ 会与居中图标重叠，仅宽块显示 */
-const MORE_BTN_MIN_W = 44
 /** 分叉快照中「已不在上下文」的幽灵段：rect / 连线 */
 const FORK_GHOST_STROKE = '#B8B8B8'
 const FORK_GHOST_MARKER_FILL = '#B8B8B8'
@@ -121,44 +120,6 @@ function formatDurationMs(durationMs: number): string {
   const sec = durationMs / 1000
   if (sec < 0.01) return '<0.01s'
   return `${sec.toFixed(2)}s`
-}
-
-function statusColors(status: ActionStatus): { fill: string; stroke: string; icon: string } {
-  const { green, red, pending } = actionFlowPalette
-  switch (status) {
-    case 'running':
-      return { fill: green.fill, stroke: green.stroke, icon: green.icon }
-    case 'pending':
-      return { fill: pending.fill, stroke: pending.stroke, icon: pending.icon }
-    case 'error':
-      return { fill: red.fill, stroke: red.stroke, icon: red.icon }
-    default:
-      return { fill: green.fill, stroke: green.stroke, icon: green.icon }
-  }
-}
-
-function effectiveStatusColors(
-  status: ActionStatus,
-  durationMs: number
-): { fill: string; stroke: string; icon: string; isLongRunning: boolean } {
-  const base = statusColors(status)
-  const isLongRunning = (status === 'running' || status === 'pending') && durationMs >= LONG_RUNNING_MS
-  if (!isLongRunning) return { ...base, isLongRunning: false }
-  return {
-    fill: '#FFE9E9',
-    stroke: '#FF7A7A',
-    icon: '#E24F4F',
-    isLongRunning: true,
-  }
-}
-
-function tokenColor(scale: d3.ScaleSequential<string>, tok: number): { fill: string; stroke: string } {
-  const c = scale(tok)
-  const base = d3.color(c)
-  return {
-    fill: base?.brighter(0.35).formatHex() ?? '#E3F2FD',
-    stroke: base?.darker(0.9).formatHex() ?? '#0D47A1',
-  }
 }
 
 function rowTopY(row: number): number {
@@ -223,31 +184,6 @@ function escapeHtml(s: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-}
-
-/** English semantic block: message `type` / tool name + status, then tool-specific KV (see `actionTooltipMapping`) */
-function buildSemanticTooltipBlockHtml(act: MappedAction & { row: number }, tooltipMessages?: OcMessage[]): string {
-  if (!tooltipMessages?.length) return ''
-  const part = resolvePartForAction(tooltipMessages, act)
-  if (!part) return ''
-  const content = buildEnglishTooltipContent(part, { allMessages: tooltipMessages })
-  return formatEnglishTooltipContentHtml(content, escapeHtml)
-}
-
-/** Region 3: duration only (token estimate removed from tooltip) */
-function buildTooltipFooterHtml(act: MappedAction & { row: number }): string {
-  const dur = formatDurationMs(act.durationMs)
-  const rows: TooltipKeyValue[] = [{ key: 'Duration', value: dur }]
-  return formatTooltipKeyValuesAsHtml(rows, escapeHtml)
-}
-
-function buildActionTooltipHtml(act: MappedAction & { row: number }, tooltipMessages?: OcMessage[]): string {
-  const semantic = buildSemanticTooltipBlockHtml(act, tooltipMessages)
-  const footer = buildTooltipFooterHtml(act)
-  if (!semantic) {
-    return `<div class="action-tip-root"><div class="action-tip-footer">${footer}</div></div>`
-  }
-  return `<div class="action-tip-root"><div class="action-tip-main">${semantic}</div><div class="action-tip-sep" role="presentation"></div><div class="action-tip-footer">${footer}</div></div>`
 }
 
 function buildCompactActionTooltipHtml(act: MappedAction & { row: number }, tooltipMessages?: OcMessage[]): string {
@@ -973,7 +909,17 @@ function computeLayout(
   return { layout, totalW, totalH }
 }
 
+/**
+ * Packing 布局的 session 分组键。
+ * - 父侧 Subagent task 条目（source !== 'child-session'）归入对应子 session 行（作为该行首块）
+ * - 子 session 内部 action 归入同一行
+ * - fork 新分支单独一行
+ * - 其余归 session:main
+ */
 function packingSessionKey(a: MappedAction & { row: number }): string {
+  if (a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID) {
+    return `session:task:${a.callID}`
+  }
   if (a.source === 'child-session' && a.parentTaskCallID) {
     return `session:task:${a.parentTaskCallID}`
   }
@@ -988,133 +934,150 @@ function computePackingLayout(
   durationMode: boolean,
   opts?: { forkAnchorActionKey?: string | null; fitWidthPx?: number | null }
 ) {
-  const forkAnchorActionKey = opts?.forkAnchorActionKey ?? null
-  const fitWidthPx = opts?.fitWidthPx ?? null
+  const { forkAnchorActionKey = null, fitWidthPx = null } = opts ?? {}
   const marginLeft = PACKING_MARGIN_LEFT
   const marginRight = PACKING_MARGIN_RIGHT
   const sorted = [...actions].sort((a, b) => a.sortTime - b.sortTime)
   const rowPitch = BLOCK_H
+
   if (sorted.length === 0) {
-    return {
-      layout: [] as FlowLayoutItem[],
-      totalW: 360,
-      totalH: TOP_PAD + rowPitch + BOTTOM_PAD,
-    }
+    return { layout: [] as FlowLayoutItem[], totalW: 360, totalH: TOP_PAD + rowPitch + BOTTOM_PAD }
   }
 
-  const widthBySortedIndex = new Map<number, number>()
-  for (let i = 0; i < sorted.length; i++) {
-    widthBySortedIndex.set(i, blockWidth(durationMode, sorted[i]!.durationMs))
+  /** Subagent task 入口固定用 MIN_W（紧凑前缀，不编码实际时长） */
+  const widthOf = (a: MappedAction & { row: number }): number =>
+    a.actionType === 'Subagent' && a.source !== 'child-session' && Boolean(a.callID)
+      ? MIN_W
+      : blockWidth(durationMode, a.durationMs)
+
+  // --- 按 session 分组（新 key：Subagent → 子 session） ---
+  const sessionActions = new Map<string, (MappedAction & { row: number })[]>()
+  for (const a of sorted) {
+    const key = packingSessionKey(a)
+    let list = sessionActions.get(key)
+    if (!list) { list = []; sessionActions.set(key, list) }
+    list.push(a)
   }
 
-  const sessionIndices = new Map<string, number[]>()
-  const sessionFirstSort = new Map<string, number>()
-  const parentIndexByCallID = new Map<string, number>()
-  for (let i = 0; i < sorted.length; i++) {
-    const a = sorted[i]!
-    const session = packingSessionKey(a)
-    const list = sessionIndices.get(session)
-    if (list) {
-      list.push(i)
-    } else {
-      sessionIndices.set(session, [i])
-    }
-    if (!sessionFirstSort.has(session)) {
-      sessionFirstSort.set(session, a.sortTime)
-    }
-    if (a.actionType === 'Subagent' && a.source !== 'child-session' && a.callID) {
-      parentIndexByCallID.set(a.callID, i)
-    }
-  }
-
-  const sessionOrder: string[] = []
-  if (sessionIndices.has('session:main')) {
-    sessionOrder.push('session:main')
-  }
-  const otherSessions = [...sessionIndices.keys()]
-    .filter((s) => s !== 'session:main')
-    .sort((sa, sb) => {
-      const ta = sessionFirstSort.get(sa) ?? Number.POSITIVE_INFINITY
-      const tb = sessionFirstSort.get(sb) ?? Number.POSITIVE_INFINITY
-      if (ta !== tb) return ta - tb
-      return sa.localeCompare(sb)
+  // --- session 行顺序：main → 子 sessions（按触发时间）→ fork ---
+  const childSessionKeys = [...sessionActions.keys()]
+    .filter(s => s !== 'session:main' && s !== 'session:fork-new-branch')
+    .sort((a, b) => {
+      const ta = sessionActions.get(a)![0]!.sortTime
+      const tb = sessionActions.get(b)![0]!.sortTime
+      return ta !== tb ? ta - tb : a.localeCompare(b)
     })
-  sessionOrder.push(...otherSessions)
-  if (sessionOrder.length === 0) {
-    sessionOrder.push('session:main')
+  const sessionOrder: string[] = []
+  if (sessionActions.has('session:main')) sessionOrder.push('session:main')
+  sessionOrder.push(...childSessionKeys)
+  if (sessionActions.has('session:fork-new-branch')) sessionOrder.push('session:fork-new-branch')
+  if (sessionOrder.length === 0) sessionOrder.push('session:main')
+
+  // --- 预计算各子 session 的总宽度（各自独立游标，并行 session 互不影响） ---
+  const childSessionTotalW = new Map<string, number>()
+  for (const key of childSessionKeys) {
+    const acts = sessionActions.get(key)!
+    childSessionTotalW.set(key, acts.reduce((s, a) => s + widthOf(a), 0))
   }
 
-  const actionXBySortedIndex = new Map<number, number>()
-  let maxRight = marginLeft
-  const mainIndices = sessionIndices.get('session:main') ?? []
+  // --- x 轴布局：主 session 游标 + 子 session 触发预留空间 ---
+  //
+  // 主时间轴事件 = 主 session action + Subagent 触发事件（按 sortTime 混合排序）。
+  // 遇到 Subagent 触发：
+  //   · 并行触发（相同 parallelGroupId）共享同一 x 起点，主游标推进 max(并行宽度)。
+  //   · 串行触发各自推进。
+  // 遇到主 session action：直接放置，推进游标。
+  const subagentEvents = sorted.filter(
+    a => a.actionType === 'Subagent' && a.source !== 'child-session' && Boolean(a.callID)
+  )
+  const mainTimeline = [
+    ...(sessionActions.get('session:main') ?? []),
+    ...subagentEvents,
+  ].sort((a, b) => a.sortTime - b.sortTime)
+
+  const actionX = new Map<MappedAction & { row: number }, number>()
+  const childSessionStartX = new Map<string, number>()
+  const processedParallelGroups = new Set<string>()
   let mainCursor = marginLeft
-  for (const idx of mainIndices) {
-    const w = widthBySortedIndex.get(idx) ?? MIN_W
-    actionXBySortedIndex.set(idx, mainCursor)
-    mainCursor += w
-  }
-  maxRight = Math.max(maxRight, mainCursor)
 
-  const resolveForkAnchorRight = (): number => {
-    if (!forkAnchorActionKey) return mainCursor
-    const idx = sorted.findIndex((a) => actionKey(a) === forkAnchorActionKey)
-    if (idx < 0) return mainCursor
-    const anchorX = actionXBySortedIndex.get(idx)
-    if (anchorX == null) return mainCursor
-    const w = widthBySortedIndex.get(idx) ?? MIN_W
-    return anchorX + w
-  }
+  for (const event of mainTimeline) {
+    if (event.actionType === 'Subagent' && event.source !== 'child-session' && event.callID) {
+      // 找出所有并行兄弟（相同 parallelGroupId），整组共享同一 x 起点
+      const gid = event.parallelGroupId
+      if (gid && processedParallelGroups.has(gid)) continue  // 已作为并行组的一部分处理过
 
-  for (const session of sessionOrder) {
-    if (session === 'session:main') continue
-    const indices = sessionIndices.get(session) ?? []
-    if (indices.length === 0) continue
-    let cursor = mainCursor
-    if (session.startsWith('session:task:')) {
-      const callID = session.slice('session:task:'.length)
-      const parentIdx = parentIndexByCallID.get(callID)
-      if (parentIdx != null) {
-        const parentX = actionXBySortedIndex.get(parentIdx)
-        const parentW = widthBySortedIndex.get(parentIdx) ?? MIN_W
-        if (parentX != null) {
-          cursor = parentX + parentW
-        }
+      const siblings = gid
+        ? subagentEvents.filter(a => a.parallelGroupId === gid)
+        : [event]
+      if (gid) processedParallelGroups.add(gid)
+
+      const startX = mainCursor
+      let maxChildW = 0
+      for (const sub of siblings) {
+        const childKey = `session:task:${sub.callID!}`
+        childSessionStartX.set(childKey, startX)
+        maxChildW = Math.max(maxChildW, childSessionTotalW.get(childKey) ?? MIN_W)
       }
-    } else if (session === 'session:fork-new-branch') {
-      cursor = resolveForkAnchorRight()
+      // 主游标越过最宽的并行子 session（并行 session 各自占用该 x 区间但互不干扰）
+      mainCursor += maxChildW
+    } else {
+      actionX.set(event, mainCursor)
+      mainCursor += widthOf(event)
     }
-    for (const idx of indices) {
-      const w = widthBySortedIndex.get(idx) ?? MIN_W
-      actionXBySortedIndex.set(idx, cursor)
-      cursor += w
+  }
+
+  let maxRight = mainCursor
+
+  // --- 各子 session 独立游标，从各自 startX 出发 ---
+  for (const key of childSessionKeys) {
+    const acts = sessionActions.get(key)!
+    let cursor = childSessionStartX.get(key) ?? mainCursor
+    for (const a of acts) {
+      actionX.set(a, cursor)
+      cursor += widthOf(a)
     }
     maxRight = Math.max(maxRight, cursor)
   }
 
+  // --- fork 新分支（从 forkAnchorActionKey 右侧起，或主游标末端）---
+  const forkActs = sessionActions.get('session:fork-new-branch') ?? []
+  if (forkActs.length > 0) {
+    let forkStart = mainCursor
+    if (forkAnchorActionKey) {
+      for (const [a, x] of actionX) {
+        if (actionKey(a) === forkAnchorActionKey) {
+          forkStart = x + widthOf(a)
+          break
+        }
+      }
+    }
+    let cursor = forkStart
+    for (const a of forkActs) {
+      actionX.set(a, cursor)
+      cursor += widthOf(a)
+    }
+    maxRight = Math.max(maxRight, cursor)
+  }
+
+  // --- y 位置（固定行高，按 session 行顺序） ---
   const sessionTopY = new Map<string, number>()
-  for (let row = 0; row < sessionOrder.length; row++) {
-    sessionTopY.set(sessionOrder[row]!, TOP_PAD + row * rowPitch)
+  for (let i = 0; i < sessionOrder.length; i++) {
+    sessionTopY.set(sessionOrder[i]!, TOP_PAD + i * rowPitch)
   }
 
+  // --- 生成 layout 条目 ---
   const layout: FlowLayoutItem[] = []
-  for (let i = 0; i < sorted.length; i++) {
-    const a = sorted[i]!
-    const session = packingSessionKey(a)
-    const x = actionXBySortedIndex.get(i) ?? marginLeft
-    const y = sessionTopY.get(session) ?? TOP_PAD
-    const w = widthBySortedIndex.get(i) ?? MIN_W
-    const h = BLOCK_H
-    layout.push({
-      node: { ...a, kind: 'action' as const },
-      x,
-      y,
-      w,
-      h,
-      cx: x + w / 2,
-      cy: y + h / 2,
-    })
+  for (const [key, acts] of sessionActions) {
+    const y = sessionTopY.get(key) ?? TOP_PAD
+    for (const a of acts) {
+      const x = actionX.get(a) ?? marginLeft
+      const w = widthOf(a)
+      const h = BLOCK_H
+      layout.push({ node: { ...a, kind: 'action' as const }, x, y, w, h, cx: x + w / 2, cy: y + h / 2 })
+    }
   }
 
+  // --- fit-to-width 缩放（只压 x/w，行高保持固定） ---
   let totalW = Math.max(maxRight + marginRight, 220)
   if (fitWidthPx != null && Number.isFinite(fitWidthPx) && fitWidthPx > 0) {
     const targetTotalW = Math.max(220, fitWidthPx)
@@ -1123,19 +1086,16 @@ function computePackingLayout(
     const scale = Math.min(1, availableSpan / naturalSpan)
     if (scale < 1) {
       for (const item of layout) {
-        const left = marginLeft + (item.x - marginLeft) * scale
-        item.x = left
+        item.x = marginLeft + (item.x - marginLeft) * scale
         item.w = Math.max(2, item.w * scale)
-        item.y = TOP_PAD + (item.y - TOP_PAD) * scale
-        item.h = Math.max(2, item.h * scale)
         item.cx = item.x + item.w / 2
-        item.cy = item.y + item.h / 2
       }
       totalW = targetTotalW
     } else {
       totalW = Math.min(totalW, targetTotalW)
     }
   }
+
   const maxBottom = layout.reduce((m, it) => Math.max(m, it.y + it.h), TOP_PAD)
   const totalH = Math.max(maxBottom + BOTTOM_PAD, TOP_PAD + rowPitch + BOTTOM_PAD)
   return { layout, totalW, totalH }
@@ -1356,7 +1316,7 @@ function appendOrthoFanIn(
 interface Props {
   actions: (MappedAction & { row: number })[]
   durationMode: boolean
-  colorMode: 'status' | 'tokens'
+  colorMode: 'status' | 'tokens' | 'type'
   /**
    * 突出「更耗时」：仅当 `durationMs >= durationHighlightMinMs` 时保持正常亮度；
    * 更短的 action 暗化（与 `durationMode` / `colorMode` 无关）。
@@ -1411,6 +1371,8 @@ interface Props {
   forkAnchorActionKey?: string | null
   /** 布局模式：timeline 为原始时序视图，packing 为紧凑堆叠视图。 */
   layoutMode?: FlowLayoutMode
+  /** colorMode='type' 时使用的调色盘 */
+  actionTypePaletteId?: ActionTypePaletteId
 }
 
 export default function ActionFlowVisualization({
@@ -1435,8 +1397,11 @@ export default function ActionFlowVisualization({
   onSelectAction,
   forkAnchorActionKey = null,
   layoutMode = 'timeline',
+  actionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID,
 }: Props) {
   const isPackingLayout = layoutMode === 'packing'
+  /** packing 模式强制使用 type 色：颜色编码动作类型，比状态色在紧凑视图下更易读 */
+  const effectiveColorMode: 'status' | 'tokens' | 'type' = isPackingLayout ? 'type' : colorMode
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const [packingFitWidthPx, setPackingFitWidthPx] = useState<number | null>(null)
@@ -1562,6 +1527,16 @@ export default function ActionFlowVisualization({
 
     const content = root.append('g').attr('transform', `translate(0, ${offsetY + topOffset})`)
     const contentNode = content.node() as SVGGElement | null
+    const edgeExists = (fromKey: string, toKey: string): boolean => {
+      if (!contentNode) return false
+      const esc = (s: string) =>
+        typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\"')
+      return Boolean(
+        contentNode.querySelector(
+          `path.afv-edge[data-from-key="${esc(fromKey)}"][data-to-key="${esc(toKey)}"]`,
+        ),
+      )
+    }
 
     /** 并行多 lane 汇入同一后继时由 `appendOrthoFanIn` 绘制，此处跳过避免重复折线 */
     const parallelJoinSkip = new Set<string>()
@@ -1932,38 +1907,19 @@ export default function ActionFlowVisualization({
 
       const act = node as MappedAction & { row: number }
       const isGhost = act.forkGhost === true
-      const ghostError = isGhost && act.status === 'error'
       const matchesHighlight =
         filterMode === null
           ? true
           : filterMode === 'duration'
             ? !Number.isFinite(act.durationMs) || act.durationMs >= (durationHighlightMinMs as number)
             : !Number.isFinite(act.tokenEstimate) || act.tokenEstimate >= (tokenHighlightMin as number)
-      const tc = tokenColor(colorScale, act.tokenEstimate)
       const sc = effectiveStatusColors(act.status, act.durationMs)
-      const errPalette = statusColors('error')
-      const isChildBranch = act.source === 'child-session' && !isGhost
-
-      let fill: string
-      let stroke: string
-      let iconFill: string
-      if (ghostError) {
-        fill = errPalette.fill
-        stroke = errPalette.stroke
-        iconFill = errPalette.icon
-      } else if (isGhost) {
-        fill = '#E8E8E8'
-        stroke = '#CFCFCF'
-        iconFill = '#A0A0A0'
-      } else if (isChildBranch && colorMode === 'status') {
-        fill = '#F3ECFA'
-        stroke = '#8445BC'
-        iconFill = '#6E38A0'
-      } else {
-        fill = colorMode === 'status' ? sc.fill : tc.fill
-        stroke = colorMode === 'status' ? sc.stroke : tc.stroke
-        iconFill = colorMode === 'status' ? sc.icon : actionFlowPalette.green.icon
-      }
+      const { fill, iconFill } = resolveActionBlockColors(
+        act,
+        effectiveColorMode,
+        colorScale,
+        actionTypePaletteId,
+      )
 
       /** 每个 action 包一个 group：data-action-type 用于 type-level dim；data-action-key 用于 action-level dim 与点击 */
       const ak = actionKey(act)
@@ -1981,8 +1937,8 @@ export default function ActionFlowVisualization({
         .attr('height', h)
         .attr('rx', Math.max(1.5, Math.min(4, Math.min(w, h) * 0.22)))
         .attr('fill', fill)
-        .attr('stroke', stroke)
-        .attr('stroke-width', isGhost ? 1.5 : isChildBranch ? 1.65 : 1.5)
+        .attr('stroke', 'none')
+        .attr('stroke-width', 0)
         .style('cursor', 'pointer')
         .attr('data-tooltip-id', tooltipId)
         .attr('data-tooltip-html', buildCompactActionTooltipHtml(act, tooltipMessages))
@@ -2009,14 +1965,14 @@ export default function ActionFlowVisualization({
       if (
         !isGhost &&
         (act.status === 'running' || act.status === 'pending') &&
-        colorMode === 'status'
+        effectiveColorMode === 'status'
       ) {
         rect.attr('class', sc.isLongRunning ? 'action-flow-running-long' : 'action-flow-running')
       }
 
       const actionGNode = actionG.node() as SVGGElement | null
       const iconBox = isPackingLayout ? Math.max(6, Math.min(16, Math.min(w, h) - 4)) : 16
-      if (actionGNode && (!isPackingLayout || iconBox >= 7)) {
+      if (actionGNode && effectiveColorMode !== 'type' && (!isPackingLayout || iconBox >= 7)) {
         appendActionFlowIcon(
           actionGNode,
           getActionFlowIconSvg(act.actionType),
@@ -2041,43 +1997,7 @@ export default function ActionFlowVisualization({
           .attr('pointer-events', 'none')
       }
 
-      if (canContext && w >= MORE_BTN_MIN_W) {
-        const moreG = actionG
-          .append('g')
-          .attr('class', 'action-flow-more')
-          .style('cursor', 'pointer')
-          .attr('data-tooltip-id', tooltipId)
-          .attr('data-tooltip-html', buildActionTooltipHtml(act, tooltipMessages))
-          .attr('data-tooltip-place', 'top')
-        moreG
-          .append('rect')
-          .attr('x', nx + w - 20)
-          .attr('y', ny + 2)
-          .attr('width', 18)
-          .attr('height', h - 4)
-          .attr('fill', 'transparent')
-          .attr('rx', 2)
-        moreG
-          .append('text')
-          .attr('x', nx + w - 11)
-          .attr('y', ny + h / 2 + 4)
-          .attr('text-anchor', 'middle')
-          .attr('font-size', 12)
-          .attr('font-weight', 700)
-          .attr('fill', '#64748B')
-          .attr('font-family', SVG_FONT_SANS)
-          .text('⋯')
-        moreG.on('click', (ev: MouseEvent) => {
-          ev.stopPropagation()
-          ev.preventDefault()
-          setContextMenu({ anchorRect: rectEl.getBoundingClientRect(), action: act })
-        })
-        moreG.on('contextmenu', (ev: Event) => {
-          ev.preventDefault()
-          ev.stopPropagation()
-          setContextMenu({ anchorRect: rectEl.getBoundingClientRect(), action: act })
-        })
-      }
+      /** 需求：任何情况下都不显示右上角三个点操作按钮 */
     })
 
     if (!isPackingLayout) {
@@ -2132,10 +2052,12 @@ export default function ActionFlowVisualization({
       }
 
       /**
-       * Fork 对比显式分叉边：anchor → 新分支最早的 action（按 sortTime 取，排除 child-session
-       * 因为它们一定晚于其父 Subagent）。
-       * 不再要求第一条新分支动作必须落在 'session:fork-new-branch' 内 —— 当新分支只有
-       * task / 子 session 时，第一条动作的 session key 是 'session:task:<callID>'。
+       * Fork 对比显式分叉边：anchor 同时扇出到两条支线的起点：
+       * - 历史 ghost 起点（fork 后旧轨迹）；
+       * - 新分支起点（forkCompareRow=2）。
+       *
+       * 两个起点都按 sortTime 取最早的「父侧动作」（排除 child-session，避免直接连进子会话内部）。
+       * 这样即使 ghost/new-branch 在合并时间轴里交错，anchor 也能稳定连到两条支线起点。
        */
       if (hasForkNewBranchInLayout && forkAnchorActionKey) {
       let anchorItem: (typeof layout)[number] | undefined
@@ -2144,6 +2066,18 @@ export default function ActionFlowVisualization({
         if (actionKey(item.node as MappedAction & { row: number }) === forkAnchorActionKey) {
           anchorItem = item
           break
+        }
+      }
+      let firstGhostItem: (typeof layout)[number] | undefined
+      let firstGhostSortTime = Infinity
+      for (const item of layout) {
+        if (item.node.kind !== 'action') continue
+        const a = item.node as MappedAction & { row: number }
+        if (a.forkGhost !== true) continue
+        if (a.source === 'child-session') continue
+        if (a.sortTime < firstGhostSortTime) {
+          firstGhostSortTime = a.sortTime
+          firstGhostItem = item
         }
       }
       let firstNewBranchItem: (typeof layout)[number] | undefined
@@ -2158,32 +2092,70 @@ export default function ActionFlowVisualization({
           firstNewBranchItem = item
         }
       }
-      if (anchorItem && firstNewBranchItem) {
-        const x1 = anchorItem.x + anchorItem.w
-        const y1 = anchorItem.cy
-        const x2 = firstNewBranchItem.x
-        const y2 = firstNewBranchItem.cy
-        const mid = (x1 + x2) / 2
-        const branchPath = d3.path()
-        branchPath.moveTo(x1, y1)
-        branchPath.lineTo(mid, y1)
-        branchPath.lineTo(mid, y2)
-        branchPath.lineTo(x2, y2)
-        const anchorAct = anchorItem.node as MappedAction & { row: number }
-        const firstAct = firstNewBranchItem.node as MappedAction & { row: number }
-        const p = content
-          .append('path')
-          .attr('class', 'afv-edge')
-          .attr('d', branchPath.toString())
-          .attr('fill', 'none')
-          .attr('stroke', actionFlowPalette.arrow)
-          .attr('stroke-width', 1.2)
-          .attr('marker-end', markerUrl)
-          .attr('pointer-events', 'none')
-          .attr('data-from-key', actionKey(anchorAct))
-          .attr('data-to-key', actionKey(firstAct))
-        void p
+      if (anchorItem) {
+        const targets = [firstGhostItem, firstNewBranchItem].filter(
+          (it): it is FlowLayoutItem => Boolean(it),
+        )
+        if (targets.length > 0) {
+          appendOrthoFanOut(content, anchorItem, targets, markerUrl, ghostMarkerUrl)
+        }
       }
+      }
+
+      /**
+       * Fork 前缀兜底：确保「anchor 之前的历史主链」始终连续（1→2→...→anchor）。
+       * 某些布局/分组下这段关系不一定是 layout 相邻项，会被通用相邻连线漏掉，
+       * 这里按 sortTime 串起来并在 edge 不存在时补画。
+       */
+      if (hasForkNewBranchInLayout && forkAnchorActionKey) {
+        let anchorSortTime = Infinity
+        for (const item of layout) {
+          if (item.node.kind !== 'action') continue
+          const a = item.node as MappedAction & { row: number }
+          if (actionKey(a) === forkAnchorActionKey) {
+            anchorSortTime = a.sortTime
+            break
+          }
+        }
+        if (Number.isFinite(anchorSortTime)) {
+          const prefixItems = layout
+            .filter((item) => {
+              if (item.node.kind !== 'action') return false
+              const a = item.node as MappedAction & { row: number }
+              if (a.source === 'child-session') return false
+              if (isNewBranchAction(a)) return false
+              if (a.forkGhost === true) return false
+              return a.sortTime <= anchorSortTime
+            })
+            .sort((p, q) => {
+              const pa = p.node as MappedAction & { row: number }
+              const qa = q.node as MappedAction & { row: number }
+              return pa.sortTime - qa.sortTime
+            })
+          for (let i = 0; i < prefixItems.length - 1; i++) {
+            const from = prefixItems[i]!
+            const to = prefixItems[i + 1]!
+            const pa = from.node as MappedAction & { row: number }
+            const pb = to.node as MappedAction & { row: number }
+            if (parallelSiblingSkip(pa, pb)) continue
+            const fromK = actionKey(pa)
+            const toK = actionKey(pb)
+            if (edgeExists(fromK, toK)) continue
+            const { stroke, markerUrl: m } = edgeStrokeAndMarker(pa, pb, markerUrl, ghostMarkerUrl)
+            appendOrthoEdge(
+              content,
+              from.x + from.w,
+              from.cy,
+              to.x,
+              to.cy,
+              m,
+              stroke,
+              1.2,
+              fromK,
+              toK,
+            )
+          }
+        }
       }
 
       /** 父 Subagent(task) → 子会话首节点 的紫色分叉 */
@@ -2336,7 +2308,8 @@ export default function ActionFlowVisualization({
   }, [
     actions,
     durationMode,
-    colorMode,
+    effectiveColorMode,
+    actionTypePaletteId,
     durationHighlightMinMs,
     tokenHighlightMin,
     autoScrollFirstFilteredMatch,
@@ -2469,14 +2442,20 @@ export default function ActionFlowVisualization({
         overflowX: isPackingLayout ? 'hidden' : 'auto',
         overflowY: 'auto',
         width: '100%',
-        height: 'auto',
-        maxHeight: scrollAreaMaxHeight,
-        /**
-         * packing 모드: SVG가 압축되어 작아져도 div 높이는 timeline 기준값 이하로
-         * 줄어들지 않도록 minHeight를 고정한다. 그래야 아래 MetricBox 행이 위로 올라가지 않는다.
-         */
-        minHeight: isPackingLayout ? stablePackingViewportHeight : 0,
         flexShrink: 0,
+        /** packing：固定容器高度并垂直居中 SVG；timeline：跟随内容高度，限制最大高度 */
+        ...(isPackingLayout
+          ? {
+              height: stablePackingViewportHeight,
+              display: 'flex',
+              flexDirection: 'column' as const,
+              justifyContent: 'center',
+            }
+          : {
+              height: 'auto',
+              maxHeight: scrollAreaMaxHeight,
+              minHeight: 0,
+            }),
       }}
       ref={scrollRef}
     >

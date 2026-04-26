@@ -6,6 +6,10 @@ import {
   buildTokenColorScale,
   resolveActionBlockColors,
 } from '../utils/actionFlowColors'
+import {
+  type ActionTypePaletteId,
+  DEFAULT_ACTION_TYPE_PALETTE_ID,
+} from '../styles/actionTypePalettes'
 import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 import {
   buildEnglishTooltipContent,
@@ -15,7 +19,8 @@ import { actionKey } from '../utils/actionKey'
 
 interface Props {
   actions: (MappedAction & { row: number })[]
-  colorMode: 'status' | 'tokens'
+  colorMode: 'status' | 'tokens' | 'type'
+  actionTypePaletteId?: ActionTypePaletteId
   /** 画布宽度（px） */
   width: number
   /** 画布高度（px）；通常由父容器测量后传入以与卡片等高 */
@@ -58,8 +63,8 @@ const BLOCK_GAP = 2
 const BLOCK_RX = 3
 const CELL_RX = 6
 const CELL_STROKE = '#E8E8E8'
-const CELL_STROKE_SELECTED = '#6F8455'
-const CELL_BG_SELECTED = 'rgba(145, 163, 123, 0.10)'
+const CELL_STROKE_SELECTED = '#3D4F63'
+const CELL_BG_SELECTED = 'rgba(61, 79, 99, 0.10)'
 /** ×N 文字字号 */
 const COUNT_TEXT_SIZE = 9
 const COUNT_TEXT_W_EST = 18
@@ -229,6 +234,7 @@ function buildBlockTooltipHtml(
 export default function SubtaskActionTypeTreemap({
   actions,
   colorMode,
+  actionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID,
   width,
   height,
   tooltipMessages,
@@ -323,7 +329,7 @@ export default function SubtaskActionTypeTreemap({
       const pct = Math.round((bucket.count / totalCount) * 100)
       const sortedActs = [...bucket.actions].sort((a, b) => a.sortTime - b.sortTime)
       const firstAct = sortedActs[0]!
-      const repColors = resolveActionBlockColors(firstAct, colorMode, tokenScale)
+      const repColors = resolveActionBlockColors(firstAct, colorMode, tokenScale, actionTypePaletteId)
       const compactTooltip = buildBucketTooltipHtml(bucket, totalCount)
 
       /** type-level 选中 */
@@ -508,7 +514,7 @@ export default function SubtaskActionTypeTreemap({
           const c = i % cols
           const bx = ax + c * (BLOCK_SIZE + BLOCK_GAP)
           const by = ay + r * (BLOCK_SIZE + BLOCK_GAP)
-          const colors = resolveActionBlockColors(act, colorMode, tokenScale)
+          const colors = resolveActionBlockColors(act, colorMode, tokenScale, actionTypePaletteId)
 
           const akey = actionKey(act)
           const isActSelected = selectedActionKey === akey
@@ -542,7 +548,7 @@ export default function SubtaskActionTypeTreemap({
               onSelectAction(isActSelected ? null : akey)
             })
 
-          if (contentNode) {
+          if (contentNode && colorMode !== 'type') {
             appendActionFlowIcon(
               contentNode as unknown as SVGGElement,
               getActionFlowIconSvg(act.actionType),
@@ -642,7 +648,7 @@ export default function SubtaskActionTypeTreemap({
             onSelectAction(selectedActionKey === akey ? null : akey)
           })
 
-        if (contentNode) {
+        if (contentNode && colorMode !== 'type') {
           appendActionFlowIcon(
             contentNode as unknown as SVGGElement,
             getActionFlowIconSvg(p.firstAct.actionType),
@@ -697,6 +703,7 @@ export default function SubtaskActionTypeTreemap({
     width,
     height,
     colorMode,
+    actionTypePaletteId,
     tooltipMessages,
     reactId,
     tooltipId,
