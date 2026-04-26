@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { OcSession } from './types/opencode'
 import {
+  getCurrentWorkspaceDirectory,
   getProjectDirectories,
   getSessions,
   getTodos,
@@ -56,6 +57,8 @@ const AUTO_ABORT_STUCK_RUNNING_AFTER_MS = 24 * 60 * 60 * 1000
 /** 发送后若 SSE 未及时刷新，轮询 GET /message 直到出现助手消息（与 OpenCode 流式/长耗时兼容） */
 const POLL_ASSISTANT_INTERVAL_MS = 2000
 const POLL_ASSISTANT_MAX_ROUNDS = 90
+const MANUAL_DIRS_KEY = 'cockpit.manual.directories.v1'
+const CLOSED_DIRS_KEY = 'cockpit.closed.directories.v1'
 
 function parseEnvDirectorySeeds(raw: unknown): string[] {
   if (typeof raw !== 'string') return []
@@ -63,6 +66,52 @@ function parseEnvDirectorySeeds(raw: unknown): string[] {
     .split(/[;\n,]/)
     .map((s) => s.trim())
     .filter(Boolean)
+}
+
+function directoryKey(dir: string | undefined): string {
+  const n = normalizeSessionDirectory(dir)
+  if (!n) return ''
+  return /^[A-Za-z]:\//.test(n) ? n.toLowerCase() : n
+}
+
+function sameDirectory(a: string | undefined, b: string | undefined): boolean {
+  return directoryKey(a) === directoryKey(b)
+}
+
+function loadManualDirectories(): string[] {
+  try {
+    const raw = window.localStorage.getItem(MANUAL_DIRS_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw)
+    if (!Array.isArray(data)) return []
+    return data
+      .map((v) => (typeof v === 'string' ? normalizeSessionDirectory(v) : ''))
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function loadClosedDirectories(): string[] {
+  try {
+    const raw = window.localStorage.getItem(CLOSED_DIRS_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw)
+    if (!Array.isArray(data)) return []
+    return data
+      .map((v) => (typeof v === 'string' ? normalizeSessionDirectory(v) : ''))
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function promptDirectoryPath(seed: string): string | null {
+  const message =
+    'Due to browser security restrictions, web pages cannot directly read folder paths on your computer. If you want to create or load a local workspace, please copy the folder absolute path and paste it into the input below.'
+  const raw = window.prompt(message, seed)
+  if (!raw) return null
+  return normalizeSessionDirectory(raw)
 }
 
 async function pollUntilAssistantMessage(
@@ -172,6 +221,9 @@ function App() {
   /** 递增以驱动 Todo 面板在选中子任务时自动展开到正确分区 */
   const [todoPanelRevealGeneration, setTodoPanelRevealGeneration] = useState(0)
   const [selectedDirectory, setSelectedDirectory] = useState<string>('')
+  const [projectDirectories, setProjectDirectories] = useState<string[]>([])
+  const [manualDirectories, setManualDirectories] = useState<string[]>(() => loadManualDirectories())
+  const [closedDirectories, setClosedDirectories] = useState<string[]>(() => loadClosedDirectories())
   const [creatingSession, setCreatingSession] = useState(false)
   /** 按 sessionID 保存待作答的 question 请求（SSE `question.asked`） */
   const [pendingQuestions, setPendingQuestions] = useState<Record<string, OcPendingQuestionRequest>>({})
@@ -201,27 +253,63 @@ function App() {
         console.warn('[refreshSessions] getProjectDirectories failed:', e)
         return [] as string[]
       })
+      const current = await getCurrentWorkspaceDirectory().catch((e) => {
+        console.warn('[refreshSessions] getCurrentWorkspaceDirectory failed:', e)
+        return null
+      })
+      const mergedDiscovered = Array.from(new Set([...discovered, ...(current ? [current] : [])]))
+      setProjectDirectories(mergedDiscovered)
+      const closed = new Set(closedDirectories)
       const extra = await fetchSessionsAcrossDirectories([
         ...envDirectorySeeds,
+        ...manualDirectories.filter((d) => !closed.has(d)),
         ...(extraDirectories ?? []),
-        ...discovered,
+        ...mergedDiscovered.filter((d) => !closed.has(normalizeSessionDirectory(d))),
       ])
-      const merged = mergeSessionsById([base, extra])
+      const merged = mergeSessionsById([base, extra]).filter(
+        (s) => !closed.has(normalizeSessionDirectory(s.directory)),
+      )
       setSessions(merged)
       setApiConnected(true)
       return merged
     },
-    [envDirectorySeeds],
+    [envDirectorySeeds, manualDirectories, closedDirectories],
   )
 
   const directories = useMemo(() => {
-    const u = uniqueDirectoriesFromSessions(sessions)
-    return u.length > 0 ? u : ['']
-  }, [sessions])
+    const fromSession = uniqueDirectoriesFromSessions(sessions)
+    const mergedRaw = [
+      ...fromSession,
+      ...projectDirectories.map((d) => normalizeSessionDirectory(d)),
+      ...manualDirectories,
+      selectedDirectory,
+    ]
+    const map = new Map<string, string>()
+    for (const dir of mergedRaw) {
+      const key = directoryKey(dir)
+      if (!key || map.has(key)) continue
+      map.set(key, normalizeSessionDirectory(dir))
+    }
+    const merged = [...map.values()]
+      .filter((d) => d !== 'Unknown')
+      .filter((d) => d !== '')
+      .filter((d) => !closedDirectories.includes(d))
+    return merged.sort((a, b) => {
+      return a.localeCompare(b, 'zh-CN')
+    })
+  }, [sessions, projectDirectories, manualDirectories, selectedDirectory, closedDirectories])
+
+  useEffect(() => {
+    window.localStorage.setItem(MANUAL_DIRS_KEY, JSON.stringify(manualDirectories))
+  }, [manualDirectories])
+
+  useEffect(() => {
+    window.localStorage.setItem(CLOSED_DIRS_KEY, JSON.stringify(closedDirectories))
+  }, [closedDirectories])
 
   const sessionsInFolder = useMemo(() => {
     return sessions
-      .filter(s => normalizeSessionDirectory(s.directory) === selectedDirectory)
+      .filter(s => sameDirectory(s.directory, selectedDirectory))
       .sort((a, b) => b.time.updated - a.time.updated)
   }, [sessions, selectedDirectory])
 
@@ -323,7 +411,7 @@ function App() {
     if (selectedSessionId && sessions.some(s => s.id === selectedSessionId)) return
 
     const inFolder = sessions
-      .filter(s => normalizeSessionDirectory(s.directory) === selectedDirectory)
+      .filter(s => sameDirectory(s.directory, selectedDirectory))
       .sort((a, b) => b.time.updated - a.time.updated)
 
     if (inFolder.length > 0) {
@@ -791,18 +879,30 @@ function App() {
   const selectedSession = sessions.find(s => s.id === selectedSessionId)
 
   const handleSelectDirectory = useCallback(
-    (dir: string) => {
+    async (dir: string) => {
       setSelectedDirectory(dir)
-      const inFolder = sessions
-        .filter(s => normalizeSessionDirectory(s.directory) === dir)
+      setSelectedSessionId('')
+      setMessages([])
+      setTodos([])
+      setTodosSnapshotAtMessageIndex({})
+
+      const currentInFolder = sessions
+        .filter(s => sameDirectory(s.directory, dir))
         .sort((a, b) => b.time.updated - a.time.updated)
-      if (inFolder.length === 0) {
-        setSelectedSessionId('')
-      } else {
-        setSelectedSessionId(inFolder[0]!.id)
+      if (currentInFolder.length > 0) {
+        setSelectedSessionId(currentInFolder[0]!.id)
+        return
+      }
+
+      const list = await refreshSessions([dir])
+      const refreshedInFolder = list
+        .filter(s => sameDirectory(s.directory, dir))
+        .sort((a, b) => b.time.updated - a.time.updated)
+      if (refreshedInFolder.length > 0) {
+        setSelectedSessionId(refreshedInFolder[0]!.id)
       }
     },
-    [sessions],
+    [sessions, refreshSessions],
   )
 
   const handleCreateSession = useCallback(async () => {
@@ -822,6 +922,42 @@ function App() {
       setCreatingSession(false)
     }
   }, [selectedDirectory, refreshSessions])
+
+  const handleAddDirectory = useCallback(async () => {
+    const dir = promptDirectoryPath(selectedDirectory || '')
+    if (!dir) return
+    setManualDirectories((prev) => (prev.includes(dir) ? prev : [...prev, dir]))
+    setClosedDirectories((prev) => prev.filter((d) => d !== dir))
+    setSelectedDirectory(dir)
+    setSelectedSessionId('')
+    setMessages([])
+    setTodos([])
+    setTodosSnapshotAtMessageIndex({})
+    const list = await refreshSessions([dir])
+    const inFolder = list
+      .filter(s => sameDirectory(s.directory, dir))
+      .sort((a, b) => b.time.updated - a.time.updated)
+    if (inFolder.length > 0) {
+      setSelectedSessionId(inFolder[0]!.id)
+    }
+  }, [selectedDirectory, refreshSessions])
+
+  const handleCloseDirectory = useCallback(
+    (dir: string) => {
+      const normalized = normalizeSessionDirectory(dir)
+      if (!normalized) return
+      setClosedDirectories((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]))
+      if (sameDirectory(selectedDirectory, normalized)) {
+        setSelectedDirectory('')
+        setSelectedSessionId('')
+        setMessages([])
+        setTodos([])
+        setTodosSnapshotAtMessageIndex({})
+      }
+      void refreshSessions()
+    },
+    [selectedDirectory, refreshSessions],
+  )
 
   const handleArchiveSession = useCallback(
     async (sessionId: string) => {
@@ -1001,6 +1137,8 @@ function App() {
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         apiConnected={apiConnected}
+        onAddDirectory={handleAddDirectory}
+        onCloseDirectory={handleCloseDirectory}
       />
 
       {/* 中栏 + 右栏：同一相对定位容器，便于子任务与消息连线 */}
@@ -1090,7 +1228,7 @@ function App() {
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span>子任务分组（调试）</span>
+              <span>Agent Action Visualization</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <button
                   type="button"

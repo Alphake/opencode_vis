@@ -20,6 +20,7 @@ export const ACTION_TYPE_ORDER: readonly ActionType[] = [
 export type ActionTypePaletteId =
   | 'contrast'
   | 'spectrum'
+  | 'd3PairedVivid7'
   | 'd3Paired'
   | 'd3PairedVivid'
   | 'd3Observable'
@@ -29,6 +30,7 @@ export type ActionTypePaletteId =
 export const ACTION_TYPE_PALETTE_LABELS: Record<ActionTypePaletteId, string> = {
   contrast: '高对比 · 手工',
   spectrum: '色谱 · 手工（含柔和黄/玫红）',
+  d3PairedVivid7: 'd3 · schemePaired（亮色7分组）',
   d3Paired: 'd3 · schemePaired（柔和版）',
   d3PairedVivid: 'd3 · schemePaired（亮色版）',
   d3Observable: 'd3 · schemeObservable10 + Tableau（柔和版）',
@@ -157,11 +159,36 @@ const PAIRED_BASE_BY_TYPE: Record<ActionType, string> = {
   Compaction: '#fb9a99',
 }
 
+const PAIRED_VIVID_7: Record<ActionType, string> = {
+  Think: CONTRAST.Think.fill,
+  Plan: CONTRAST.Think.fill,
+  Clarify: '#FFE2B3',
+  Permission: '#FFE2B3',
+  Read: CONTRAST.Plan.fill,
+  Search: CONTRAST.Plan.fill,
+  Shell: CONTRAST.Plan.fill,
+  Write: CONTRAST.Write.fill,
+  Response: CONTRAST.Write.fill,
+  Skill: '#E7C9A8',
+  Compaction: CONTRAST.Shell.fill,
+  Subagent: '#FFE8F0',
+}
+
 function buildD3Paired(vivid: boolean): Record<ActionType, ActionTypeTriad> {
   const out = {} as Record<ActionType, ActionTypeTriad>
   ACTION_TYPE_ORDER.forEach((t) => {
     const base = PAIRED_BASE_BY_TYPE[t]
     out[t] = vivid ? triadFromD3SchemeColorVivid(base) : triadFromD3SchemeColor(base)
+  })
+  return out
+}
+
+function buildD3PairedVivid7(): Record<ActionType, ActionTypeTriad> {
+  const out = {} as Record<ActionType, ActionTypeTriad>
+  ACTION_TYPE_ORDER.forEach((t) => {
+    const src = PAIRED_VIVID_7[t]
+    const tone = triadFromD3SchemeColorVivid(src)
+    out[t] = { fill: src, stroke: tone.stroke, accent: tone.accent }
   })
   return out
 }
@@ -194,6 +221,7 @@ function buildD3Observable(vivid: boolean): Record<ActionType, ActionTypeTriad> 
 const PALETTES: Record<ActionTypePaletteId, Record<ActionType, ActionTypeTriad>> = {
   contrast: CONTRAST,
   spectrum: SPECTRUM,
+  d3PairedVivid7: buildD3PairedVivid7(),
   d3Paired: buildD3Paired(false),
   d3PairedVivid: buildD3Paired(true),
   d3Observable: buildD3Observable(false),
@@ -240,4 +268,4 @@ export function getActionTypePaletteRecord(
   return PALETTES[paletteId]
 }
 
-export const DEFAULT_ACTION_TYPE_PALETTE_ID: ActionTypePaletteId = 'd3PairedVivid'
+export const DEFAULT_ACTION_TYPE_PALETTE_ID: ActionTypePaletteId = 'd3PairedVivid7'

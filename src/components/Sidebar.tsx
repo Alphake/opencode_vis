@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { OcSession } from '../types/opencode'
 import { folderDisplayName } from '../utils/sessionFolders'
 
@@ -7,7 +7,7 @@ interface SidebarProps {
   sessionsInFolder: OcSession[]
   directories: string[]
   selectedDirectory: string
-  onSelectDirectory: (dir: string) => void
+  onSelectDirectory: (dir: string) => void | Promise<void>
   selectedSessionId: string
   onSelectSession: (id: string) => void
   onCreateSession: () => void | Promise<void>
@@ -18,9 +18,12 @@ interface SidebarProps {
   collapsed: boolean
   onToggle: () => void
   apiConnected: boolean
+  onAddDirectory?: () => void
+  onCloseDirectory?: (dir: string) => void
 }
 
 const RAIL_WIDTH = 44
+type DirMenu = { x: number; y: number; dir: string }
 
 export default function Sidebar({
   sessionsInFolder,
@@ -36,12 +39,36 @@ export default function Sidebar({
   collapsed,
   onToggle,
   apiConnected,
+  onAddDirectory,
+  onCloseDirectory,
 }: SidebarProps) {
   const [hoverSessionId, setHoverSessionId] = useState<string | null>(null)
+  const [dirMenu, setDirMenu] = useState<DirMenu | null>(null)
+  const dirMenuRef = useRef<HTMLDivElement>(null)
   const titleName = useMemo(
     () => folderDisplayName(selectedDirectory),
     [selectedDirectory],
   )
+  useEffect(() => {
+    if (!dirMenu) return
+    const onPointer = (e: MouseEvent) => {
+      if (!dirMenuRef.current?.contains(e.target as Node)) {
+        setDirMenu(null)
+      }
+    }
+    const onScroll = () => setDirMenu(null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDirMenu(null)
+    }
+    window.addEventListener('mousedown', onPointer)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onPointer)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [dirMenu])
 
   if (collapsed) {
     return (
@@ -104,6 +131,28 @@ export default function Sidebar({
           overflowY: 'auto',
         }}
       >
+        {onAddDirectory && (
+          <button
+            type="button"
+            title="添加 workspace/directory"
+            onClick={onAddDirectory}
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              border: '1px solid #D8C2EB',
+              background: 'linear-gradient(180deg, #FCF8FF 0%, #F3E9FB 100%)',
+              cursor: 'pointer',
+              color: '#6D35A1',
+              fontSize: 18,
+              fontWeight: 500,
+              lineHeight: '28px',
+              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.75)',
+            }}
+          >
+            +
+          </button>
+        )}
         {directories.map((dir) => {
           const active = dir === selectedDirectory
           const label = folderDisplayName(dir).slice(0, 2)
@@ -111,8 +160,13 @@ export default function Sidebar({
             <button
               key={dir || '__root__'}
               type="button"
-              title={dir || '使用服务端当前工作区目录'}
+              title={dir}
               onClick={() => onSelectDirectory(dir)}
+              onContextMenu={(e) => {
+                if (!onCloseDirectory) return
+                e.preventDefault()
+                setDirMenu({ x: e.clientX, y: e.clientY, dir })
+              }}
               style={{
                 width: 32,
                 minHeight: 32,
@@ -333,6 +387,45 @@ export default function Sidebar({
           )}
         </div>
       </div>
+      {dirMenu && onCloseDirectory && (
+        <div
+          ref={dirMenuRef}
+          style={{
+            position: 'fixed',
+            top: dirMenu.y,
+            left: dirMenu.x,
+            zIndex: 2000,
+            minWidth: 148,
+            background: '#FFFFFF',
+            border: '1px solid #E7E7E7',
+            borderRadius: 8,
+            boxShadow: '0 6px 24px rgba(0,0,0,0.14)',
+            padding: 4,
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              onCloseDirectory(dirMenu.dir)
+              setDirMenu(null)
+            }}
+            style={{
+              width: '100%',
+              height: 30,
+              border: 'none',
+              borderRadius: 6,
+              background: 'transparent',
+              cursor: 'pointer',
+              textAlign: 'left',
+              padding: '0 10px',
+              fontSize: 12,
+              color: '#B42318',
+            }}
+          >
+            Close Workspace
+          </button>
+        </div>
+      )}
     </div>
   )
 }

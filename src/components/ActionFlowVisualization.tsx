@@ -1972,7 +1972,8 @@ export default function ActionFlowVisualization({
 
       const actionGNode = actionG.node() as SVGGElement | null
       const iconBox = isPackingLayout ? Math.max(6, Math.min(16, Math.min(w, h) - 4)) : 16
-      if (actionGNode && effectiveColorMode !== 'type' && (!isPackingLayout || iconBox >= 7)) {
+      const canShowIcon = !isPackingLayout || w >= MIN_W
+      if (actionGNode && canShowIcon) {
         appendActionFlowIcon(
           actionGNode,
           getActionFlowIconSvg(act.actionType),

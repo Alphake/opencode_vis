@@ -55,10 +55,8 @@ export default function SubtaskDebugPanel({
   onSelectAction,
   flowLayoutMode = 'timeline',
 }: SubtaskDebugPanelProps) {
-  const [colorBy, setColorBy] = useState<'status' | 'tokens' | 'type'>('status')
-  const [actionTypePaletteId, setActionTypePaletteId] = useState<ActionTypePaletteId>(
-    DEFAULT_ACTION_TYPE_PALETTE_ID,
-  )
+  const [colorBy, setColorBy] = useState<'tokens' | 'type'>('type')
+  const actionTypePaletteId: ActionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID
 
   return (
     <div
@@ -80,8 +78,6 @@ export default function SubtaskDebugPanel({
       >
         <ActionTypeColorLegend
           paletteId={actionTypePaletteId}
-          onPaletteIdChange={setActionTypePaletteId}
-          includeStatusColors
         />
       </div>
       <div

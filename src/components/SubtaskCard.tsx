@@ -71,7 +71,7 @@ interface SubtaskCardProps {
   actionTypePaletteId: ActionTypePaletteId
 }
 
-type ColorByMode = 'status' | 'tokens' | 'type'
+type ColorByMode = 'tokens' | 'type'
 type FilterMode = 'duration' | 'tokens'
 
 function MetricBox({ label, value, alert }: { label: string; value: string; alert?: boolean }) {
@@ -585,36 +585,6 @@ export default function SubtaskCard({
               Actions color
             </span>
             <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <button
-                type="button"
-                onClick={() => onColorByChange('status')}
-                style={{
-                  display: 'flex',
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 4,
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  padding: 0,
-                  fontFamily: fontSans,
-                  fontSize: 11,
-                  lineHeight: '16px',
-                  color: '#2B2B2B',
-                }}
-              >
-                <span
-                  style={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: 3,
-                    boxSizing: 'border-box',
-                    background: colorBy === 'status' ? '#C6C6C6' : 'transparent',
-                    border: colorBy === 'status' ? '1px solid #8A8A8A' : '1px solid #C6C6C6',
-                  }}
-                />
-                status
-              </button>
               <button
                 type="button"
                 onClick={() => onColorByChange('tokens')}

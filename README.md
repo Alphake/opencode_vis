@@ -10,51 +10,67 @@
 
 本前端依赖本机运行的 OpenCode **无头 HTTP 服务**，请先安装命令行工具。任选其一即可（详见 [官方安装说明](https://opencode.ai/docs/)）：
 
-- **推荐（跨平台）**：`curl -fsSL https://opencode.ai/install | bash`
-- **Node 全局包**：`npm install -g opencode-ai`
-- **Windows**：亦可用 `choco install opencode`、`scoop install opencode` 等（见官方文档）
-
 安装后确认：
 
 ```bash
 opencode --version
 ```
 
-首次使用需配置模型与 API Key，可参考文档中的 **`opencode auth login`** 或 TUI 内 `/connect`。
-
 ### 2. 启动 OpenCode HTTP 服务
 
-**本仓库前端写死的 API 地址为 `http://127.0.0.1:4096`**（见 `src/services/opencodeApi.ts`），因此请用 **4096** 端口启动服务：
+这一步可以理解成：先把后端服务开起来，前端再去连它。
+
+先在命令行执行：
+
+```bash
+opencode serve
+```
+
+正常会看到类似：
+
+```text
+opencode server listening on http://127.0.0.1:4096
+```
+
+上面最后的数字就是端口号。  
+如果不是 `4096`，修改`.env.local`中端口，如果没有`.env.local`文件，复制`.env.example`并重命名为`.env.local`
+
+```env
+VITE_OPENCODE_BASE=http://127.0.0.1:这里换成你终端显示的端口
+```
+
+你也可以直接指定端口启动（例如 4096）：
 
 ```bash
 opencode serve --port 4096
 ```
 
-保持该终端窗口运行。若你改用其他端口，需同步修改前端中的 `BASE` 常量并重新构建/开发。
-
-可选：浏览器跨域时，可按 [OpenCode CLI · serve](https://opencode.ai/docs/cli/) 说明为 `serve` 增加 `--cors` 等参数。
-
 ### 3. 安装并启动本前端
 
 ```bash
-cd /path/to/cockpit-ui
 npm install
 npm run dev
 ```
 
 默认开发服务器：**<http://localhost:5173>**（见 `vite.config.ts`）。
 
-在浏览器打开上述地址即可使用；请确保上一步中 `opencode serve` 仍在运行，否则界面无法拉取会话与消息。
+在浏览器打开上述地址即可使用；并确保 `opencode serve` 的终端窗口保持运行。
 
-### 4. 其他 npm 脚本
+### 4. 环境变量说明（`.env.local`）
 
-| 命令 | 说明 |
-| --- | --- |
-| `npm run dev` | Vite 开发模式（热更新） |
-| `npm run build` | TypeScript 检查 + 生产构建（输出到 `dist/`） |
-| `npm run preview` | 本地预览构建产物 |
-| `npm run lint` | ESLint 检查 |
-| `npm run smoke:opencode` | 不经过浏览器，直连 OpenCode 做健康检查与 `POST /session` 探测（可选环境变量 `OPENCODE_BASE`、`OPENCODE_DIRECTORY`） |
+建议先复制模板：
+
+```bash
+cp .env.example .env.local
+```
+
+常用变量：
+
+- `VITE_OPENCODE_BASE`：前端请求 OpenCode 的地址。你每次启动 `opencode serve` 后，看终端输出地址填这里即可。
+- `VITE_OPENCODE_DEFAULT_MODEL`（可选）：默认模型，格式是 `provider/model`。  
+  不配也能用，前端会走 OpenCode 服务端自己的默认模型。只有你想固定模型时才需要填。模型获取修改逻辑开发中（todo)
+
+
 
 ---
 
@@ -70,6 +86,7 @@ npm run dev
 | `eslint.config.js` | ESLint 扁平配置 |
 | `index.html` | 单页入口，标题「Agent Cockpit」，引入字体与 `/src/main.tsx` |
 | `.gitignore` | Git 忽略规则 |
+| `.env.example` | 可提交的环境变量模板（本地真实配置放 `.env.local`） |
 
 ### `public/`
 

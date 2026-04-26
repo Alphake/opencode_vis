@@ -1,18 +1,15 @@
 import type { ActionTypePaletteId } from '../styles/actionTypePalettes'
 import {
-  ACTION_TYPE_ORDER,
-  ACTION_TYPE_PALETTE_LABELS,
   getActionTypeTriad,
 } from '../styles/actionTypePalettes'
-import { actionFlowPalette } from '../styles/actionFlowPalette'
+import type { ActionType } from '../types/opencode'
+import { getActionFlowIconSvg } from './actionFlowIcons'
 
 const fontSans =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
 
 type Props = {
   paletteId: ActionTypePaletteId
-  onPaletteIdChange?: (id: ActionTypePaletteId) => void
-  includeStatusColors?: boolean
 }
 
 /**
@@ -20,30 +17,37 @@ type Props = {
  */
 export default function ActionTypeColorLegend({
   paletteId,
-  onPaletteIdChange,
-  includeStatusColors = false,
 }: Props) {
-  const typeItems = ACTION_TYPE_ORDER.map((type) => {
+  const buildIconMarkup = (type: ActionType): string => {
+    const raw = getActionFlowIconSvg(type)
+    return raw.replace(/<svg\b/, '<svg width="12" height="12"')
+  }
+  const typeOrder: ActionType[] = [
+    'Think',
+    'Plan',
+    'Clarify',
+    'Permission',
+    'Read',
+    'Search',
+    'Shell',
+    'Write',
+    'Response',
+    'Skill',
+    'Compaction',
+    'Subagent',
+  ]
+  const typeItems = typeOrder.map((type) => {
     const c = getActionTypeTriad(paletteId, type)
-    return { key: type, label: type, fill: c.fill, stroke: c.stroke }
+    return {
+      key: type,
+      label: type,
+      fill: c.fill,
+      stroke: c.stroke,
+      icon: buildIconMarkup(type),
+      iconColor: c.accent,
+    }
   })
-  const statusItems = includeStatusColors
-    ? [
-        {
-          key: 'status-error',
-          label: 'error',
-          fill: actionFlowPalette.red.fill,
-          stroke: actionFlowPalette.red.stroke,
-        },
-        {
-          key: 'status-pending',
-          label: 'pending',
-          fill: actionFlowPalette.pending.fill,
-          stroke: actionFlowPalette.pending.stroke,
-        },
-      ]
-    : []
-  const items = [...typeItems, ...statusItems]
+  const items = typeItems
 
   return (
     <div
@@ -54,15 +58,7 @@ export default function ActionTypeColorLegend({
         padding: '6px 0 8px',
       }}
     >
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 8,
-        }}
-      >
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <span
           style={{
             fontSize: 10,
@@ -72,44 +68,8 @@ export default function ActionTypeColorLegend({
             whiteSpace: 'nowrap',
           }}
         >
-          图例（action_type）
+          Legend (Action Type)
         </span>
-        {onPaletteIdChange ? (
-          <label
-            style={{
-              display: 'flex',
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 6,
-              margin: 0,
-              cursor: 'pointer',
-            }}
-          >
-            <span style={{ fontSize: 10, color: '#666', fontFamily: fontSans }}>Palette</span>
-            <select
-              value={paletteId}
-              onChange={(e) => onPaletteIdChange(e.target.value as ActionTypePaletteId)}
-              style={{
-                fontSize: 10,
-                lineHeight: '14px',
-                fontFamily: fontSans,
-                border: '1px solid #CFCFCF',
-                borderRadius: 4,
-                padding: '1px 6px',
-                color: '#2B2B2B',
-                background: '#fff',
-                maxWidth: 260,
-              }}
-              aria-label="Select action type palette"
-            >
-              {(Object.keys(ACTION_TYPE_PALETTE_LABELS) as ActionTypePaletteId[]).map((id) => (
-                <option key={id} value={id}>
-                  {ACTION_TYPE_PALETTE_LABELS[id]}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
       </div>
       <div
         style={{
@@ -148,15 +108,34 @@ export default function ActionTypeColorLegend({
             <span
               title={`${item.label} · ${item.fill}`}
               style={{
-                width: 20,
-                height: 12,
+                width: 18,
+                height: 18,
                 borderRadius: 3,
                 boxSizing: 'border-box',
                 background: item.fill,
                 border: `1.5px solid ${item.stroke}`,
                 flexShrink: 0,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}
-            />
+            >
+              {item.icon ? (
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    lineHeight: 0,
+                    color: item.iconColor,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    pointerEvents: 'none',
+                  }}
+                  dangerouslySetInnerHTML={{ __html: item.icon }}
+                />
+              ) : null}
+            </span>
           </div>
         ))}
       </div>

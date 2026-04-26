@@ -145,6 +145,26 @@ export async function getProjectDirectories(): Promise<string[]> {
   return out
 }
 
+/** `GET /path`：读取服务端当前 workspace 路径，兼容不同字段形态。 */
+export async function getCurrentWorkspaceDirectory(): Promise<string | null> {
+  const res = await fetch(`${BASE}/path`, { headers: withDirectoryHeaders({}) })
+  if (!res.ok) {
+    throw new Error(`GET /path failed: ${res.status}`)
+  }
+  const data = await res.json()
+  if (typeof data === 'string') return normalizeDirectoryLike(data)
+  if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>
+    const dir =
+      normalizeDirectoryLike(obj.directory) ||
+      normalizeDirectoryLike(obj.path) ||
+      normalizeDirectoryLike(obj.cwd) ||
+      normalizeDirectoryLike(obj.root)
+    if (dir) return dir
+  }
+  return null
+}
+
 /**
  * 新建会话。可选 `directory` 会通过 `x-opencode-directory` 传给 OpenCode，与桌面/Web 多项目切换一致。
  * 不传则使用服务端当前工作区目录。
