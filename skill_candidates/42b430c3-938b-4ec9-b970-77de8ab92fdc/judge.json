@@ -1,0 +1,17 @@
+{
+  "verdict": "accept",
+  "scores": {
+    "quality": 7.5,
+    "evidence_fit": 8.0,
+    "safety": 9.5
+  },
+  "reasons": [
+    "技能结构完整，包含activation/procedure/termination三个关键字段",
+    "procedure步骤清晰，涵盖从明确研究目标到CHi论文贡献对齐的完整流程",
+    "evidence_fit高：episode中助手遵循的工作流（调研CHi标准→搜索领域痛点→设计研究问题→招募策略→访谈协议）与技能描述高度一致",
+    "termination条件明确：用户获得包含研究问题、参与者计划和访谈协议的完整设计后可结束",
+    "quality扣分点：procedure中部分步骤较为笼统（如'align with CHI contribution requirements'），可进一步细化可操作的子步骤",
+    "safety无风险：纯学术研究方法论设计，不涉及危险或越权行为"
+  ],
+  "revision_hints": []
+}
