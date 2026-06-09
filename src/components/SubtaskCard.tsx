@@ -350,14 +350,24 @@ export default function SubtaskCard({
    * treemap, tooltip, and selection state stay consistent. Only post-anchor “hypothetical old branch” steps
    * come from the snapshot ghost stream (absent in the forked session timeline).
    *
-   * Fallback: when the new session omits copied pre-fork turns, treat the entire snapshot prefix as pre-fork.
+   * Routing rules (applied in order):
+   *
+   * A) Anchor found in THIS subtask AND post-anchor actions exist here:
+   *    → Standard merged view. Handles the case where fork prompt reply lands in the same subtask.
+   *
+   * B) Anchor found in THIS subtask BUT no post-anchor actions exist:
+   *    → New branch is in the NEXT subtask (displayIndex + 1). Render this card normally so the
+   *      origin copy is not shown twice; the full comparison appears in the next card via Rule C.
+   *
+   * C) Anchor NOT found AND displayIndex === forkOriginDisplayIndex + 1:
+   *    → First post-fork subtask (fork prompt + AI reply). Show full comparison using snapshot as
+   *      historical context: snapshot history → ghost → current flowActions as new branch.
+   *
+   * All other subtasks return null.
    */
   const forkMergedFlow = useMemo(() => {
     if (!forkPanelSnapshotBundle || forkPanelSnapshotBundle.version !== 2) return null
     const b = forkPanelSnapshotBundle
-    if (b.forkOriginSubtaskId !== subtask.subtask_id && b.forkOriginDisplayIndex !== displayIndex) {
-      return null
-    }
     const anchorMessageId = b.forkAnchorMessageId
     const anchorPartId = b.forkAnchorPartId
     const matchAnchor = (a: MappedAction & { row: number }) =>
@@ -365,35 +375,39 @@ export default function SubtaskCard({
 
     const oldActions = b.snapshot.flowActions
     const oldAnchorIdx = oldActions.findIndex(matchAnchor)
-    /** Anchor must resolve inside the snapshot; otherwise skip merged mode */
     if (oldAnchorIdx < 0) return null
 
-    /** Prefer locating the anchor inside the live session so treemap/selection share object identity */
     const currentAnchorIdx = flowActions.findIndex(matchAnchor)
 
     let preForkAndAnchor: (MappedAction & { row: number })[]
     let postAnchorCurrent: (MappedAction & { row: number })[]
+
     if (currentAnchorIdx >= 0) {
       preForkAndAnchor = flowActions.slice(0, currentAnchorIdx + 1)
       postAnchorCurrent = flowActions.slice(currentAnchorIdx + 1)
+      /**
+       * Rule B: anchor present but no post-fork actions in this card.
+       * The fork comparison will be shown in the next subtask card (Rule C).
+       */
+      if (postAnchorCurrent.length === 0) return null
     } else {
-      /** Fallback when forked session lacks copied history — treat snapshot prefix as canonical */
+      /**
+       * Rule C: first post-fork subtask — show full comparison with snapshot as historical prefix.
+       */
+      if (displayIndex !== b.forkOriginDisplayIndex + 1) return null
       preForkAndAnchor = oldActions.slice(0, oldAnchorIdx + 1)
       postAnchorCurrent = flowActions
     }
 
     const anchorActionKey = actionKey(preForkAndAnchor[preForkAndAnchor.length - 1]!)
-    /** Live-session semantic stream: prefix + post-anchor branch */
     const sessionActions = [...preForkAndAnchor, ...postAnchorCurrent].sort(
       (x, y) => x.sortTime - y.sortTime,
     )
 
-    /** Old branch tail from snapshot — mark `forkGhost` */
     const ghostSuffix = oldActions
       .slice(oldAnchorIdx + 1)
       .map((a) => ({ ...a, forkGhost: true }))
 
-    /** Forked trajectory after anchor — tag `forkCompareRow = 2` */
     const newBranch = postAnchorCurrent.map((a) => ({ ...a, forkCompareRow: 2 as const }))
 
     const merged = [...preForkAndAnchor, ...ghostSuffix, ...newBranch].sort(
@@ -401,7 +415,7 @@ export default function SubtaskCard({
     )
     const mergedTooltips = [...b.snapshot.tooltipMessages, ...tooltipLookupMessages]
     return { merged, mergedTooltips, anchorActionKey, sessionActions }
-  }, [forkPanelSnapshotBundle, subtask.subtask_id, displayIndex, flowActions, tooltipLookupMessages])
+  }, [forkPanelSnapshotBundle, displayIndex, flowActions, tooltipLookupMessages])
   const hasActiveRunningAction = useMemo(
     () => flowActions.some((a) => a.status === 'running' || a.status === 'pending'),
     [flowActions],

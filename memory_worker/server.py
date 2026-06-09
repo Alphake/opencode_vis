@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import re
@@ -17,11 +18,18 @@ from urllib.request import Request, urlopen
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+WORKER_ROOT = Path(__file__).resolve().parent
 LOG_ROOT = REPO_ROOT / "memory_worker" / "logs"
 PROMPT_ROOT = REPO_ROOT / "memory_worker" / "prompts"
 INGEST_DEDUP_INDEX = LOG_ROOT / "ingest-dedup-index.json"
 INGEST_DEDUP_STALE_RUNNING_SEC = 900
 _ingest_dedup_lock = threading.Lock()
+
+_TRACE_PARSER_SPEC = importlib.util.spec_from_file_location("trace_parser", WORKER_ROOT / "trace_parser.py")
+if _TRACE_PARSER_SPEC is None or _TRACE_PARSER_SPEC.loader is None:
+    raise RuntimeError("failed to load memory_worker/trace_parser.py")
+trace_parser = importlib.util.module_from_spec(_TRACE_PARSER_SPEC)
+_TRACE_PARSER_SPEC.loader.exec_module(trace_parser)
 
 
 def load_env_file(path: Path) -> None:
@@ -1366,13 +1374,71 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._read_json()
-            trace = normalize_trace_payload(body)
+            if isinstance(body, dict) and body.get("sessionId") and body.get("endAssistantMessageId"):
+                session_id = str(body.get("sessionId") or "").strip()
+                end_msg_id = str(body.get("endAssistantMessageId") or "").strip()
+                directory_override = str(body.get("directory") or "").strip() or None
+                parent_session_id = str(body.get("parentSessionID") or "").strip() or None
+                fork_meta = body.get("forkMeta") if isinstance(body.get("forkMeta"), dict) else None
+                try:
+                    max_turns = max(1, int(body.get("maxTurns") or 5))
+                except Exception:
+                    max_turns = 5
+
+                print(
+                    "[memory-worker] ingest.ref "
+                    f"sessionId={session_id} endAssistantMessageId={end_msg_id} "
+                    f"maxTurns={max_turns} directory={directory_override or ''} fork={bool(fork_meta)}"
+                )
+
+                messages = opencode_get_messages(session_id, directory=directory_override)
+                trace = trace_parser.build_session_trace_bundle(
+                    messages=messages,
+                    primary_end_assistant_message_id=end_msg_id,
+                    session={"id": session_id, "directory": directory_override},
+                    directory=directory_override,
+                    max_turns=max_turns,
+                    fetch_messages=opencode_get_messages,
+                )
+                if not trace:
+                    self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": "Could not build trace from {sessionId, endAssistantMessageId}",
+                            "sessionId": session_id,
+                            "endAssistantMessageId": end_msg_id,
+                        },
+                    )
+                    return
+
+                if fork_meta:
+                    fork_data = trace_parser.build_fork_comparison(
+                        fork_meta=fork_meta,
+                        directory=directory_override,
+                        fetch_messages=opencode_get_messages,
+                    )
+                    if fork_data:
+                        trace["fork"] = fork_data
+
+                try:
+                    result = run_pipeline_with_dedup(
+                        trace,
+                        directory_override=directory_override,
+                        parent_session_id=parent_session_id,
+                    )
+                except Exception as inner:
+                    result = {"ok": False, "error": str(inner)}
+                self._send_json(200, result)
+                return
+
+            trace = trace_parser.normalize_trace_payload(body) or normalize_trace_payload(body)
             if not trace:
                 self._send_json(
                     400,
                     {
                         "ok": False,
-                        "error": "Invalid payload, expected trace.v1, trace.session.v1, or {trace: ...}",
+                        "error": "Invalid payload. Send either {sessionId, endAssistantMessageId} or a full trace (trace.v1 / trace.session.v1).",
                     },
                 )
                 return

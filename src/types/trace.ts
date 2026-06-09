@@ -132,7 +132,7 @@ export function normalizeSessionTraceBundle(raw: unknown): SessionTraceBundle | 
   const t = raw as Record<string, unknown>
   if (t.schemaVersion !== 'trace.session.v1') return null
   if (t.current_turn && typeof t.current_turn === 'object') {
-    return t as SessionTraceBundle
+    return t as unknown as SessionTraceBundle
   }
   const turns = t.turns
   if (!Array.isArray(turns) || turns.length === 0) return null
@@ -140,7 +140,7 @@ export function normalizeSessionTraceBundle(raw: unknown): SessionTraceBundle | 
   if (newestFirst.length === 0) return null
   const [current_turn, ...rest] = newestFirst
   return {
-    ...(t as SessionTraceBundle),
+    ...(t as unknown as SessionTraceBundle),
     current_turn: current_turn!,
     history: [...rest].reverse(),
   }

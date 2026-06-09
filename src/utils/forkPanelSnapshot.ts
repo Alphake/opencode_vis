@@ -53,7 +53,7 @@ function storageKey(sessionId: string): string {
 
 export function saveForkPanelSnapshotBundle(sessionId: string, bundle: ForkPanelSnapshotBundle): void {
   try {
-    sessionStorage.setItem(storageKey(sessionId), JSON.stringify(bundle))
+    localStorage.setItem(storageKey(sessionId), JSON.stringify(bundle))
   } catch {
     // quota / private mode
   }
@@ -86,7 +86,7 @@ function normalizeBundle(raw: unknown): ForkPanelSnapshotBundle | null {
 
 export function getForkPanelSnapshotBundle(sessionId: string): ForkPanelSnapshotBundle | null {
   try {
-    const raw = sessionStorage.getItem(storageKey(sessionId))
+    const raw = localStorage.getItem(storageKey(sessionId))
     if (!raw) return null
     const parsed = JSON.parse(raw) as unknown
     return normalizeBundle(parsed)

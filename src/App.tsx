@@ -56,28 +56,24 @@ import {
   type ForkPanelSnapshotBundle,
 } from './utils/forkPanelSnapshot'
 import {
-  buildSessionTraceAsync,
   findLatestAssistantStopMessage,
   getAssistantStopCompletedMs,
   isAssistantStopWithinIngestWindow,
   TRACE_INGEST_FRESH_WINDOW_MS,
 } from './utils/traceExtraction'
-import {
-  attachForkPayloadToSessionTrace,
-  resolveForkIngestMeta,
-} from './utils/traceForkIngest'
-import { primaryTurnFromIngestTrace } from './types/trace'
+import { resolveForkIngestMeta } from './utils/traceForkIngest'
 import {
   hasTraceIngestClaim,
   releaseTraceIngestClaim,
   tryClaimTraceIngest,
 } from './utils/traceIngestClaim'
-import { ingestTraceToMemoryWorker } from './services/memoryWorkerApi'
+import { ingestTraceReference } from './services/memoryWorkerApi'
 import {
   collectInternalSessionIdsFromIngest,
   registerMemoryWorkerInternalSessionIds,
   shouldSkipTraceIngestForSession,
 } from './utils/memoryWorkerSessions'
+import { traceSessionTurnLimit } from './config/traceIngest'
 
 declare global {
   interface Window {
@@ -531,83 +527,46 @@ function App() {
         const session = sessionsRef.current.find((s) => s.id === sid)
         const dir = session?.directory
         try {
-          const freshMessages = await getMessages(sid, 'trace extraction after finish:stop', dir)
-          debugLog('[VibeTrace][getMessages output]', {
-            sessionID: sid,
-            reason: 'trace extraction after finish:stop',
-            messages: freshMessages,
-          })
-          if (selectedSessionIdRef.current !== sid) return
-          let sessionTrace = await buildSessionTraceAsync({
-            messages: freshMessages,
-            primaryEndAssistantMessageId: endAssistantMessageId,
-            session,
-            sessionDirectory: dir,
-            nowMs: Date.now(),
-          })
-          if (sessionTrace) {
-            const forkMeta = resolveForkIngestMeta(sid, sessionsRef.current)
-            if (forkMeta) {
-              sessionTrace = await attachForkPayloadToSessionTrace({
-                trace: sessionTrace,
-                meta: forkMeta,
-                sessions: sessionsRef.current,
-                triggeringSessionId: sid,
-                triggeringMessages: freshMessages,
-              })
-            }
-          }
-          if (!sessionTrace) {
+          if (selectedSessionIdRef.current !== sid) {
             releaseTraceIngestClaim(sid, endAssistantMessageId)
             traceIngestDebounceStartedRef.current.delete(traceKey)
-            console.warn('[VibeTrace][trace] stop message found, but session trace could not be built', {
-              sessionID: sid,
-              endAssistantMessageId,
-            })
             return
           }
-          const primaryTurn = primaryTurnFromIngestTrace(sessionTrace)
-          setLatestTurnTrace(primaryTurn)
-          debugLog('[VibeTrace][session trace]', sessionTrace)
-          const historyCount = sessionTrace.history.length
-          console.info('[VibeTrace][trace] posting /ingest-trace', {
+          const forkMeta = resolveForkIngestMeta(sid, sessionsRef.current)
+          const maxTurns = traceSessionTurnLimit()
+          console.info('[VibeTrace][trace] posting /ingest-trace reference', {
             sessionID: sid,
             endAssistantMessageId,
-            currentTurn: sessionTrace.current_turn.turn.endAssistantMessageId,
-            historyTurnCount: historyCount,
-            forkAttached: Boolean(sessionTrace.fork),
+            maxTurns,
+            forkMetaAttached: Boolean(forkMeta),
           })
-          void (async () => {
-            try {
-              const ingestResult = await ingestTraceToMemoryWorker(sessionTrace, {
-                directory: sessionTrace.session?.directory || session?.directory,
-                parentSessionID: sid,
-              })
-              if (ingestResult.duplicate) {
-                processedTraceTurnKeysRef.current.add(traceKey)
-                console.info('[VibeTrace][memory-worker ingest duplicate skipped]', ingestResult)
-              } else if (ingestResult.ok === false) {
-                processedTraceTurnKeysRef.current.add(traceKey)
-                traceIngestDebounceStartedRef.current.delete(traceKey)
-                console.warn('[VibeTrace][memory-worker ingest failed]', ingestResult.error ?? ingestResult)
-              } else {
-                processedTraceTurnKeysRef.current.add(traceKey)
-                registerMemoryWorkerInternalSessionIds(collectInternalSessionIdsFromIngest(ingestResult))
-                console.info('[VibeTrace][memory-worker ingest ok]', {
-                  runId: ingestResult.runId,
-                  runDir: ingestResult.runDir,
-                })
-              }
-            } catch (ingestErr) {
-              processedTraceTurnKeysRef.current.add(traceKey)
-              traceIngestDebounceStartedRef.current.delete(traceKey)
-              console.warn('[VibeTrace][memory-worker ingest failed]', ingestErr)
-            }
-          })()
+          const ingestResult = await ingestTraceReference({
+            sessionId: sid,
+            endAssistantMessageId,
+            directory: dir,
+            maxTurns,
+            parentSessionID: sid,
+            forkMeta: forkMeta ?? undefined,
+          })
+          if (ingestResult.duplicate) {
+            processedTraceTurnKeysRef.current.add(traceKey)
+            console.info('[VibeTrace][memory-worker ingest duplicate skipped]', ingestResult)
+          } else if (ingestResult.ok === false) {
+            processedTraceTurnKeysRef.current.add(traceKey)
+            traceIngestDebounceStartedRef.current.delete(traceKey)
+            console.warn('[VibeTrace][memory-worker ingest failed]', ingestResult.error ?? ingestResult)
+          } else {
+            processedTraceTurnKeysRef.current.add(traceKey)
+            registerMemoryWorkerInternalSessionIds(collectInternalSessionIdsFromIngest(ingestResult))
+            console.info('[VibeTrace][memory-worker ingest ok]', {
+              runId: ingestResult.runId,
+              runDir: ingestResult.runDir,
+            })
+          }
         } catch (e) {
           releaseTraceIngestClaim(sid, endAssistantMessageId)
           traceIngestDebounceStartedRef.current.delete(traceKey)
-          console.warn('[VibeTrace][trace] failed to refresh messages/build trace', e)
+          console.warn('[VibeTrace][memory-worker ingest failed]', e)
         }
       })()
     }, TRACE_EXTRACTION_DEBOUNCE_MS)
