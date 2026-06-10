@@ -165,6 +165,40 @@ def find_assistant_stop_turn_end_ids(messages: list[dict[str, Any]]) -> list[str
     return ids
 
 
+def collect_turn_prompt_records(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Chronological user prompts paired with assistant stop message IDs."""
+    records: list[dict[str, Any]] = []
+    for end_id in find_assistant_stop_turn_end_ids(messages):
+        end_index = next((i for i, m in enumerate(messages) if _info(m).get("id") == end_id), -1)
+        if end_index < 0:
+            continue
+        start_index = -1
+        for i in range(end_index, -1, -1):
+            if _info(messages[i]).get("role") == "user":
+                start_index = i
+                break
+        if start_index < 0:
+            continue
+        user_message = messages[start_index]
+        end_message = messages[end_index]
+        user_info = _info(user_message)
+        end_info = _info(end_message)
+        user_time = _record(user_info.get("time"))
+        end_time = _record(end_info.get("time"))
+        records.append(
+            {
+                "userInput": _user_text(user_message),
+                "startUserMessageId": str(user_info.get("id") or ""),
+                "endAssistantMessageId": end_id,
+                "startIndex": start_index,
+                "endIndex": end_index,
+                "created": user_time.get("created"),
+                "completed": end_time.get("completed"),
+            }
+        )
+    return records
+
+
 def slice_messages_for_turn(
     messages: list[dict[str, Any]],
     end_assistant_message_id: str,

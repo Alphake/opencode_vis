@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import type { OcSession } from './types/opencode'
 import {
   getCurrentWorkspaceDirectory,
@@ -97,10 +97,18 @@ const DEBUG_VERBOSE_LOGS =
 /** If SSE lags after send, poll GET /message until an assistant message appears (streaming / long runs) */
 const POLL_ASSISTANT_INTERVAL_MS = 2000
 const POLL_ASSISTANT_MAX_ROUNDS = 90
+const MESSAGE_PANEL_MIN_WIDTH = 420
+const SUBTASK_PANEL_DEFAULT_WIDTH = 630
+const SUBTASK_PANEL_MIN_WIDTH = 420
+const SUBTASK_PANEL_MAX_WIDTH = 1040
 
 function debugLog(...args: unknown[]): void {
   if (!DEBUG_VERBOSE_LOGS) return
   console.log(...args)
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
 }
 
 function loadComposerModelRefFromLs(): string {
@@ -109,6 +117,17 @@ function loadComposerModelRefFromLs(): string {
     return typeof v === 'string' ? v.trim() : ''
   } catch {
     return ''
+  }
+}
+
+function loadSubtaskPanelWidthFromLs(): number {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEYS.subtaskPanelWidth)
+    const n = raw ? Number(raw) : NaN
+    if (!Number.isFinite(n)) return SUBTASK_PANEL_DEFAULT_WIDTH
+    return clampNumber(n, SUBTASK_PANEL_MIN_WIDTH, SUBTASK_PANEL_MAX_WIDTH)
+  } catch {
+    return SUBTASK_PANEL_DEFAULT_WIDTH
   }
 }
 
@@ -334,9 +353,85 @@ function App() {
   const messageScrollRef = useRef<HTMLDivElement>(null)
   const todoPanelScrollRef = useRef<HTMLDivElement>(null)
   const subtaskScrollRef = useRef<HTMLDivElement>(null)
+  const [subtaskPanelWidth, setSubtaskPanelWidth] = useState(() => loadSubtaskPanelWidthFromLs())
+  const [isResizingSubtaskPanel, setIsResizingSubtaskPanel] = useState(false)
   const selectedSessionIdRef = useRef(selectedSessionId)
   selectedSessionIdRef.current = selectedSessionId
   const sseSyncTimerRef = useRef<number | null>(null)
+
+  const getSubtaskPanelWidthBounds = useCallback(() => {
+    const totalWidth = linkAreaRef.current?.getBoundingClientRect().width ?? window.innerWidth
+    const maxByCenter = Math.max(1, totalWidth - MESSAGE_PANEL_MIN_WIDTH)
+    const max = Math.max(1, Math.min(SUBTASK_PANEL_MAX_WIDTH, maxByCenter))
+    const min = Math.min(SUBTASK_PANEL_MIN_WIDTH, max)
+    return { min, max }
+  }, [])
+
+  useEffect(() => {
+    const clampToAvailableWidth = () => {
+      setSubtaskPanelWidth((prev) => {
+        const { min, max } = getSubtaskPanelWidthBounds()
+        return clampNumber(prev, min, max)
+      })
+    }
+    clampToAvailableWidth()
+    window.addEventListener('resize', clampToAvailableWidth)
+    return () => window.removeEventListener('resize', clampToAvailableWidth)
+  }, [getSubtaskPanelWidthBounds])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEYS.subtaskPanelWidth, String(Math.round(subtaskPanelWidth)))
+    } catch {
+      /* ignore */
+    }
+  }, [subtaskPanelWidth])
+
+  const handleSubtaskPanelResizePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+
+      const startX = event.clientX
+      const startWidth = subtaskPanelWidth
+      const { min, max } = getSubtaskPanelWidthBounds()
+      let latestWidth = clampNumber(startWidth, min, max)
+      const previousCursor = document.body.style.cursor
+      const previousUserSelect = document.body.style.userSelect
+
+      setIsResizingSubtaskPanel(true)
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+
+      const notifyLayoutChanged = () => {
+        window.dispatchEvent(new Event('resize'))
+      }
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        latestWidth = clampNumber(startWidth - (moveEvent.clientX - startX), min, max)
+        setSubtaskPanelWidth(latestWidth)
+        notifyLayoutChanged()
+      }
+      const stopResize = () => {
+        setIsResizingSubtaskPanel(false)
+        document.body.style.cursor = previousCursor
+        document.body.style.userSelect = previousUserSelect
+        window.removeEventListener('pointermove', handlePointerMove)
+        window.removeEventListener('pointerup', stopResize)
+        window.removeEventListener('pointercancel', stopResize)
+        try {
+          window.localStorage.setItem(STORAGE_KEYS.subtaskPanelWidth, String(Math.round(latestWidth)))
+        } catch {
+          /* ignore */
+        }
+        notifyLayoutChanged()
+      }
+
+      window.addEventListener('pointermove', handlePointerMove)
+      window.addEventListener('pointerup', stopResize)
+      window.addEventListener('pointercancel', stopResize)
+    },
+    [getSubtaskPanelWidthBounds, subtaskPanelWidth],
+  )
   const sseSyncDirsRef = useRef<Set<string>>(new Set())
 
   const pendingQuestionsRef = useRef(pendingQuestions)
@@ -1398,12 +1493,13 @@ function App() {
           display: 'flex',
           flexDirection: 'row',
           position: 'relative',
+          cursor: isResizingSubtaskPanel ? 'col-resize' : undefined,
         }}
       >
         <div
           style={{
-            flex: 1,
-            minWidth: 0,
+            flex: '1 1 auto',
+            minWidth: MESSAGE_PANEL_MIN_WIDTH,
             minHeight: 0,
             display: 'flex',
             flexDirection: 'column',
@@ -1457,14 +1553,43 @@ function App() {
         </div>
 
         <div
+          role="separator"
+          aria-label="Resize VibeTrace panel"
+          aria-orientation="vertical"
+          title="Drag to resize VibeTrace panel"
+          onPointerDown={handleSubtaskPanelResizePointerDown}
           style={{
-            width: 630,
-            flexShrink: 0,
+            flex: '0 0 8px',
+            width: 8,
+            cursor: 'col-resize',
+            position: 'relative',
+            zIndex: 4,
+            touchAction: 'none',
+            background: isResizingSubtaskPanel ? '#EEF3FF' : 'transparent',
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              bottom: 0,
+              left: 3,
+              width: 1,
+              background: isResizingSubtaskPanel ? '#5A8FFF' : '#E1E1E1',
+            }}
+          />
+        </div>
+
+        <div
+          style={{
+            width: subtaskPanelWidth,
+            flex: `0 0 ${subtaskPanelWidth}px`,
+            minWidth: 0,
             background: '#FFFFFF',
             borderLeft: '1px solid #E8E8E8',
             display: 'flex',
             flexDirection: 'column',
-            transition: 'width 0.25s ease',
+            transition: isResizingSubtaskPanel ? 'none' : 'width 0.15s ease',
           }}
         >
           <div
@@ -1625,6 +1750,7 @@ function App() {
               display: 'flex',
               flexDirection: 'column',
               minHeight: 0,
+              minWidth: 0,
               padding: '12px 14px',
               gap: 12,
             }}

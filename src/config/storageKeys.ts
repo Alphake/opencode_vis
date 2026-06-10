@@ -18,6 +18,7 @@ export const STORAGE_KEYS = {
   manualDirectories: `${APP_STORAGE_NAMESPACE}.manual.directories.v1`,
   closedDirectories: `${APP_STORAGE_NAMESPACE}.closed.directories.v1`,
   composerModelRef: `${APP_STORAGE_NAMESPACE}.opencodeComposerModelRef`,
+  subtaskPanelWidth: `${APP_STORAGE_NAMESPACE}.layout.subtaskPanelWidth.v1`,
   /** Prefix for `${prefix}${sessionId}` fork-panel snapshot entries */
   forkPanelPrefix: `${APP_STORAGE_NAMESPACE}:fork-panel:`,
 } as const

@@ -263,9 +263,9 @@ SKILL_WRITE_ROOT=C:\Users\you\.config\opencode\skills
 
 Traces are produced automatically while you use OpenCode; no extra command is required.
 
-**1. Live UI (primary)** — Open http://127.0.0.1:5173 (or http://localhost:5173 in manual mode). Pick a session to inspect messages, todos, and the action flow. After each assistant turn finishes with `finish: stop`, the UI builds **`trace.v1`** / **`trace.session.v1`** and POSTs to `/ingest-trace` (check the browser console for `[VibeTrace][memory-worker ingest ok]` and `runDir`).
+**1. Live UI (primary)** — Open http://127.0.0.1:5173 (or http://localhost:5173 in manual mode). Pick a session to inspect messages, todos, and the action flow. After each assistant turn finishes with `finish: stop`, the UI POSTs a session/message reference to `/ingest-trace`; the worker first checks whether the user switched tasks, and only builds a **`trace.session.v1`** for the completed previous task when a switch is detected.
 
-**2. Analysis & skills** — The worker persists the trace, runs **Analyzer** against the skill pool, then **Writer** creates or updates files under **`SKILL_WRITE_ROOT`**. Later OpenCode sessions load those skills from the paths above (and via `skill_router` when deployed).
+**2. Analysis & skills** — When the task-switch gate opens, the worker persists the trace, runs **Analyzer** against the skill pool, then **Writer** creates or updates files under **`SKILL_WRITE_ROOT`**. Later OpenCode sessions load those skills from the paths above (and via `skill_router` when deployed).
 
 **3. On-disk run logs (debug / replay)** — Each ingest creates a folder under `memory_worker/logs/<runId>/` (gitignored), for example:
 

@@ -22,8 +22,10 @@ WORKER_ROOT = Path(__file__).resolve().parent
 LOG_ROOT = REPO_ROOT / "memory_worker" / "logs"
 PROMPT_ROOT = REPO_ROOT / "memory_worker" / "prompts"
 INGEST_DEDUP_INDEX = LOG_ROOT / "ingest-dedup-index.json"
+TASK_SWITCH_STATE_PATH = LOG_ROOT / "task-switch-state.json"
 INGEST_DEDUP_STALE_RUNNING_SEC = 900
 _ingest_dedup_lock = threading.Lock()
+_task_switch_lock = threading.Lock()
 
 _TRACE_PARSER_SPEC = importlib.util.spec_from_file_location("trace_parser", WORKER_ROOT / "trace_parser.py")
 if _TRACE_PARSER_SPEC is None or _TRACE_PARSER_SPEC.loader is None:
@@ -55,6 +57,7 @@ OPENCODE_DIRECTORY = os.environ.get("OPENCODE_DIRECTORY") or str(REPO_ROOT)
 SKILL_WRITE_ROOT = Path(os.environ.get("SKILL_WRITE_ROOT") or (Path.home() / ".claude" / "skills"))
 MW_ANALYZER_MODE = (os.environ.get("MW_ANALYZER_MODE") or "opencode").strip().lower()
 MW_WRITER_MODE = (os.environ.get("MW_WRITER_MODE") or "opencode").strip().lower()
+MW_TASK_SWITCH_MODE = (os.environ.get("MW_TASK_SWITCH_MODE") or "opencode").strip().lower()
 MW_SESSION_STRATEGY = (os.environ.get("MW_SESSION_STRATEGY") or "new").strip().lower()
 MW_SESSION_TITLE_PREFIX = (os.environ.get("MW_SESSION_TITLE_PREFIX") or "[mw-internal]").strip()
 MW_CORS_ORIGINS = [x.strip() for x in (os.environ.get("MW_CORS_ORIGINS") or "http://localhost:5173;http://127.0.0.1:5173").split(";") if x.strip()]
@@ -124,6 +127,23 @@ def ensure_prompt_files() -> None:
                 "输出 schema：SkillJudgeEnvelope v2.0。\n\n"
                 "trace:\n{{TRACE_JSON}}\n\n"
                 "pool_summary:\n{{POOL_SUMMARY_JSON}}\n"
+            ),
+            encoding="utf-8",
+        )
+    switcher = PROMPT_ROOT / "task_switch_prompt.md"
+    if not switcher.exists():
+        switcher.write_text(
+            (
+                "你是 TaskSwitchJudge。只根据用户输入判断任务是否从上一段切换到当前输入。\n\n"
+                "输入 JSON 包含 previous_user_prompts（上次提取以来已累积的用户输入，旧→新）"
+                "和 current_user_prompt（本轮用户输入）。不要参考 agent 执行信息。\n\n"
+                "判断 task_switched=true 的情况：当前输入开启了新的目标/交付物/问题域，"
+                "而不是对上一任务的补充、纠错、继续执行、验证或格式调整。\n\n"
+                "只输出 JSON 对象：\n"
+                "{\"task_switched\": boolean, \"confidence\": \"low|medium|high\", "
+                "\"reason\": \"string\", \"previous_task_summary\": \"string\", "
+                "\"current_task_summary\": \"string\"}\n\n"
+                "input:\n{{TASK_SWITCH_INPUT_JSON}}\n"
             ),
             encoding="utf-8",
         )
@@ -218,6 +238,159 @@ def trace_ingest_dedup_key(trace: dict[str, Any]) -> str:
     if not sid or not end_msg:
         return ""
     return f"{sid}:{end_msg}"
+
+
+def _load_task_switch_state() -> dict[str, Any]:
+    if not TASK_SWITCH_STATE_PATH.exists():
+        return {"sessions": {}}
+    try:
+        data = json.loads(TASK_SWITCH_STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            sessions = data.get("sessions")
+            if isinstance(sessions, dict):
+                return data
+    except Exception:
+        pass
+    return {"sessions": {}}
+
+
+def _save_task_switch_state(data: dict[str, Any]) -> None:
+    data["updatedAt"] = now_iso()
+    write_json(TASK_SWITCH_STATE_PATH, data)
+
+
+def _turn_record_for_state(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "userInput": str(record.get("userInput") or ""),
+        "startUserMessageId": str(record.get("startUserMessageId") or ""),
+        "endAssistantMessageId": str(record.get("endAssistantMessageId") or ""),
+        "startIndex": record.get("startIndex"),
+        "endIndex": record.get("endIndex"),
+        "created": record.get("created"),
+        "completed": record.get("completed"),
+    }
+
+
+def _dedupe_turn_records(turns: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if not isinstance(turns, list):
+        return out
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        end_id = str(turn.get("endAssistantMessageId") or "").strip()
+        if not end_id or end_id in seen:
+            continue
+        seen.add(end_id)
+        out.append(_turn_record_for_state(turn))
+    return out
+
+
+def _find_turn_prompt_record(records: list[dict[str, Any]], end_assistant_message_id: str) -> dict[str, Any] | None:
+    for record in records:
+        if str(record.get("endAssistantMessageId") or "") == end_assistant_message_id:
+            return record
+    return None
+
+
+def _task_switch_session_key(session_id: str, directory: str | None) -> str:
+    directory_key = (directory or OPENCODE_DIRECTORY or "").strip()
+    return f"{session_id}::{directory_key}"
+
+
+def task_switch_input_payload(pending_turns: list[dict[str, Any]], current_turn: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "previous_user_prompts": [
+            {
+                "turn_index": idx,
+                "endAssistantMessageId": str(turn.get("endAssistantMessageId") or ""),
+                "user_prompt": str(turn.get("userInput") or ""),
+            }
+            for idx, turn in enumerate(pending_turns)
+        ],
+        "current_user_prompt": {
+            "endAssistantMessageId": str(current_turn.get("endAssistantMessageId") or ""),
+            "user_prompt": str(current_turn.get("userInput") or ""),
+        },
+    }
+
+
+def render_task_switch_prompt(template: str, pending_turns: list[dict[str, Any]], current_turn: dict[str, Any]) -> str:
+    payload = task_switch_input_payload(pending_turns, current_turn)
+    return template.replace("{{TASK_SWITCH_INPUT_JSON}}", json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _mock_task_switch_decision(pending_turns: list[dict[str, Any]], current_turn: dict[str, Any]) -> dict[str, Any]:
+    text = str(current_turn.get("userInput") or "").strip().lower()
+    switched = bool(
+        re.search(
+            r"(新任务|另一个任务|换个任务|完全不同|接下来做|现在.*(实现|分析|修复|创建)|new task|different task)",
+            text,
+            flags=re.I,
+        )
+    )
+    return {
+        "task_switched": switched,
+        "confidence": "medium" if switched else "low",
+        "reason": "mock heuristic matched task-switch phrase" if switched else "mock heuristic found no explicit switch phrase",
+        "previous_task_summary": " / ".join(str(x.get("userInput") or "")[:80] for x in pending_turns),
+        "current_task_summary": str(current_turn.get("userInput") or "")[:160],
+    }
+
+
+def run_task_switch_judge(
+    pending_turns: list[dict[str, Any]],
+    current_turn: dict[str, Any],
+    run_dir: Path,
+    log_file: Path,
+    directory: str | None = None,
+) -> dict[str, Any]:
+    if MW_TASK_SWITCH_MODE == "mock":
+        decision = _mock_task_switch_decision(pending_turns, current_turn)
+        append_log(log_file, "task_switch.mock.used", decision)
+        return {"mode": "mock", "analysis": decision, "rawText": json.dumps(decision, ensure_ascii=False)}
+
+    template = (PROMPT_ROOT / "task_switch_prompt.md").read_text(encoding="utf-8")
+    prompt = render_task_switch_prompt(template, pending_turns, current_turn)
+    (run_dir / "00-task-switch-prompt.txt").write_text(prompt, encoding="utf-8")
+    append_log(
+        log_file,
+        "task_switch.prompt.ready",
+        {"promptPath": str(run_dir / "00-task-switch-prompt.txt"), "pendingTurnCount": len(pending_turns)},
+    )
+    llm_out = opencode_generate_text(
+        prompt,
+        run_dir,
+        log_file,
+        "00a-task-switch",
+        directory=directory,
+        parent_session_id=None,
+    )
+    parsed = try_parse_json_object(llm_out.get("rawText", ""))
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("task_switched"), bool):
+        raise RuntimeError("TaskSwitchJudge output parse failed")
+    return {"mode": "opencode", **llm_out, "analysis": parsed}
+
+
+def _skip_ingest_response(
+    reason: str,
+    session_id: str,
+    current_turn: dict[str, Any],
+    pending_turns: list[dict[str, Any]],
+    task_switch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "ok": True,
+        "skipped": True,
+        "reason": reason,
+        "sessionId": session_id,
+        "endAssistantMessageId": str(current_turn.get("endAssistantMessageId") or ""),
+        "pendingTurnCount": len(pending_turns),
+    }
+    if task_switch is not None:
+        out["taskSwitch"] = task_switch
+    return out
 
 
 def _load_ingest_dedup_index() -> dict[str, Any]:
@@ -400,6 +573,257 @@ def run_pipeline_with_dedup(
                 "error": result.get("error"),
             }
         _save_ingest_dedup_index(index)
+    return result
+
+
+def _safe_id(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", value or "")
+
+
+def build_task_switch_run_dir(session_id: str, end_assistant_message_id: str) -> Path:
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")
+    return LOG_ROOT / f"{stamp}-{_safe_id(session_id) or 'unknown-session'}-{_safe_id(end_assistant_message_id) or 'unknown-turn'}-task-switch-{uuid4().hex[:8]}"
+
+
+def process_reference_ingest_with_task_switch(
+    messages: list[dict[str, Any]],
+    session_id: str,
+    end_msg_id: str,
+    directory_override: str | None,
+    parent_session_id: str | None,
+    fork_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    prompt_records = trace_parser.collect_turn_prompt_records(messages)
+    current_record = _find_turn_prompt_record(prompt_records, end_msg_id)
+    if not current_record:
+        return {
+            "ok": False,
+            "error": "Could not find current user prompt for assistant stop message",
+            "sessionId": session_id,
+            "endAssistantMessageId": end_msg_id,
+        }
+    current_turn = _turn_record_for_state(current_record)
+    session_key = _task_switch_session_key(session_id, directory_override)
+    switch_run_dir = build_task_switch_run_dir(session_id, end_msg_id)
+    switch_run_dir.mkdir(parents=True, exist_ok=True)
+    switch_log_file = switch_run_dir / "00-run.log"
+    append_log(
+        switch_log_file,
+        "task_switch.ingest.start",
+        {"sessionId": session_id, "endAssistantMessageId": end_msg_id, "sessionKey": session_key},
+    )
+
+    with _task_switch_lock:
+        state = _load_task_switch_state()
+        sessions = state.setdefault("sessions", {})
+        session_state = sessions.get(session_key) if isinstance(sessions.get(session_key), dict) else {}
+        pending_turns = _dedupe_turn_records(session_state.get("pendingTurns") if isinstance(session_state, dict) else [])
+        write_json(
+            switch_run_dir / "00-state-before.json",
+            {
+                "sessionKey": session_key,
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "currentTurn": current_turn,
+                "pendingTurnsBefore": pending_turns,
+                "allPromptRecords": [_turn_record_for_state(x) for x in prompt_records],
+                "statePath": str(TASK_SWITCH_STATE_PATH),
+            },
+        )
+        if any(str(turn.get("endAssistantMessageId") or "") == end_msg_id for turn in pending_turns):
+            _save_task_switch_state(state)
+            write_json(
+                switch_run_dir / "01-state-after.json",
+                {
+                    "reason": "duplicate_pending_turn",
+                    "pendingTurnsAfter": pending_turns,
+                    "statePath": str(TASK_SWITCH_STATE_PATH),
+                },
+            )
+            append_log(switch_log_file, "task_switch.skip", {"reason": "duplicate_pending_turn", "pendingTurnCount": len(pending_turns)})
+            return _skip_ingest_response(
+                "duplicate_pending_turn",
+                session_id,
+                current_turn,
+                pending_turns,
+                {"runDir": str(switch_run_dir), "decision": None},
+            )
+        if not pending_turns:
+            next_pending = [current_turn]
+            sessions[session_key] = {
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "pendingTurns": next_pending,
+                "updatedAt": now_iso(),
+                "lastTaskSwitchRunDir": str(switch_run_dir),
+            }
+            _save_task_switch_state(state)
+            write_json(
+                switch_run_dir / "01-state-after.json",
+                {
+                    "reason": "first_turn_waiting_for_next_prompt",
+                    "pendingTurnsAfter": next_pending,
+                    "statePath": str(TASK_SWITCH_STATE_PATH),
+                },
+            )
+            append_log(switch_log_file, "task_switch.skip", {"reason": "first_turn_waiting_for_next_prompt", "pendingTurnCount": len(next_pending)})
+            return _skip_ingest_response(
+                "first_turn_waiting_for_next_prompt",
+                session_id,
+                current_turn,
+                next_pending,
+                {"runDir": str(switch_run_dir), "decision": None},
+            )
+
+    write_json(switch_run_dir / "01-task-switch-input.json", task_switch_input_payload(pending_turns, current_turn))
+    append_log(
+        switch_log_file,
+        "task_switch.start",
+        {"sessionId": session_id, "endAssistantMessageId": end_msg_id, "pendingTurnCount": len(pending_turns)},
+    )
+
+    try:
+        switch_output = run_task_switch_judge(
+            pending_turns,
+            current_turn,
+            switch_run_dir,
+            switch_log_file,
+            directory=directory_override,
+        )
+    except Exception as e:
+        append_log(switch_log_file, "task_switch.failed", {"error": str(e)})
+        return {
+            "ok": False,
+            "error": f"task switch judge failed: {e}",
+            "runDir": str(switch_run_dir),
+        }
+
+    write_json(switch_run_dir / "00-task-switch-raw.json", switch_output)
+    decision = switch_output.get("analysis") if isinstance(switch_output.get("analysis"), dict) else {}
+    switched = bool(decision.get("task_switched"))
+    append_log(switch_log_file, "task_switch.done", {"taskSwitched": switched, "decision": decision})
+
+    if not switched:
+        next_pending = _dedupe_turn_records([*pending_turns, current_turn])
+        with _task_switch_lock:
+            state = _load_task_switch_state()
+            sessions = state.setdefault("sessions", {})
+            sessions[session_key] = {
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "pendingTurns": next_pending,
+                "updatedAt": now_iso(),
+                "lastTaskSwitchRunDir": str(switch_run_dir),
+            }
+            _save_task_switch_state(state)
+        write_json(
+            switch_run_dir / "02-state-after.json",
+            {
+                "reason": "task_not_switched",
+                "decision": decision,
+                "pendingTurnsAfter": next_pending,
+                "statePath": str(TASK_SWITCH_STATE_PATH),
+            },
+        )
+        return _skip_ingest_response(
+            "task_not_switched",
+            session_id,
+            current_turn,
+            next_pending,
+            {"runDir": str(switch_run_dir), "mode": switch_output.get("mode"), "decision": decision},
+        )
+
+    previous_task_turns = pending_turns
+    previous_end_msg_id = str(previous_task_turns[-1].get("endAssistantMessageId") or "")
+    trace = trace_parser.build_session_trace_bundle(
+        messages=messages,
+        primary_end_assistant_message_id=previous_end_msg_id,
+        session={"id": session_id, "directory": directory_override},
+        directory=directory_override,
+        max_turns=len(previous_task_turns),
+        fetch_messages=opencode_get_messages,
+    )
+    if not trace:
+        write_json(
+            switch_run_dir / "02-trace-build-failed.json",
+            {
+                "previousTaskTurns": previous_task_turns,
+                "previousEndAssistantMessageId": previous_end_msg_id,
+            },
+        )
+        return {
+            "ok": False,
+            "error": "Could not build trace for previous task segment",
+            "runDir": str(switch_run_dir),
+            "previousEndAssistantMessageId": previous_end_msg_id,
+        }
+
+    if fork_meta:
+        fork_data = trace_parser.build_fork_comparison(
+            fork_meta=fork_meta,
+            directory=directory_override,
+            fetch_messages=opencode_get_messages,
+        )
+        if fork_data:
+            trace["fork"] = fork_data
+
+    write_json(
+        switch_run_dir / "02-extraction-range.json",
+        {
+            "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
+            "toEndAssistantMessageId": previous_end_msg_id,
+            "turnCount": len(previous_task_turns),
+            "previousTaskTurns": previous_task_turns,
+            "nextPendingTurn": current_turn,
+        },
+    )
+    write_json(switch_run_dir / "03-extracted-trace.json", trace)
+
+    result = run_pipeline_with_dedup(
+        trace,
+        directory_override=directory_override,
+        parent_session_id=parent_session_id,
+    )
+    write_json(switch_run_dir / "04-pipeline-result.json", result)
+
+    with _task_switch_lock:
+        state = _load_task_switch_state()
+        sessions = state.setdefault("sessions", {})
+        sessions[session_key] = {
+            "sessionId": session_id,
+            "directory": directory_override or "",
+            "pendingTurns": [current_turn],
+            "updatedAt": now_iso(),
+            "lastTaskSwitchRunDir": str(switch_run_dir),
+            "lastExtractedRange": {
+                "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
+                "toEndAssistantMessageId": previous_end_msg_id,
+                "turnCount": len(previous_task_turns),
+            },
+        }
+        _save_task_switch_state(state)
+    write_json(
+        switch_run_dir / "05-state-after.json",
+        {
+            "reason": "task_switched",
+            "decision": decision,
+            "pendingTurnsAfter": [current_turn],
+            "lastExtractedRange": {
+                "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
+                "toEndAssistantMessageId": previous_end_msg_id,
+                "turnCount": len(previous_task_turns),
+            },
+            "statePath": str(TASK_SWITCH_STATE_PATH),
+        },
+    )
+
+    result["taskSwitch"] = {"runDir": str(switch_run_dir), "mode": switch_output.get("mode"), "decision": decision}
+    result["extractedTask"] = {
+        "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
+        "toEndAssistantMessageId": previous_end_msg_id,
+        "turnCount": len(previous_task_turns),
+        "nextPendingEndAssistantMessageId": end_msg_id,
+    }
     return result
 
 
@@ -1363,6 +1787,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "opencodeDirectory": OPENCODE_DIRECTORY,
                     "skillWriteRoot": str(SKILL_WRITE_ROOT),
                     "analyzerMode": MW_ANALYZER_MODE,
+                    "taskSwitchMode": MW_TASK_SWITCH_MODE,
                 },
             )
             return
@@ -1380,52 +1805,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 directory_override = str(body.get("directory") or "").strip() or None
                 parent_session_id = str(body.get("parentSessionID") or "").strip() or None
                 fork_meta = body.get("forkMeta") if isinstance(body.get("forkMeta"), dict) else None
-                try:
-                    max_turns = max(1, int(body.get("maxTurns") or 5))
-                except Exception:
-                    max_turns = 5
 
                 print(
                     "[memory-worker] ingest.ref "
                     f"sessionId={session_id} endAssistantMessageId={end_msg_id} "
-                    f"maxTurns={max_turns} directory={directory_override or ''} fork={bool(fork_meta)}"
+                    f"taskSwitchMode={MW_TASK_SWITCH_MODE} directory={directory_override or ''} fork={bool(fork_meta)}"
                 )
 
                 messages = opencode_get_messages(session_id, directory=directory_override)
-                trace = trace_parser.build_session_trace_bundle(
-                    messages=messages,
-                    primary_end_assistant_message_id=end_msg_id,
-                    session={"id": session_id, "directory": directory_override},
-                    directory=directory_override,
-                    max_turns=max_turns,
-                    fetch_messages=opencode_get_messages,
-                )
-                if not trace:
-                    self._send_json(
-                        400,
-                        {
-                            "ok": False,
-                            "error": "Could not build trace from {sessionId, endAssistantMessageId}",
-                            "sessionId": session_id,
-                            "endAssistantMessageId": end_msg_id,
-                        },
-                    )
-                    return
-
-                if fork_meta:
-                    fork_data = trace_parser.build_fork_comparison(
-                        fork_meta=fork_meta,
-                        directory=directory_override,
-                        fetch_messages=opencode_get_messages,
-                    )
-                    if fork_data:
-                        trace["fork"] = fork_data
-
                 try:
-                    result = run_pipeline_with_dedup(
-                        trace,
+                    result = process_reference_ingest_with_task_switch(
+                        messages=messages,
+                        session_id=session_id,
+                        end_msg_id=end_msg_id,
                         directory_override=directory_override,
                         parent_session_id=parent_session_id,
+                        fork_meta=fork_meta,
                     )
                 except Exception as inner:
                     result = {"ok": False, "error": str(inner)}
@@ -1464,6 +1859,7 @@ class StartupConfig:
     opencode_directory: str
     skill_write_root: str
     analyzer_mode: str
+    task_switch_mode: str
     writer_mode: str
     session_strategy: str
 
@@ -1475,6 +1871,7 @@ def startup_config() -> StartupConfig:
         opencode_directory=OPENCODE_DIRECTORY,
         skill_write_root=str(SKILL_WRITE_ROOT),
         analyzer_mode=MW_ANALYZER_MODE,
+        task_switch_mode=MW_TASK_SWITCH_MODE,
         writer_mode=MW_WRITER_MODE,
         session_strategy=MW_SESSION_STRATEGY,
     )
@@ -1489,6 +1886,7 @@ def main() -> None:
     print(f"[memory-worker] OPENCODE_DIRECTORY={cfg.opencode_directory}")
     print(f"[memory-worker] SKILL_WRITE_ROOT={cfg.skill_write_root}")
     print(f"[memory-worker] MW_ANALYZER_MODE={cfg.analyzer_mode}")
+    print(f"[memory-worker] MW_TASK_SWITCH_MODE={cfg.task_switch_mode}")
     print(f"[memory-worker] MW_OPENCODE_HTTP_TIMEOUT_SEC={MW_OPENCODE_HTTP_TIMEOUT_SEC}")
     print(f"[memory-worker] MW_OPENCODE_MESSAGE_TIMEOUT_SEC={MW_OPENCODE_MESSAGE_TIMEOUT_SEC}")
     print(f"[memory-worker] MW_ANALYZER_WAIT_PER_ATTEMPT_SEC={MW_ANALYZER_WAIT_PER_ATTEMPT_SEC}")

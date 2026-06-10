@@ -71,9 +71,10 @@ const DUR_GAP_BETA_MS = Math.max(1, DUR_GAP_REF_MS - DUR_WIDTH_BASE_MS)
 const DUR_GAP_PX_PER_MS = (DUR_GAP_REF_PX - DUR_GAP_MIN_PX) / DUR_GAP_BETA_MS
 const DUR_TAIL_PAD_PX = 2
 const BOTTOM_PAD = 6
-/** Minimum canvas height when at least two swimlanes and two blocks exist — avoids collapsing the SVG when data is sparse */
+/** Default visible floor: keeps compact subtasks at the original two-lane height, then grows with swimlanes */
 const MIN_SVG_CONTENT_HEIGHT = TOP_PAD + 2 * ROW_H + 2 * BLOCK_H + BOTTOM_PAD
-/** Clamp visible viewport to ~4 lanes including vertical padding */
+/** Native horizontal scrollbar can consume vertical space and otherwise trigger a phantom vertical scrollbar */
+const HORIZONTAL_SCROLLBAR_RESERVED_HEIGHT = 16
 /** Matches context-menu typography for ellipsis / SVG text labels */
 const SVG_FONT_SANS =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
@@ -1391,6 +1392,7 @@ export default function ActionFlowVisualization({
    * Mount tooltips after the first paint batch so anchors exist before the observer spins up.
    */
   const [tooltipMounted, setTooltipMounted] = useState(false)
+  const [scrollClientWidth, setScrollClientWidth] = useState(0)
   useEffect(() => {
     setTooltipMounted(true)
   }, [])
@@ -1402,6 +1404,15 @@ export default function ActionFlowVisualization({
       }),
     [actions, durationMode, showFlowEndNode, forkAnchorActionKey]
   )
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const sync = () => setScrollClientWidth(el.clientWidth)
+    const ro = new ResizeObserver(sync)
+    ro.observe(el)
+    sync()
+    return () => ro.disconnect()
+  }, [layoutEstimate.totalW])
 
   useLayoutEffect(() => {
     const svg = svgRef.current
@@ -2319,16 +2330,18 @@ export default function ActionFlowVisualization({
   }, [highlightedActionType, highlightedActionKey, dimAll, actions, durationHighlightMinMs, tokenHighlightMin])
 
   const mockOffset = mockBranchForkActionIndex !== undefined ? ROW_H : 0
-  const contentHeight = layoutEstimate.totalH + mockOffset
-  /** Scroll port enforces a two-lane minimum height; height grows with content (no MAX_VISIBLE_ROWS cap) */
-  const minContentHeight = MIN_SVG_CONTENT_HEIGHT
-  const normalViewportHeight = Math.max(contentHeight, minContentHeight)
-  let viewportHeight = normalViewportHeight
-  if (typeof viewportMaxHeight === 'number' && Number.isFinite(viewportMaxHeight) && viewportMaxHeight > 0) {
-    viewportHeight = Math.min(viewportHeight, viewportMaxHeight)
-  }
-  /** `maxHeight` caps overflow only — short content keeps intrinsic height (no phantom scrollbars) */
-  const scrollAreaMaxHeight = viewportHeight
+  const contentHeight = Math.ceil(layoutEstimate.totalH + mockOffset)
+  const maxCap =
+    typeof viewportMaxHeight === 'number' && Number.isFinite(viewportMaxHeight) && viewportMaxHeight > 0
+      ? Math.ceil(viewportMaxHeight)
+      : null
+  const needsVerticalScroll = maxCap != null && contentHeight > maxCap
+  const scrollViewportHeight = needsVerticalScroll ? maxCap : contentHeight
+  const needsHorizontalScroll =
+    scrollClientWidth > 0 && Math.ceil(layoutEstimate.totalW) > scrollClientWidth
+  const horizontalScrollbarReserve = !hideScrollbar && needsHorizontalScroll
+    ? HORIZONTAL_SCROLLBAR_RESERVED_HEIGHT
+    : 0
 
   /** Avoid inner borders — `box-sizing` would shrink scrollable area vs SVG by 2 px and falsely show scrollbars */
   const scrollInner = (
@@ -2338,11 +2351,12 @@ export default function ActionFlowVisualization({
       style={{
         boxSizing: 'border-box',
         overflowX: 'auto',
-        overflowY: 'auto',
+        overflowY: needsVerticalScroll ? 'auto' : 'hidden',
         width: '100%',
         flexShrink: 0,
-        height: 'auto',
-        maxHeight: scrollAreaMaxHeight,
+        height: scrollViewportHeight > 0
+          ? scrollViewportHeight + horizontalScrollbarReserve
+          : undefined,
         minHeight: 0,
       }}
       ref={scrollRef}

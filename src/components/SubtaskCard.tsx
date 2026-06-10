@@ -26,6 +26,8 @@ const fontSans =
 
 /** Minimum card height; grows with richer content such as fork comparison */
 const CARD_MIN_HEIGHT = 220
+/** Cap trace viewport at ~two stacked subtask cards — lanes grow until this limit, then scroll */
+const FLOW_VIEWPORT_MAX_HEIGHT = CARD_MIN_HEIGHT * 2
 const LONG_RUNNING_MS = 60_000
 
 interface SubtaskCardProps {
@@ -823,6 +825,7 @@ export default function SubtaskCard({
               onAnalyzeFromAction={onAnalyzeFromAction}
               showFlowEndNode={showFlowEndNode}
               flowEndSummary={flowEndSummary}
+              viewportMaxHeight={FLOW_VIEWPORT_MAX_HEIGHT}
             />
           )
         })()}

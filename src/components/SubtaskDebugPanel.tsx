@@ -303,6 +303,7 @@ export default function SubtaskDebugPanel({
         flexDirection: 'column',
         overflow: 'hidden',
         minHeight: 0,
+        minWidth: 0,
       }}
     >
       <div
@@ -319,6 +320,8 @@ export default function SubtaskDebugPanel({
         ref={listScrollRef}
         style={{
           flex: 1,
+          width: '100%',
+          minWidth: 0,
           overflowY: flowLayoutMode === 'summary' ? 'hidden' : 'auto',
           fontSize: 11,
           color: '#333',
