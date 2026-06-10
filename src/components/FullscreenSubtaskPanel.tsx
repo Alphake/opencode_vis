@@ -3,7 +3,7 @@ import type { RefObject } from 'react'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
-import SubtaskDebugPanel from './SubtaskDebugPanel'
+import SubtaskDebugPanel, { type SubtaskTaskTab } from './SubtaskDebugPanel'
 
 type SubtaskSelection = { subtaskIndex: number; actionKey: string } | null
 
@@ -21,6 +21,9 @@ interface Props {
   flowLayoutMode: 'timeline' | 'summary'
   selection: SubtaskSelection
   onSelectAction: (subtaskIndex: number, actionKey: string | null) => void
+  taskTabs?: SubtaskTaskTab[]
+  activeTaskTabId?: string
+  onSelectTaskTab?: (id: string) => void
 }
 
 /**
@@ -41,6 +44,9 @@ export default function FullscreenSubtaskPanel({
   flowLayoutMode,
   selection,
   onSelectAction,
+  taskTabs = [],
+  activeTaskTabId,
+  onSelectTaskTab,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -178,6 +184,9 @@ export default function FullscreenSubtaskPanel({
             flowLayoutMode={flowLayoutMode}
             selection={selection}
             onSelectAction={onSelectAction}
+            taskTabs={taskTabs}
+            activeTaskTabId={activeTaskTabId}
+            onSelectTaskTab={onSelectTaskTab}
           />
         </div>
       </div>

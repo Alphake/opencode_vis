@@ -9,6 +9,7 @@ import { actionFlowPalette } from '../styles/actionFlowPalette'
 import type { OcComposerModelOption } from '../services/opencodeApi'
 import { messagesHaveOpenQuestionWithInput } from '../utils/questionPart'
 import { collectStaleToolCallIDs } from '../utils/actionMapping'
+import ScrollNodeRail, { type ScrollNodeMarker } from './ScrollNodeRail'
 
 interface MessagePanelProps {
   messages: OcMessage[]
@@ -127,6 +128,21 @@ export default function MessagePanel({
 
   const staleToolCallIds = useMemo(() => collectStaleToolCallIDs(messages), [messages])
   const transcriptAnchorNowMs = Date.now()
+  const userPromptMarkers = useMemo<ScrollNodeMarker[]>(
+    () =>
+      messages
+        .map((msg, idx) =>
+          msg.info.role === 'user'
+            ? {
+                id: msg.info.id || `user-${idx}`,
+                label: `User prompt ${idx + 1}`,
+                targetSelector: `[data-message-index="${idx}"]`,
+              }
+            : null,
+        )
+        .filter((marker): marker is ScrollNodeMarker => marker != null),
+    [messages],
+  )
 
   return (
     <div
@@ -259,57 +275,69 @@ export default function MessagePanel({
 
       {/* Messages (scrollable) */}
       <div
-        ref={messageListScrollRef}
         style={{
           flex: 1,
-          overflowY: 'auto',
-          padding: '16px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '0',
+          minHeight: 0,
+          position: 'relative',
         }}
       >
-        {loading ? (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '32px', color: '#888', fontSize: 12 }}>
-            Loading…
-          </div>
-        ) : messages.length === 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888', fontSize: 12 }}>
-            Pick a session to start chatting
-          </div>
-        ) : (
-          messages.map((msg, idx) => {
-            const hl = highlightMessageIndices?.has(idx) ?? false
-            return (
-              <div
-                key={msg.info.id || `msg-${idx}`}
-                data-message-index={idx}
-                style={{
-                  borderRadius: 10,
-                  padding: hl ? '6px 8px' : '2px 0',
-                  margin: hl ? '2px -4px' : 0,
-                  outline: hl ? `2px solid ${actionFlowPalette.completed.stroke}` : 'none',
-                  outlineOffset: hl ? 1 : 0,
-                  background: hl ? 'rgba(245, 255, 234, 0.55)' : 'transparent',
-                  boxShadow: hl ? `0 0 0 1px rgba(145, 163, 123, 0.25)` : 'none',
-                  transition: 'background 0.15s ease, outline 0.15s ease',
-                }}
-              >
-                <MessageBubble
-                  message={msg}
-                  staleToolCallIds={staleToolCallIds}
-                  transcriptAnchorNowMs={transcriptAnchorNowMs}
-                  isLastInTurn={isLastMessageInTurn(messages, idx)}
-                  sessionDirectory={sessionDirectory}
-                  ssePendingQuestion={
-                    pendingQuestion && pendingQuestion.sessionID === sessionId ? pendingQuestion : null
-                  }
-                  onQuestionAnswered={onQuestionAnswered}
-                />
-              </div>
-            )
-          })
-        )}
+        <div
+          ref={messageListScrollRef}
+          style={{
+            height: '100%',
+            overflowY: 'auto',
+            padding: '16px 28px 16px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0',
+            boxSizing: 'border-box',
+          }}
+        >
+          {loading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '32px', color: '#888', fontSize: 12 }}>
+              Loading…
+            </div>
+          ) : messages.length === 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#888', fontSize: 12 }}>
+              Pick a session to start chatting
+            </div>
+          ) : (
+            messages.map((msg, idx) => {
+              const hl = highlightMessageIndices?.has(idx) ?? false
+              return (
+                <div
+                  key={msg.info.id || `msg-${idx}`}
+                  data-message-index={idx}
+                  style={{
+                    borderRadius: 10,
+                    padding: hl ? '6px 8px' : '2px 0',
+                    margin: hl ? '2px -4px' : 0,
+                    outline: hl ? `2px solid ${actionFlowPalette.completed.stroke}` : 'none',
+                    outlineOffset: hl ? 1 : 0,
+                    background: hl ? 'rgba(245, 255, 234, 0.55)' : 'transparent',
+                    boxShadow: hl ? `0 0 0 1px rgba(145, 163, 123, 0.25)` : 'none',
+                    transition: 'background 0.15s ease, outline 0.15s ease',
+                  }}
+                >
+                  <MessageBubble
+                    message={msg}
+                    staleToolCallIds={staleToolCallIds}
+                    transcriptAnchorNowMs={transcriptAnchorNowMs}
+                    isLastInTurn={isLastMessageInTurn(messages, idx)}
+                    sessionDirectory={sessionDirectory}
+                    ssePendingQuestion={
+                      pendingQuestion && pendingQuestion.sessionID === sessionId ? pendingQuestion : null
+                    }
+                    onQuestionAnswered={onQuestionAnswered}
+                  />
+                </div>
+              )
+            })
+          )}
+        </div>
+        {messageListScrollRef ? (
+          <ScrollNodeRail scrollContainerRef={messageListScrollRef} markers={userPromptMarkers} right={8} />
+        ) : null}
       </div>
 
       {/* Todo snapshots + API fallback */}

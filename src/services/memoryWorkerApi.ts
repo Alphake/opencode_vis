@@ -18,7 +18,23 @@ export interface MemoryWorkerIngestResult {
   /** Worker returned an existing run instead of starting a second pipeline. */
   duplicate?: boolean
   dedupKey?: string
+  reason?: string
+  taskSwitch?: {
+    runDir?: string
+    mode?: string
+    decision?: unknown
+  }
+  extractedTask?: MemoryWorkerTaskSegment
+  pendingTask?: MemoryWorkerTaskSegment
   [key: string]: unknown
+}
+
+export interface MemoryWorkerTaskSegment {
+  fromStartUserMessageId: string
+  fromEndAssistantMessageId: string
+  toEndAssistantMessageId: string
+  turnCount: number
+  nextPendingEndAssistantMessageId?: string
 }
 
 export interface IngestContext {

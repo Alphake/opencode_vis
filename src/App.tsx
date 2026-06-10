@@ -67,7 +67,7 @@ import {
   releaseTraceIngestClaim,
   tryClaimTraceIngest,
 } from './utils/traceIngestClaim'
-import { ingestTraceReference } from './services/memoryWorkerApi'
+import { ingestTraceReference, type MemoryWorkerIngestResult, type MemoryWorkerTaskSegment } from './services/memoryWorkerApi'
 import {
   collectInternalSessionIdsFromIngest,
   registerMemoryWorkerInternalSessionIds,
@@ -86,6 +86,18 @@ declare global {
 
 /** Map: message index containing a todo write → todos captured at that instant (for replaying diffs) */
 type TodosSnapshotMap = Record<string, OcTodo[]>
+type TaskSegmentStatus = 'pending' | 'extracted'
+type TaskSegmentTab = {
+  id: string
+  title: string
+  status: TaskSegmentStatus
+  fromStartUserMessageId: string
+  fromEndAssistantMessageId: string
+  toEndAssistantMessageId: string
+  turnCount: number
+  taskSwitchRunDir?: string
+  pipelineRunDir?: string
+}
 const AUTO_ABORT_STUCK_RUNNING_AFTER_MS = 24 * 60 * 60 * 1000
 const TRACE_EXTRACTION_DEBOUNCE_MS = 650
 const SSE_SYNC_DEBOUNCE_MS = 350
@@ -101,6 +113,33 @@ const MESSAGE_PANEL_MIN_WIDTH = 420
 const SUBTASK_PANEL_DEFAULT_WIDTH = 630
 const SUBTASK_PANEL_MIN_WIDTH = 420
 const SUBTASK_PANEL_MAX_WIDTH = 1040
+
+function taskSegmentId(status: TaskSegmentStatus, segment: MemoryWorkerTaskSegment): string {
+  return `${status}:${segment.fromEndAssistantMessageId}:${segment.toEndAssistantMessageId}`
+}
+
+function taskSegmentTitle(status: TaskSegmentStatus, turnCount: number): string {
+  if (status === 'pending') return turnCount > 1 ? `Current (${turnCount})` : 'Current'
+  return turnCount > 1 ? `Task (${turnCount})` : 'Task'
+}
+
+function taskSegmentFromWorker(
+  status: TaskSegmentStatus,
+  segment: MemoryWorkerTaskSegment,
+  meta?: Pick<TaskSegmentTab, 'taskSwitchRunDir' | 'pipelineRunDir'>,
+): TaskSegmentTab | null {
+  if (!segment.fromStartUserMessageId || !segment.toEndAssistantMessageId) return null
+  return {
+    id: taskSegmentId(status, segment),
+    title: taskSegmentTitle(status, segment.turnCount),
+    status,
+    fromStartUserMessageId: segment.fromStartUserMessageId,
+    fromEndAssistantMessageId: segment.fromEndAssistantMessageId,
+    toEndAssistantMessageId: segment.toEndAssistantMessageId,
+    turnCount: segment.turnCount,
+    ...meta,
+  }
+}
 
 function debugLog(...args: unknown[]): void {
   if (!DEBUG_VERBOSE_LOGS) return
@@ -277,6 +316,8 @@ function App() {
   /** User message sent; still polling for assistant completion */
   const [waitingForAssistantReply, setWaitingForAssistantReply] = useState(false)
   const [latestTurnTrace, setLatestTurnTrace] = useState<TurnTrace | null>(null)
+  const [taskSegmentsBySessionId, setTaskSegmentsBySessionId] = useState<Record<string, TaskSegmentTab[]>>({})
+  const [activeTaskSegmentBySessionId, setActiveTaskSegmentBySessionId] = useState<Record<string, string>>({})
   /** Ingest completed successfully for this sessionId:stopId */
   const processedTraceTurnKeysRef = useRef<Set<string>>(new Set())
   /** Debounced ingest callback has started (do not release claim on effect cleanup) */
@@ -512,6 +553,45 @@ function App() {
     if (actionKey !== null) setLinkedSubtaskIndex(subtaskIndex)
   }, [])
 
+  const applyMemoryWorkerTaskSegments = useCallback((sessionId: string, result: MemoryWorkerIngestResult) => {
+    const nextTabs: TaskSegmentTab[] = []
+    const taskSwitchRunDir = result.taskSwitch?.runDir
+    const pipelineRunDir = result.runDir
+    if (result.extractedTask) {
+      const tab = taskSegmentFromWorker('extracted', result.extractedTask, {
+        taskSwitchRunDir,
+        pipelineRunDir,
+      })
+      if (tab) nextTabs.push(tab)
+    }
+    if (result.pendingTask) {
+      const tab = taskSegmentFromWorker('pending', result.pendingTask, {
+        taskSwitchRunDir,
+      })
+      if (tab) nextTabs.push(tab)
+    }
+    if (nextTabs.length === 0) return
+
+    setTaskSegmentsBySessionId((prev) => {
+      const existing = prev[sessionId] ?? []
+      const byId = new Map(existing.map((tab) => [tab.id, tab]))
+      for (const tab of nextTabs) {
+        if (tab.status === 'pending') {
+          for (const [id, old] of byId) {
+            if (old.status === 'pending') byId.delete(id)
+          }
+        }
+        byId.set(tab.id, tab)
+      }
+      return { ...prev, [sessionId]: [...byId.values()] }
+    })
+
+    const preferred = nextTabs.find((tab) => tab.status === 'pending') ?? nextTabs[nextTabs.length - 1]
+    if (preferred) {
+      setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [sessionId]: preferred.id }))
+    }
+  }, [])
+
   /** Clear action-outline selection when clicking outside flow nodes (sidebar, transcript, todos, composer, etc.). Blank flow canvas already clears via `onSelectAction(null)`. */
   useEffect(() => {
     if (selection === null) return
@@ -643,6 +723,7 @@ function App() {
             parentSessionID: sid,
             forkMeta: forkMeta ?? undefined,
           })
+          applyMemoryWorkerTaskSegments(sid, ingestResult)
           if (ingestResult.duplicate) {
             processedTraceTurnKeysRef.current.add(traceKey)
             console.info('[VibeTrace][memory-worker ingest duplicate skipped]', ingestResult)
@@ -673,7 +754,7 @@ function App() {
         releaseTraceIngestClaim(sid, endAssistantMessageId)
       }
     }
-  }, [messages, selectedSessionId, sessions, loading])
+  }, [messages, selectedSessionId, sessions, loading, applyMemoryWorkerTaskSegments])
 
   useEffect(() => {
     window.__vibetraceDebug = {
@@ -920,6 +1001,38 @@ function App() {
     [assistantSubtasks],
   )
 
+  const taskSegmentsForActiveSession = useMemo(() => {
+    if (!selectedSessionId) return []
+    const tabs = taskSegmentsBySessionId[selectedSessionId] ?? []
+    return [...tabs].sort((a, b) => {
+      const ai = messages.findIndex((m) => m.info.id === a.fromStartUserMessageId)
+      const bi = messages.findIndex((m) => m.info.id === b.fromStartUserMessageId)
+      if (ai !== bi) return (ai < 0 ? Number.MAX_SAFE_INTEGER : ai) - (bi < 0 ? Number.MAX_SAFE_INTEGER : bi)
+      return a.id.localeCompare(b.id)
+    })
+  }, [messages, selectedSessionId, taskSegmentsBySessionId])
+
+  const activeTaskSegmentId = selectedSessionId ? activeTaskSegmentBySessionId[selectedSessionId] : undefined
+  const activeTaskSegment = useMemo(() => {
+    if (!activeTaskSegmentId) return null
+    return taskSegmentsForActiveSession.find((tab) => tab.id === activeTaskSegmentId) ?? null
+  }, [activeTaskSegmentId, taskSegmentsForActiveSession])
+
+  const visibleSubtasksForTaskSegment = useMemo(() => {
+    if (!activeTaskSegment) return visibleSubtasks
+    const startIndex = messages.findIndex((m) => m.info.id === activeTaskSegment.fromStartUserMessageId)
+    if (startIndex < 0) return visibleSubtasks
+    const endIndex =
+      activeTaskSegment.status === 'pending'
+        ? Number.POSITIVE_INFINITY
+        : messages.findIndex((m) => m.info.id === activeTaskSegment.toEndAssistantMessageId)
+    if (endIndex < 0) return visibleSubtasks
+    return visibleSubtasks.filter(({ subtask }) => {
+      const indices = [...(subtask.userMessageIndices ?? []), ...(subtask.assistantMessageIndices ?? [])]
+      return indices.some((idx) => idx >= startIndex && idx <= endIndex)
+    })
+  }, [activeTaskSegment, messages, visibleSubtasks])
+
   /** Execution-phase cards: highlight Todo rows via linked ids */
   const linkedTodoIds = useMemo(() => {
     if (linkedSubtaskIndex === null) return null
@@ -987,12 +1100,12 @@ function App() {
       }
       const id = todo.id?.trim()
       if (!id) return
-      const fallback = visibleSubtasks.find(({ subtask }) =>
+      const fallback = visibleSubtasksForTaskSegment.find(({ subtask }) =>
         subtask.linkedTodoIds.includes(id)
       )
       if (fallback) setLinkedSubtaskIndex(fallback.sourceIndex)
     },
-    [assistantSubtasks, visibleSubtasks]
+    [assistantSubtasks, visibleSubtasksForTaskSegment]
   )
 
   useEffect(() => {
@@ -1009,6 +1122,11 @@ function App() {
   }, [selectedSessionId])
 
   useEffect(() => {
+    setLinkedSubtaskIndex(null)
+    setSelection(null)
+  }, [activeTaskSegmentId])
+
+  useEffect(() => {
     if (linkedSubtaskIndex !== null) {
       setTodoPanelRevealGeneration(g => g + 1)
     }
@@ -1019,6 +1137,13 @@ function App() {
       setLinkedSubtaskIndex(null)
     }
   }, [linkedSubtaskIndex, assistantSubtasks.length])
+
+  useEffect(() => {
+    if (linkedSubtaskIndex === null) return
+    if (visibleSubtasksForTaskSegment.some(({ sourceIndex }) => sourceIndex === linkedSubtaskIndex)) return
+    setLinkedSubtaskIndex(null)
+    setSelection(null)
+  }, [linkedSubtaskIndex, visibleSubtasksForTaskSegment])
 
   useEffect(() => {
     if (linkedTodoIds && linkedTodoIds.size > 0) {
@@ -1586,7 +1711,6 @@ function App() {
             flex: `0 0 ${subtaskPanelWidth}px`,
             minWidth: 0,
             background: '#FFFFFF',
-            borderLeft: '1px solid #E8E8E8',
             display: 'flex',
             flexDirection: 'column',
             transition: isResizingSubtaskPanel ? 'none' : 'width 0.15s ease',
@@ -1714,21 +1838,21 @@ function App() {
                 onClick={() => setSubtaskFullscreenOpen(true)}
                 aria-label="Open VibeTrace fullscreen"
                 title="Open VibeTrace fullscreen"
-                disabled={visibleSubtasks.length === 0}
+                disabled={visibleSubtasksForTaskSegment.length === 0}
                 style={{
                   width: 26,
                   height: 26,
                   border: 'none',
                   background: 'transparent',
-                  cursor: visibleSubtasks.length === 0 ? 'not-allowed' : 'pointer',
+                  cursor: visibleSubtasksForTaskSegment.length === 0 ? 'not-allowed' : 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   borderRadius: 6,
-                  color: visibleSubtasks.length === 0 ? '#C6C6C6' : '#5C5C5C',
+                  color: visibleSubtasksForTaskSegment.length === 0 ? '#C6C6C6' : '#5C5C5C',
                 }}
                 onMouseEnter={(e) => {
-                  if (visibleSubtasks.length === 0) return
+                  if (visibleSubtasksForTaskSegment.length === 0) return
                   e.currentTarget.style.background = '#F3F3F3'
                 }}
                 onMouseLeave={(e) => {
@@ -1757,7 +1881,7 @@ function App() {
           >
             <SubtaskDebugPanel
               messages={messages}
-              visibleSubtasks={visibleSubtasks}
+              visibleSubtasks={visibleSubtasksForTaskSegment}
               linkedSubtaskIndex={linkedSubtaskIndex}
               onSelectSubtask={toggleSubtaskLink}
               onForkFromAction={handleForkFromAction}
@@ -1768,6 +1892,13 @@ function App() {
               flowLayoutMode={subtaskFlowLayoutMode}
               selection={selection}
               onSelectAction={handleSelectAction}
+              taskTabs={taskSegmentsForActiveSession}
+              activeTaskTabId={activeTaskSegmentId}
+              onSelectTaskTab={
+                selectedSessionId
+                  ? (id) => setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [selectedSessionId]: id }))
+                  : undefined
+              }
             />
           </div>
         </div>
@@ -1799,7 +1930,7 @@ function App() {
           open={subtaskFullscreenOpen}
           onClose={() => setSubtaskFullscreenOpen(false)}
           messages={messages}
-          visibleSubtasks={visibleSubtasks}
+          visibleSubtasks={visibleSubtasksForTaskSegment}
           linkedSubtaskIndex={linkedSubtaskIndex}
           onSelectSubtask={toggleSubtaskLink}
           onForkFromAction={handleForkFromAction}
@@ -1809,6 +1940,13 @@ function App() {
           flowLayoutMode={subtaskFlowLayoutMode}
           selection={selection}
           onSelectAction={handleSelectAction}
+          taskTabs={taskSegmentsForActiveSession}
+          activeTaskTabId={activeTaskSegmentId}
+          onSelectTaskTab={
+            selectedSessionId
+              ? (id) => setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [selectedSessionId]: id }))
+              : undefined
+          }
         />
       </div>
     </div>

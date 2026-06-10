@@ -71,22 +71,9 @@ export default function ActionTypeColorLegend({ paletteId }: Props) {
         display: 'flex',
         flexDirection: 'column',
         gap: 4,
-        padding: '6px 0 8px',
+        padding: '2px 0 8px',
       }}
     >
-      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        <span
-          style={{
-            fontSize: 10,
-            fontWeight: 600,
-            color: '#6A6A6A',
-            fontFamily: fontSans,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          Action type legend
-        </span>
-      </div>
       {itemRows.map((row, rowIndex) => (
         <div
           key={`legend-row-${rowIndex}`}

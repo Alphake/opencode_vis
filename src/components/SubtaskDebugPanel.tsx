@@ -18,12 +18,25 @@ import {
   mergeMessagesForActionTooltipLookup,
 } from '../utils/actionTooltipMapping'
 
+export type SubtaskTaskTab = {
+  id: string
+  title: string
+  status: 'pending' | 'extracted'
+  turnCount: number
+}
+
 /** Mirrors `formatDurationMs` in ActionFlowVisualization for summary tooltips */
 function formatSummaryTooltipDuration(durationMs: number): string {
   if (!Number.isFinite(durationMs) || durationMs <= 0) return '—'
   const sec = durationMs / 1000
   if (sec < 0.01) return '<0.01s'
   return `${sec.toFixed(2)}s`
+}
+
+function firstUserMessageIndex(subtask: AssistantSubtask): number | null {
+  const indices = subtask.userMessageIndices ?? []
+  if (indices.length === 0) return null
+  return Math.min(...indices)
 }
 
 interface SubtaskDebugPanelProps {
@@ -43,6 +56,9 @@ interface SubtaskDebugPanelProps {
   onSelectAction?: (subtaskIndex: number, actionKey: string | null) => void
   /** Layout mode toggled by the subtask panel header. */
   flowLayoutMode?: 'timeline' | 'summary'
+  taskTabs?: SubtaskTaskTab[]
+  activeTaskTabId?: string
+  onSelectTaskTab?: (id: string) => void
 }
 
 export default function SubtaskDebugPanel({
@@ -58,11 +74,15 @@ export default function SubtaskDebugPanel({
   selection = null,
   onSelectAction,
   flowLayoutMode = 'timeline',
+  taskTabs = [],
+  activeTaskTabId,
+  onSelectTaskTab,
 }: SubtaskDebugPanelProps) {
   const summaryTooltipSafeId = useId().replace(/:/g, '')
   const summaryTooltipId = `subtask-summary-tip-${summaryTooltipSafeId}`
   const [tooltipMounted, setTooltipMounted] = useState(false)
   const [colorBy, setColorBy] = useState<'tokens' | 'type'>('type')
+  const [legendExpanded, setLegendExpanded] = useState(false)
   const actionTypePaletteId: ActionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID
   const [childSessionMessages, setChildSessionMessages] = useState<Record<string, OcMessage[]>>({})
   const summaryViewportRef = useRef<HTMLDivElement | null>(null)
@@ -312,56 +332,166 @@ export default function SubtaskDebugPanel({
           padding: '0 0 8px',
           borderBottom: '1px solid #E8E8E8',
           marginBottom: 8,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
         }}
       >
-        <ActionTypeColorLegend paletteId={actionTypePaletteId} />
+        <div>
+          <button
+            type="button"
+            onClick={() => setLegendExpanded((v) => !v)}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 10,
+              fontWeight: 600,
+              color: '#6A6A6A',
+              cursor: 'pointer',
+            }}
+            aria-expanded={legendExpanded}
+          >
+            <span style={{ fontSize: 10 }}>{legendExpanded ? '-' : '+'}</span>
+            Action type legend
+          </button>
+          {legendExpanded ? <ActionTypeColorLegend paletteId={actionTypePaletteId} /> : null}
+        </div>
+        {taskTabs.length > 0 ? (
+          <div
+            role="tablist"
+            aria-label="Task segments"
+            style={{
+              display: 'flex',
+              gap: 6,
+              overflowX: 'auto',
+              paddingBottom: 2,
+            }}
+          >
+            {taskTabs.map((tab, idx) => {
+              const active = tab.id === activeTaskTabId
+              const label =
+                tab.status === 'pending'
+                  ? tab.title
+                  : `Task ${idx + 1}${tab.turnCount > 1 ? ` (${tab.turnCount})` : ''}`
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => onSelectTaskTab?.(tab.id)}
+                  title={`${tab.status === 'pending' ? 'Current task' : 'Extracted task'} · ${tab.turnCount} turn${tab.turnCount === 1 ? '' : 's'}`}
+                  style={{
+                    flexShrink: 0,
+                    border: active ? '1px solid #8A8A8A' : '1px solid #D8D8D8',
+                    background: active ? '#F3F3F3' : '#FFFFFF',
+                    color: active ? '#262626' : '#707070',
+                    borderRadius: 999,
+                    padding: '3px 8px',
+                    fontSize: 10,
+                    fontWeight: active ? 650 : 500,
+                    lineHeight: '14px',
+                    cursor: onSelectTaskTab ? 'pointer' : 'default',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
       </div>
       <div
-        ref={listScrollRef}
         style={{
           flex: 1,
+          minHeight: 0,
           width: '100%',
           minWidth: 0,
-          overflowY: flowLayoutMode === 'summary' ? 'hidden' : 'auto',
-          fontSize: 11,
-          color: '#333',
-          lineHeight: 1.45,
+          position: 'relative',
         }}
       >
-        {flowLayoutMode === 'summary' ? (
-          summaryPanel
-        ) : visibleSubtasks.length === 0 ? (
-          <span style={{ color: '#AAA', fontSize: 11 }}>No subtasks</span>
-        ) : (
-          visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => (
-            <Fragment
-              key={`${st.subtask_id}:${sourceIndex}:${st.assistantMessageIndices[0] ?? -1}:${st.assistantMessageIndices[st.assistantMessageIndices.length - 1] ?? -1}:${st.assistantMessageIndices.length}`}
-            >
-            <SubtaskCard
-              subtask={st}
-              messages={messages}
-              displayIndex={si}
-              cardIndex={sourceIndex}
-              isLinked={linkedSubtaskIndex === sourceIndex}
-              onSelectSubtask={() => onSelectSubtask(sourceIndex)}
-              onForkFromAction={onForkFromAction}
-              onAnalyzeFromAction={onAnalyzeFromAction}
-              sessionDirectory={sessionDirectory}
-              forkPanelSnapshotBundle={forkPanelSnapshotBundle}
-              selectedActionKey={
-                selection && selection.subtaskIndex === sourceIndex ? selection.actionKey : null
-              }
-              otherSubtaskHasSelection={false}
-              onSelectActionFromFlow={
-                onSelectAction ? (key) => onSelectAction(sourceIndex, key) : undefined
-              }
-              colorBy={colorBy}
-              onColorByChange={setColorBy}
-              actionTypePaletteId={actionTypePaletteId}
-            />
-            </Fragment>
-          ))
-        )}
+        <div
+          ref={listScrollRef}
+          style={{
+            height: '100%',
+            width: '100%',
+            minWidth: 0,
+            overflowY: flowLayoutMode === 'summary' ? 'hidden' : 'auto',
+            boxSizing: 'border-box',
+            fontSize: 11,
+            color: '#333',
+            lineHeight: 1.45,
+          }}
+        >
+          {flowLayoutMode === 'summary' ? (
+            summaryPanel
+          ) : visibleSubtasks.length === 0 ? (
+            <span style={{ color: '#AAA', fontSize: 11 }}>No subtasks</span>
+          ) : (
+            visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => {
+              const currentUserIndex = firstUserMessageIndex(st)
+              const previous = si > 0 ? visibleSubtasks[si - 1] : null
+              const previousUserIndex = previous ? firstUserMessageIndex(previous.subtask) : null
+              const startsNewPrompt =
+                si > 0 &&
+                currentUserIndex !== null &&
+                currentUserIndex !== previousUserIndex
+
+              return (
+                <Fragment
+                  key={`${st.subtask_id}:${sourceIndex}:${st.assistantMessageIndices[0] ?? -1}:${st.assistantMessageIndices[st.assistantMessageIndices.length - 1] ?? -1}:${st.assistantMessageIndices.length}`}
+                >
+                  {startsNewPrompt ? (
+                    <div
+                      aria-label={`User prompt ${currentUserIndex + 1}`}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        margin: '12px 2px 10px',
+                        color: '#8A8A8A',
+                        fontSize: 10,
+                        fontWeight: 600,
+                        letterSpacing: 0.2,
+                      }}
+                    >
+                      <span style={{ height: 1, flex: 1, background: '#E0E0E0' }} />
+                      <span style={{ whiteSpace: 'nowrap' }}>New user prompt</span>
+                      <span style={{ height: 1, flex: 1, background: '#E0E0E0' }} />
+                    </div>
+                  ) : null}
+                  <SubtaskCard
+                    subtask={st}
+                    messages={messages}
+                    displayIndex={si}
+                    cardIndex={sourceIndex}
+                    isLinked={linkedSubtaskIndex === sourceIndex}
+                    onSelectSubtask={() => onSelectSubtask(sourceIndex)}
+                    onForkFromAction={onForkFromAction}
+                    onAnalyzeFromAction={onAnalyzeFromAction}
+                    sessionDirectory={sessionDirectory}
+                    forkPanelSnapshotBundle={forkPanelSnapshotBundle}
+                    selectedActionKey={
+                      selection && selection.subtaskIndex === sourceIndex ? selection.actionKey : null
+                    }
+                    otherSubtaskHasSelection={false}
+                    onSelectActionFromFlow={
+                      onSelectAction ? (key) => onSelectAction(sourceIndex, key) : undefined
+                    }
+                    colorBy={colorBy}
+                    onColorByChange={setColorBy}
+                    actionTypePaletteId={actionTypePaletteId}
+                  />
+                </Fragment>
+              )
+            })
+          )}
+        </div>
       </div>
     </div>
   )

@@ -390,7 +390,28 @@ def _skip_ingest_response(
     }
     if task_switch is not None:
         out["taskSwitch"] = task_switch
+    if pending_turns:
+        out["pendingTask"] = _task_segment_summary(pending_turns)
     return out
+
+
+def _task_segment_summary(turns: list[dict[str, Any]]) -> dict[str, Any]:
+    clean = _dedupe_turn_records(turns)
+    if not clean:
+        return {
+            "fromStartUserMessageId": "",
+            "fromEndAssistantMessageId": "",
+            "toEndAssistantMessageId": "",
+            "turnCount": 0,
+        }
+    first = clean[0]
+    last = clean[-1]
+    return {
+        "fromStartUserMessageId": str(first.get("startUserMessageId") or ""),
+        "fromEndAssistantMessageId": str(first.get("endAssistantMessageId") or ""),
+        "toEndAssistantMessageId": str(last.get("endAssistantMessageId") or ""),
+        "turnCount": len(clean),
+    }
 
 
 def _load_ingest_dedup_index() -> dict[str, Any]:
@@ -819,11 +840,10 @@ def process_reference_ingest_with_task_switch(
 
     result["taskSwitch"] = {"runDir": str(switch_run_dir), "mode": switch_output.get("mode"), "decision": decision}
     result["extractedTask"] = {
-        "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
-        "toEndAssistantMessageId": previous_end_msg_id,
-        "turnCount": len(previous_task_turns),
+        **_task_segment_summary(previous_task_turns),
         "nextPendingEndAssistantMessageId": end_msg_id,
     }
+    result["pendingTask"] = _task_segment_summary([current_turn])
     return result
 
 
