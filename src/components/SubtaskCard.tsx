@@ -20,6 +20,7 @@ import {
 } from '../styles/actionTypePalettes'
 import { getMessages } from '../services/opencodeApi'
 import { actionKey } from '../utils/actionKey'
+import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
 
 const fontSans =
   "'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif"
@@ -57,6 +58,13 @@ interface SubtaskCardProps {
   onColorByChange: (mode: ColorByMode) => void
   /** Shared action-type palette from parent panel */
   actionTypePaletteId: ActionTypePaletteId
+  /** Auto-generated root-cause analysis for failed traces; absent keeps the original end tooltip unchanged. */
+  errorDiagnosis?: MemoryWorkerErrorDiagnosis
+  /** Shows the title-row comment affordance while collecting skill feedback. */
+  feedbackMode?: boolean
+  isFeedbackSelected?: boolean
+  hasFeedbackComment?: boolean
+  onOpenFeedbackComment?: () => void
 }
 
 type ColorByMode = 'tokens' | 'type'
@@ -129,6 +137,11 @@ export default function SubtaskCard({
   colorBy,
   onColorByChange,
   actionTypePaletteId,
+  errorDiagnosis,
+  feedbackMode = false,
+  isFeedbackSelected = false,
+  hasFeedbackComment = false,
+  onOpenFeedbackComment,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
@@ -459,6 +472,7 @@ export default function SubtaskCard({
       webSearchQueries: m.webSearchQueries,
       writeFileCount: m.mutatedFileCount,
       changedFilePaths: m.mutatedFilePaths,
+      errorDiagnosis,
     }),
     [
       m.readFilesCount,
@@ -468,6 +482,7 @@ export default function SubtaskCard({
       m.webSearchQueries,
       m.mutatedFileCount,
       m.mutatedFilePaths,
+      errorDiagnosis,
     ],
   )
 
@@ -484,18 +499,56 @@ export default function SubtaskCard({
 
   const bodyContent = (
     <>
-      <h3
+      <div
         style={{
-          margin: 0,
-          fontWeight: 600,
-          fontSize: 13,
-          lineHeight: '18px',
-          color: '#2B2B2B',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
           flexShrink: 0,
         }}
       >
-        {m.title}
-      </h3>
+        <h3
+          style={{
+            margin: 0,
+            fontWeight: 600,
+            fontSize: 13,
+            lineHeight: '18px',
+            color: '#2B2B2B',
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {m.title}
+        </h3>
+        {feedbackMode ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpenFeedbackComment?.()
+            }}
+            title={hasFeedbackComment ? '查看或修改这个 panel 的反馈' : '给这个 panel 写反馈'}
+            style={{
+              flex: '0 0 auto',
+              border: hasFeedbackComment ? '1px solid #86B6FF' : '1px solid #D7E3F8',
+              borderRadius: 999,
+              background: isFeedbackSelected ? '#EDF5FF' : '#FFFFFF',
+              color: hasFeedbackComment ? '#185EA8' : '#44607C',
+              padding: '3px 8px',
+              fontSize: 10,
+              lineHeight: '14px',
+              fontWeight: 650,
+              cursor: 'pointer',
+              boxShadow: hasFeedbackComment ? '0 1px 6px rgba(24, 94, 168, 0.12)' : 'none',
+            }}
+          >
+            {hasFeedbackComment ? 'Commented' : 'Comment'}
+          </button>
+        ) : null}
+      </div>
 
       <div
         onClick={e => e.stopPropagation()}

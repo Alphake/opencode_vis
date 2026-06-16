@@ -46,6 +46,7 @@ export interface TraceAction {
 
 export interface TraceSubtask {
   index: number
+  subtaskId?: string
   title: string
   phase: SubtaskPhase
   todos: OcTodo[]

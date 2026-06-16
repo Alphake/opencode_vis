@@ -106,10 +106,6 @@ export default function MessagePanel({
     hasInlineQuestion ||
     Boolean(pendingQuestion && pendingQuestion.sessionID === sessionId)
 
-  // Derive composer metadata from latest assistant row
-  const lastAssistantMsg = [...messages].reverse().find(m => m.info.role === 'assistant')
-  const agentName = lastAssistantMsg?.info.agent || null
-  const modelName = lastAssistantMsg?.info.model?.modelID || null
   const assistantIndices = messages
     .map((m, i) => (m.info.role === 'assistant' ? i : -1))
     .filter((i) => i >= 0)
@@ -377,8 +373,6 @@ export default function MessagePanel({
           isRunning={hasRunningTool}
           aborting={aborting}
           sessionId={sessionId}
-          agentName={agentName}
-          modelName={modelName}
           composerModelRef={composerModelRef}
           onComposerModelRefChange={onComposerModelRefChange}
           composerModelOptions={composerModelOptions}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -23,9 +25,12 @@ LOG_ROOT = REPO_ROOT / "memory_worker" / "logs"
 PROMPT_ROOT = REPO_ROOT / "memory_worker" / "prompts"
 INGEST_DEDUP_INDEX = LOG_ROOT / "ingest-dedup-index.json"
 TASK_SWITCH_STATE_PATH = LOG_ROOT / "task-switch-state.json"
+TASK_SKILL_INDEX_PATH = LOG_ROOT / "task-skill-index.json"
+ERROR_DIAGNOSIS_INDEX_PATH = LOG_ROOT / "error-diagnosis-index.json"
 INGEST_DEDUP_STALE_RUNNING_SEC = 900
 _ingest_dedup_lock = threading.Lock()
 _task_switch_lock = threading.Lock()
+_error_diagnosis_lock = threading.Lock()
 
 _TRACE_PARSER_SPEC = importlib.util.spec_from_file_location("trace_parser", WORKER_ROOT / "trace_parser.py")
 if _TRACE_PARSER_SPEC is None or _TRACE_PARSER_SPEC.loader is None:
@@ -34,7 +39,7 @@ trace_parser = importlib.util.module_from_spec(_TRACE_PARSER_SPEC)
 _TRACE_PARSER_SPEC.loader.exec_module(trace_parser)
 
 
-def load_env_file(path: Path) -> None:
+def load_env_file(path: Path, *, override: bool = False) -> None:
     if not path.exists():
         return
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -45,16 +50,36 @@ def load_env_file(path: Path) -> None:
         k = k.strip()
         if not k:
             continue
-        if k not in os.environ:
+        if override or k not in os.environ:
             os.environ[k] = v.strip()
 
 
-load_env_file(REPO_ROOT / ".env.local")
 load_env_file(REPO_ROOT / ".env")
+load_env_file(REPO_ROOT / ".env.local", override=True)
+
+
+def resolve_config_path(raw: str | os.PathLike[str] | None, default: Path) -> Path:
+    value = str(raw or "").strip()
+    path = Path(value).expanduser() if value else default
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
+def split_env_paths(raw: str | None) -> list[Path]:
+    roots: list[Path] = []
+    for part in (raw or "").split(";"):
+        value = part.strip()
+        if not value:
+            continue
+        roots.append(resolve_config_path(value, REPO_ROOT))
+    return roots
 
 OPENCODE_BASE = (os.environ.get("OPENCODE_BASE") or os.environ.get("VITE_OPENCODE_BASE") or "http://127.0.0.1:4096").rstrip("/")
-OPENCODE_DIRECTORY = os.environ.get("OPENCODE_DIRECTORY") or str(REPO_ROOT)
-SKILL_WRITE_ROOT = Path(os.environ.get("SKILL_WRITE_ROOT") or (Path.home() / ".claude" / "skills"))
+OPENCODE_DIRECTORY = str(resolve_config_path(os.environ.get("OPENCODE_DIRECTORY"), REPO_ROOT))
+SKILL_WRITE_ROOT = resolve_config_path(os.environ.get("SKILL_WRITE_ROOT"), Path.home() / ".claude" / "skills")
+SKILL_LOAD_ROOTS = split_env_paths(os.environ.get("SKILL_LOAD_ROOTS"))
+SKILL_SEARCH_ROOTS_EXTRA = split_env_paths(os.environ.get("SKILL_SEARCH_ROOTS_EXTRA"))
 MW_ANALYZER_MODE = (os.environ.get("MW_ANALYZER_MODE") or "opencode").strip().lower()
 MW_WRITER_MODE = (os.environ.get("MW_WRITER_MODE") or "opencode").strip().lower()
 MW_TASK_SWITCH_MODE = (os.environ.get("MW_TASK_SWITCH_MODE") or "opencode").strip().lower()
@@ -141,9 +166,78 @@ def ensure_prompt_files() -> None:
                 "而不是对上一任务的补充、纠错、继续执行、验证或格式调整。\n\n"
                 "只输出 JSON 对象：\n"
                 "{\"task_switched\": boolean, \"confidence\": \"low|medium|high\", "
-                "\"reason\": \"string\", \"previous_task_summary\": \"string\", "
-                "\"current_task_summary\": \"string\"}\n\n"
+                "\"reason\": \"string\", "
+                "\"previous_task\": {\"title\": \"string\", \"description\": \"string\"}, "
+                "\"current_task\": {\"title\": \"string\", \"description\": \"string\"}}\n\n"
                 "input:\n{{TASK_SWITCH_INPUT_JSON}}\n"
+            ),
+            encoding="utf-8",
+        )
+    feedback = PROMPT_ROOT / "feedback_distill_prompt.md"
+    if not feedback.exists():
+        feedback.write_text(
+            (
+                "你是 FeedbackSkillDistiller。你会收到一个任务片段、用户整体反馈、"
+                "以及用户针对一个或多个 trace panel 的局部反馈。\n\n"
+                "目标：把这些反馈沉淀为一个可复用 skill 草案，用于以后遇到相似任务/trace 模式时指导 agent 行动。\n\n"
+                "输入里的 feedbackContext.traceKind=\"feedback\" 表示这是 analyzer trace 的反馈蒸馏变体；"
+                "selectedPanels 内只包含用户勾选的 panel trace，不要分析未勾选的 panel。\n\n"
+                "要求：\n"
+                "1. 只输出 JSON，不要输出 Markdown、解释文字或代码围栏。\n"
+                "2. skill_name 使用 kebab-case，简短且稳定。\n"
+                "3. description 描述触发场景，不要只是复述任务 id。\n"
+                "4. steps 必须是可执行的行为规则。\n"
+                "5. trace_anchors 要引用输入里的 panel subtaskIndex/actionKey/messageId 等锚点，说明反馈来自哪里。\n"
+                "6. 如果信息不足以沉淀 skill，输出 operation=\"NONE\"，并在 rationale 说明原因。\n\n"
+                "输出 schema：\n"
+                "{\n"
+                "  \"operation\": \"CREATE\" | \"UPDATE\" | \"NONE\",\n"
+                "  \"skill_name\": \"string\",\n"
+                "  \"description\": \"string\",\n"
+                "  \"rationale\": \"string\",\n"
+                "  \"trigger_conditions\": [\"string\"],\n"
+                "  \"steps\": [\"string\"],\n"
+                "  \"constraints\": [\"string\"],\n"
+                "  \"trace_anchors\": [\n"
+                "    {\n"
+                "      \"subtaskIndex\": 0,\n"
+                "      \"summary\": \"string\",\n"
+                "      \"actionKeys\": [\"string\"],\n"
+                "      \"messageIds\": [\"string\"]\n"
+                "    }\n"
+                "  ]\n"
+                "}\n\n"
+                "input:\n{{FEEDBACK_DISTILL_INPUT_JSON}}\n"
+            ),
+            encoding="utf-8",
+        )
+    error_diagnosis = PROMPT_ROOT / "error_diagnosis_prompt.md"
+    if not error_diagnosis.exists():
+        error_diagnosis.write_text(
+            (
+                "你是 VibeTrace Panel Analyzer。你会收到一个已经完成的 subtask trace。它可能成功，也可能包含失败 action。\n\n"
+                "目标：为这个 trace panel 生成一个极简解读。如果没有错误，只用一句话解释“为了什么、做了什么、最终得到什么”。"
+                "如果有错误，先给同样的一句话过程总结，再做错误纠错、错因分析和因果推理，说明哪里失败、根本原因是什么、为什么会出现这种错误，以及下一步如何修。\n\n"
+                "要求：\n"
+                "1. 只输出 JSON，不要输出 Markdown、解释文字或代码围栏。\n"
+                "2. summary 必须只有一句话，尽量短，格式接近“为了 X，执行了 Y，最终得到 Z”。\n"
+                "3. 必须严格根据 input.subtask.actions 和 input.errorActions 总结，不要编造 trace 中不存在的目标、结果、文件、网页或错误。\n"
+                "4. 说明整体步骤，但不要写成逐 action 流水账；要简洁、概括、可读。\n"
+                "5. JSON 字符串内部不要使用未转义的英文双引号；需要引用用户原话时改用中文书名号、单引号或省略引用。\n"
+                "6. 如果 input.hasError=false，rootCause、causalChain、evidence、fixSuggestion 必须为空字符串或空数组，confidence 根据 trace 信息完整度给出。\n"
+                "7. 如果 input.hasError=true，只能基于输入 trace 里的证据推理；证据不足时要明确写 confidence=\"low\"。\n"
+                "8. 有错误时要区分表层错误（例如工具报错文本）和根本原因（例如前置路径定位错误、遗漏验证、并发子任务失败）。\n"
+                "9. 因果链、证据和修复建议不是强制项；只有 trace 里有清楚证据时才填写，否则保持空数组或空字符串，避免冗长。\n\n"
+                "输出 schema：\n"
+                "{\n"
+                "  \"summary\": \"一句话说明这个 panel 为了什么做了什么最终得到什么\",\n"
+                "  \"rootCause\": \"无错误时为空字符串；有错误时写根本原因\",\n"
+                "  \"causalChain\": [],\n"
+                "  \"evidence\": [],\n"
+                "  \"fixSuggestion\": \"无错误时为空字符串；有错误时写下一步建议\",\n"
+                "  \"confidence\": \"high\" | \"medium\" | \"low\"\n"
+                "}\n\n"
+                "input:\n{{ERROR_DIAGNOSIS_INPUT_JSON}}\n"
             ),
             encoding="utf-8",
         )
@@ -294,6 +388,35 @@ def _find_turn_prompt_record(records: list[dict[str, Any]], end_assistant_messag
     return None
 
 
+def _normalize_user_prompt(text: str) -> str:
+    """Strip harness preamble so early prompt and completed-turn records compare equally."""
+    return trace_parser._strip_harness_guidance(str(text or "")).strip()
+
+
+def _prompt_fingerprint(text: str) -> str:
+    return re.sub(r"\s+", " ", _normalize_user_prompt(text)).lower()
+
+
+def _same_user_prompt(left: str, right: str) -> bool:
+    a = _prompt_fingerprint(left)
+    b = _prompt_fingerprint(right)
+    return bool(a and b and a == b)
+
+
+def _task_switch_decision_ready(task_switch: Any) -> bool:
+    if not isinstance(task_switch, dict):
+        return False
+    decision = task_switch.get("decision")
+    return isinstance(decision, dict) and isinstance(decision.get("task_switched"), bool)
+
+
+def _completed_in_flight_turn(session_state: dict[str, Any], user_prompt: str) -> dict[str, Any] | None:
+    completed = session_state.get("completedInFlightTurn")
+    if isinstance(completed, dict) and _same_user_prompt(str(completed.get("userInput") or ""), user_prompt):
+        return _turn_record_for_state(completed)
+    return None
+
+
 def _task_switch_session_key(session_id: str, directory: str | None) -> str:
     directory_key = (directory or OPENCODE_DIRECTORY or "").strip()
     return f"{session_id}::{directory_key}"
@@ -321,6 +444,15 @@ def render_task_switch_prompt(template: str, pending_turns: list[dict[str, Any]]
     return template.replace("{{TASK_SWITCH_INPUT_JSON}}", json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _summarize_user_input(text: str, *, max_len: int = 120) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return ""
+    if len(clean) <= max_len:
+        return clean
+    return clean[: max_len - 1].rstrip() + "…"
+
+
 def _mock_task_switch_decision(pending_turns: list[dict[str, Any]], current_turn: dict[str, Any]) -> dict[str, Any]:
     text = str(current_turn.get("userInput") or "").strip().lower()
     switched = bool(
@@ -330,12 +462,20 @@ def _mock_task_switch_decision(pending_turns: list[dict[str, Any]], current_turn
             flags=re.I,
         )
     )
+    previous_text = " / ".join(str(x.get("userInput") or "") for x in pending_turns)
+    current_text = str(current_turn.get("userInput") or "")
     return {
         "task_switched": switched,
         "confidence": "medium" if switched else "low",
         "reason": "mock heuristic matched task-switch phrase" if switched else "mock heuristic found no explicit switch phrase",
-        "previous_task_summary": " / ".join(str(x.get("userInput") or "")[:80] for x in pending_turns),
-        "current_task_summary": str(current_turn.get("userInput") or "")[:160],
+        "previous_task": {
+            "title": _summarize_user_input(previous_text, max_len=16) if switched else "",
+            "description": _summarize_user_input(previous_text, max_len=36) if switched else "",
+        },
+        "current_task": {
+            "title": _summarize_user_input(current_text, max_len=16),
+            "description": _summarize_user_input(current_text, max_len=36),
+        },
     }
 
 
@@ -373,12 +513,39 @@ def run_task_switch_judge(
     return {"mode": "opencode", **llm_out, "analysis": parsed}
 
 
+def _format_task_display_label(*, title: str = "", description: str = "") -> str:
+    title = str(title or "").strip()
+    description = str(description or "").strip()
+    if title and description:
+        return f"{title} — {description}"
+    return title or description
+
+
+def _task_brief_from_decision(decision: Any, role: str) -> dict[str, str]:
+    if not isinstance(decision, dict):
+        return {"title": "", "description": ""}
+    block = decision.get(f"{role}_task")
+    if isinstance(block, dict):
+        return {
+            "title": str(block.get("title") or "").strip(),
+            "description": str(block.get("description") or "").strip(),
+        }
+    legacy = str(decision.get(f"{role}_task_summary") or "").strip()
+    if legacy:
+        return {"title": "", "description": legacy}
+    return {"title": "", "description": ""}
+
+
 def _skip_ingest_response(
     reason: str,
     session_id: str,
     current_turn: dict[str, Any],
     pending_turns: list[dict[str, Any]],
     task_switch: dict[str, Any] | None = None,
+    *,
+    extracted_turns: list[dict[str, Any]] | None = None,
+    extracted_brief: dict[str, str] | None = None,
+    pending_brief: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "ok": True,
@@ -390,27 +557,609 @@ def _skip_ingest_response(
     }
     if task_switch is not None:
         out["taskSwitch"] = task_switch
+    if extracted_turns:
+        brief = extracted_brief or {}
+        out["extractedTask"] = _task_segment_summary(
+            extracted_turns,
+            title=brief.get("title"),
+            description=brief.get("description"),
+        )
     if pending_turns:
-        out["pendingTask"] = _task_segment_summary(pending_turns)
+        brief = pending_brief or {}
+        out["pendingTask"] = _task_segment_summary(
+            pending_turns,
+            title=brief.get("title"),
+            description=brief.get("description"),
+        )
     return out
 
 
-def _task_segment_summary(turns: list[dict[str, Any]]) -> dict[str, Any]:
+def _load_task_skill_index() -> dict[str, Any]:
+    if not TASK_SKILL_INDEX_PATH.exists():
+        return {"tasks": {}}
+    try:
+        data = json.loads(TASK_SKILL_INDEX_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("tasks"), dict):
+            return data
+    except Exception:
+        pass
+    return {"tasks": {}}
+
+
+def _save_task_skill_index(data: dict[str, Any]) -> None:
+    data["updatedAt"] = now_iso()
+    write_json(TASK_SKILL_INDEX_PATH, data)
+
+
+def _task_skill_key(session_id: str, task_id: str) -> str:
+    return f"{session_id}::{task_id}"
+
+
+def _skill_records_from_pipeline_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for item in result.get("writerResults") or []:
+        if not isinstance(item, dict):
+            continue
+        suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
+        writer = item.get("result") if isinstance(item.get("result"), dict) else {}
+        skill_name = str(writer.get("skillName") or suggestion.get("skill_name") or "").strip()
+        target_dir = str(writer.get("targetDir") or "").strip()
+        status = str(writer.get("status") or "").strip() or "unknown"
+        if not skill_name and not target_dir:
+            continue
+        records.append(
+            {
+                "skillName": skill_name,
+                "skillPath": target_dir,
+                "status": "ready" if status == "ok" else status,
+                "operation": str(writer.get("operation") or suggestion.get("operation") or ""),
+                "rationale": str(suggestion.get("rationale") or ""),
+                "createdAt": now_iso(),
+            }
+        )
+    return records
+
+
+def _enrich_skill_provenance(
+    skill_dir: Path,
+    *,
+    session_id: str,
+    task_id: str,
+    task_segment: dict[str, Any] | None = None,
+    source: str = "pipeline",
+    pipeline_run_dir: str = "",
+) -> None:
+    """Write sessionId/taskId into skill folder so disk scan can rebuild the index later."""
+    if not skill_dir.exists() or not skill_dir.is_dir():
+        return
+    provenance_path = skill_dir / "PROVENANCE.json"
+    existing = _safe_read_json_file(provenance_path)
+    payload: dict[str, Any] = existing if isinstance(existing, dict) else {}
+    payload.update(
+        {
+            "sessionId": session_id,
+            "taskId": task_id,
+            "taskSegment": task_segment or payload.get("taskSegment") or {},
+            "source": payload.get("source") or source,
+        }
+    )
+    if pipeline_run_dir:
+        payload["pipelineRunDir"] = pipeline_run_dir
+    write_json(provenance_path, payload)
+
+
+def register_task_skill_result(
+    session_id: str,
+    task_segment: dict[str, Any],
+    pipeline_result: dict[str, Any],
+) -> None:
+    task_id = str(task_segment.get("taskId") or "").strip()
+    if not session_id or not task_id:
+        return
+    skills = _skill_records_from_pipeline_result(pipeline_result)
+    pipeline_run_dir = str(pipeline_result.get("runDir") or "")
+    for skill in skills:
+        skill_path = str(skill.get("skillPath") or "").strip()
+        if skill_path:
+            _enrich_skill_provenance(
+                Path(skill_path),
+                session_id=session_id,
+                task_id=task_id,
+                task_segment=task_segment,
+                source="pipeline",
+                pipeline_run_dir=pipeline_run_dir,
+            )
+    with _task_switch_lock:
+        index = _load_task_skill_index()
+        tasks = index.setdefault("tasks", {})
+        key = _task_skill_key(session_id, task_id)
+        existing = tasks.get(key) if isinstance(tasks.get(key), dict) else {}
+        merged_skills = [x for x in existing.get("skills", []) if isinstance(x, dict)]
+        seen = {str(x.get("skillPath") or x.get("skillName") or "") for x in merged_skills}
+        for skill in skills:
+            marker = str(skill.get("skillPath") or skill.get("skillName") or "")
+            if marker and marker in seen:
+                continue
+            if marker:
+                seen.add(marker)
+            merged_skills.append(skill)
+        tasks[key] = {
+            **existing,
+            "sessionId": session_id,
+            "taskId": task_id,
+            "taskSegment": task_segment,
+            "status": "ready" if merged_skills else "none",
+            "skills": merged_skills,
+            "pipelineRunDir": pipeline_result.get("runDir"),
+            "updatedAt": now_iso(),
+        }
+        _save_task_skill_index(index)
+
+
+def merge_task_skill_records(
+    session_id: str,
+    task_id: str,
+    skills: list[dict[str, Any]],
+    *,
+    task_segment: dict[str, Any] | None,
+    source: str,
+) -> None:
+    if not session_id or not task_id or not skills:
+        return
+    with _task_switch_lock:
+        index = _load_task_skill_index()
+        tasks = index.setdefault("tasks", {})
+        key = _task_skill_key(session_id, task_id)
+        existing = tasks.get(key) if isinstance(tasks.get(key), dict) else {}
+        merged_skills = [x for x in existing.get("skills", []) if isinstance(x, dict)]
+        seen = {str(x.get("skillPath") or x.get("skillName") or "") for x in merged_skills}
+        changed = False
+        for skill in skills:
+            marker = str(skill.get("skillPath") or skill.get("skillName") or "")
+            if marker and marker in seen:
+                continue
+            if marker:
+                seen.add(marker)
+            merged_skills.append(skill)
+            changed = True
+        if not changed and isinstance(existing, dict):
+            return
+        tasks[key] = {
+            **existing,
+            "sessionId": session_id,
+            "taskId": task_id,
+            "taskSegment": task_segment or existing.get("taskSegment") or {},
+            "status": "ready" if merged_skills else "none",
+            "skills": merged_skills,
+            "source": source,
+            "updatedAt": now_iso(),
+        }
+        _save_task_skill_index(index)
+
+
+def configured_skill_roots(project_dir: Path | None) -> list[Path]:
+    if SKILL_LOAD_ROOTS:
+        roots = [*SKILL_LOAD_ROOTS]
+    else:
+        effective_project_dir = project_dir or Path(OPENCODE_DIRECTORY)
+        roots = [
+            effective_project_dir / ".opencode" / "skills",
+            Path.home() / ".config" / "opencode" / "skills",
+            effective_project_dir / ".claude" / "skills",
+            Path.home() / ".claude" / "skills",
+            effective_project_dir / ".agents" / "skills",
+            Path.home() / ".agents" / "skills",
+            SKILL_WRITE_ROOT,
+        ]
+    roots.extend(SKILL_SEARCH_ROOTS_EXTRA)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            resolved = root.expanduser().resolve()
+        except Exception:
+            resolved = root.expanduser()
+        marker = str(resolved).lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(resolved)
+    return unique
+
+
+def discover_task_skills_from_disk(session_id: str, task_id: str, directory: str | None) -> list[dict[str, Any]]:
+    project_dir = resolve_config_path(directory, Path(OPENCODE_DIRECTORY)) if directory else Path(OPENCODE_DIRECTORY)
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in configured_skill_roots(project_dir):
+        if not root.exists() or not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            provenance_path = child / "PROVENANCE.json"
+            provenance = _safe_read_json_file(provenance_path)
+            if not isinstance(provenance, dict):
+                continue
+            prov_session_id = str(provenance.get("sessionId") or "").strip()
+            prov_task_id = str(provenance.get("taskId") or "").strip()
+            if prov_session_id != session_id or prov_task_id != task_id:
+                continue
+
+            skill_md_path = child / "SKILL.md"
+            skill_name = str(provenance.get("skillName") or child.name).strip()
+            rationale = str(provenance.get("rationale") or "").strip()
+            try:
+                if skill_md_path.exists():
+                    parsed_name, desc = extract_skill_fields(skill_md_path.read_text(encoding="utf-8"), child.name)
+                    skill_name = skill_name or parsed_name
+                    rationale = rationale or desc
+            except Exception:
+                pass
+            marker = str(child.resolve())
+            if marker in seen:
+                continue
+            seen.add(marker)
+            records.append(
+                {
+                    "skillName": skill_name or child.name,
+                    "skillPath": marker,
+                    "status": "ready",
+                    "operation": str(provenance.get("operation") or provenance.get("source") or "PROVENANCE").strip(),
+                    "rationale": rationale,
+                    "createdAt": str(provenance.get("generatedAt") or ""),
+                    "feedbackRunDir": str(provenance.get("runDir") or "") if provenance.get("source") == "feedback_distill" else "",
+                    "source": "provenance_scan",
+                }
+            )
+    return records
+
+
+def task_skills_response(session_id: str, task_id: str) -> dict[str, Any]:
+    return task_skills_response_for_directory(session_id, task_id, None)
+
+
+def task_skills_response_for_directory(session_id: str, task_id: str, directory: str | None) -> dict[str, Any]:
+    discovered = discover_task_skills_from_disk(session_id, task_id, directory)
+    if discovered:
+        merge_task_skill_records(
+            session_id,
+            task_id,
+            discovered,
+            task_segment=None,
+            source="provenance_scan",
+        )
+    index = _load_task_skill_index()
+    task = (index.get("tasks") or {}).get(_task_skill_key(session_id, task_id))
+    if not isinstance(task, dict):
+        return {
+            "ok": True,
+            "sessionId": session_id,
+            "taskId": task_id,
+            "status": "none",
+            "skills": [],
+            "skillWriteRoot": str(SKILL_WRITE_ROOT),
+            "discoveredCount": len(discovered),
+        }
+    return {
+        "ok": True,
+        "sessionId": session_id,
+        "taskId": task_id,
+        "status": task.get("status") or "none",
+        "skills": task.get("skills") if isinstance(task.get("skills"), list) else [],
+        "taskSegment": task.get("taskSegment") or {},
+        "pipelineRunDir": task.get("pipelineRunDir") or "",
+        "updatedAt": task.get("updatedAt") or "",
+        "skillWriteRoot": str(SKILL_WRITE_ROOT),
+        "discoveredCount": len(discovered),
+    }
+
+
+def _safe_read_json_file(path: Path) -> Any:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"_error": str(e), "_path": str(path)}
+
+
+def task_skill_detail_response(session_id: str, task_id: str, skill_key: str) -> dict[str, Any]:
+    index = _load_task_skill_index()
+    task = (index.get("tasks") or {}).get(_task_skill_key(session_id, task_id))
+    if not isinstance(task, dict):
+        return {"ok": False, "error": "task skill record not found"}
+
+    skills = [item for item in task.get("skills", []) if isinstance(item, dict)]
+    skill = next(
+        (
+            item
+            for item in skills
+            if skill_key
+            and skill_key
+            in {
+                str(item.get("skillPath") or ""),
+                str(item.get("skillName") or ""),
+                str(item.get("feedbackRunDir") or ""),
+            }
+        ),
+        None,
+    )
+    if not isinstance(skill, dict):
+        return {"ok": False, "error": "skill record not found"}
+
+    skill_dir = Path(str(skill.get("skillPath") or ""))
+    skill_md_path = skill_dir / "SKILL.md"
+    skill_md = ""
+    skill_read_error = ""
+    try:
+        if skill_md_path.exists() and skill_md_path.is_file():
+            skill_md = skill_md_path.read_text(encoding="utf-8")
+        else:
+            skill_read_error = f"SKILL.md not found at {skill_md_path}"
+    except Exception as e:
+        skill_read_error = str(e)
+
+    provenance = _safe_read_json_file(skill_dir / "PROVENANCE.json")
+
+    feedback_run_dir_raw = str(skill.get("feedbackRunDir") or "").strip()
+    feedback_run_dir = Path(feedback_run_dir_raw) if feedback_run_dir_raw else None
+    feedback_detail: dict[str, Any] = {}
+    try:
+        if feedback_run_dir is not None:
+            resolved = feedback_run_dir.resolve()
+            resolved.relative_to(LOG_ROOT.resolve())
+            feedback_detail = {
+                "runDir": str(feedback_run_dir),
+                "request": _safe_read_json_file(feedback_run_dir / "01-request.json"),
+                "analysis": _safe_read_json_file(feedback_run_dir / "04-feedback-analysis.json"),
+                "result": _safe_read_json_file(feedback_run_dir / "05-result.json")
+                or _safe_read_json_file(feedback_run_dir / "03-result.json"),
+            }
+    except Exception as e:
+        feedback_detail = {"runDir": feedback_run_dir_raw, "error": str(e)}
+
+    return {
+        "ok": True,
+        "sessionId": session_id,
+        "taskId": task_id,
+        "skill": skill,
+        "skillMd": skill_md,
+        "skillMdPath": str(skill_md_path),
+        "skillReadError": skill_read_error,
+        "provenance": provenance,
+        "feedback": feedback_detail,
+    }
+
+
+def feedback_distill_run_dir(session_id: str, task_id: str) -> Path:
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")
+    return LOG_ROOT / f"{stamp}-{_safe_id(session_id) or 'unknown-session'}-{_safe_id(task_id) or 'unknown-task'}-feedback-distill-{uuid4().hex[:8]}"
+
+
+def distill_feedback_skill(payload: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(payload.get("sessionId") or "").strip()
+    task_id = str(payload.get("taskId") or "").strip()
+    directory = str(payload.get("directory") or "").strip() or OPENCODE_DIRECTORY
+    parent_session_id = str(payload.get("parentSessionID") or "").strip() or session_id
+    comment = str(payload.get("comment") or "").strip()
+    task_segment = payload.get("taskSegment") if isinstance(payload.get("taskSegment"), dict) else {}
+    selected_anchor = payload.get("selectedAnchor") if isinstance(payload.get("selectedAnchor"), dict) else {}
+    feedback_context = payload.get("feedbackContext") if isinstance(payload.get("feedbackContext"), dict) else {}
+    if not session_id or not task_id:
+        return {"ok": False, "error": "sessionId and taskId are required"}
+
+    run_dir = feedback_distill_run_dir(session_id, task_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_file = run_dir / "00-run.log"
+    append_log(
+        log_file,
+        "feedback_distill.start",
+        {"sessionId": session_id, "taskId": task_id, "directory": directory, "parentSessionID": parent_session_id},
+    )
+    write_json(run_dir / "01-request.json", payload)
+
+    prompt_template = (PROMPT_ROOT / "feedback_distill_prompt.md").read_text(encoding="utf-8")
+    prompt_input = {
+        "sessionId": session_id,
+        "taskId": task_id,
+        "directory": directory,
+        "taskSegment": task_segment,
+        "selectedAnchor": selected_anchor,
+        "overallComment": comment,
+        "feedbackContext": feedback_context,
+    }
+    rendered_prompt = prompt_template.replace("{{FEEDBACK_DISTILL_INPUT_JSON}}", json.dumps(prompt_input, ensure_ascii=False, indent=2))
+    (run_dir / "02-feedback-distill-prompt.txt").write_text(rendered_prompt, encoding="utf-8")
+
+    try:
+        llm_out = opencode_generate_text(
+            rendered_prompt,
+            run_dir,
+            log_file,
+            "02a-feedback-distiller",
+            directory=directory,
+            parent_session_id=parent_session_id,
+            retry_in_session_on_timeout=True,
+            max_attempts=MW_ANALYZER_SESSION_ATTEMPTS,
+            retry_prompt=(
+                "The previous reply did not complete or was not parseable. Continue in this same session: "
+                "finish the feedback distillation and output the JSON object only, with no extra prose."
+            ),
+        )
+    except Exception as e:
+        append_log(log_file, "feedback_distill.llm.failed", {"error": str(e)})
+        return {
+            "ok": False,
+            "runDir": str(run_dir),
+            "error": f"feedback distiller failed: {e}",
+        }
+
+    write_json(run_dir / "03-feedback-distiller-raw.json", llm_out)
+    parsed_any = try_parse_json_value(str(llm_out.get("rawText") or ""))
+    if not isinstance(parsed_any, dict):
+        append_log(log_file, "feedback_distill.parse.failed", {"message": "no valid JSON object"})
+        return {
+            "ok": False,
+            "runDir": str(run_dir),
+            "error": "Feedback distiller output parse failed",
+            "distillerOutput": llm_out,
+        }
+    analysis = parsed_any
+    write_json(run_dir / "04-feedback-analysis.json", analysis)
+
+    operation = str(analysis.get("operation") or "CREATE").upper()
+    if operation == "NONE":
+        append_log(log_file, "feedback_distill.none", {"rationale": str(analysis.get("rationale") or "")})
+        write_json(run_dir / "05-result.json", {"analysis": analysis, "skipped": True, "reason": "operation=NONE"})
+        return {
+            "ok": True,
+            "runDir": str(run_dir),
+            "status": "none",
+            "analysis": analysis,
+            "distillerSessionID": str(((llm_out.get("session") or {}).get("id") or "")),
+            "skills": task_skills_response(session_id, task_id).get("skills", []),
+        }
+
+    def as_text_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    raw_skill_name = str(analysis.get("skill_name") or "").strip()
+    safe_skill = _safe_id(raw_skill_name or f"feedback-{task_id}")[:96] or f"feedback-skill-{uuid4().hex[:8]}"
+    target_dir = SKILL_WRITE_ROOT / safe_skill
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    description = str(analysis.get("description") or "基于用户对子任务轨迹的反馈重新沉淀的 skill。").strip()
+    rationale = str(analysis.get("rationale") or comment or "").strip()
+    triggers = as_text_list(analysis.get("trigger_conditions"))
+    steps = as_text_list(analysis.get("steps"))
+    constraints = as_text_list(analysis.get("constraints"))
+    trace_anchors = analysis.get("trace_anchors") if isinstance(analysis.get("trace_anchors"), list) else []
+
+    def bullet_lines(items: list[str], fallback: str = "none") -> str:
+        return "\n".join(f"- {item}" for item in items) if items else fallback
+
+    skill_md = (
+        f"---\nname: {safe_skill}\n"
+        f"description: {description}\n---\n\n"
+        f"> generated by feedback distiller session\n\n"
+        f"## 能力说明\n\n{description}\n\n"
+        f"## 使用方式\n\n{bullet_lines(triggers, f'当任务与 `{task_id}` 中的反馈模式相似时使用。')}\n\n"
+        f"## 步骤流程\n\n{bullet_lines(steps)}\n\n"
+        f"## 注意事项 / 约束\n\n{bullet_lines(constraints)}\n\n"
+        f"## 用户反馈\n\n{comment or 'none'}\n\n"
+        f"## 蒸馏依据\n\n{rationale or 'none'}\n\n"
+        f"## 轨迹锚点\n\n```json\n{json.dumps(trace_anchors or selected_anchor, ensure_ascii=False, indent=2)}\n```\n"
+    )
+    skill_path = target_dir / "SKILL.md"
+    skill_path.write_text(skill_md, encoding="utf-8")
+    write_json(
+        target_dir / "PROVENANCE.json",
+        {
+            "generatedAt": now_iso(),
+            "source": "feedback_distill",
+            "sessionId": session_id,
+            "taskId": task_id,
+            "runDir": str(run_dir),
+            "taskSegment": task_segment,
+            "selectedAnchor": selected_anchor,
+            "feedbackContext": feedback_context,
+            "analysis": analysis,
+            "distillerSessionID": str(((llm_out.get("session") or {}).get("id") or "")),
+        },
+    )
+
+    skill_record = {
+        "skillName": safe_skill,
+        "skillPath": str(target_dir),
+        "status": "ready",
+        "operation": f"FEEDBACK_DISTILL_{operation}",
+        "rationale": rationale,
+        "createdAt": now_iso(),
+        "feedbackRunDir": str(run_dir),
+        "distillerSessionID": str(((llm_out.get("session") or {}).get("id") or "")),
+    }
+    with _task_switch_lock:
+        index = _load_task_skill_index()
+        tasks = index.setdefault("tasks", {})
+        key = _task_skill_key(session_id, task_id)
+        existing = tasks.get(key) if isinstance(tasks.get(key), dict) else {}
+        skills = [x for x in existing.get("skills", []) if isinstance(x, dict)]
+        skills.append(skill_record)
+        tasks[key] = {
+            **existing,
+            "sessionId": session_id,
+            "taskId": task_id,
+            "taskSegment": task_segment or existing.get("taskSegment") or {},
+            "status": "ready",
+            "skills": skills,
+            "updatedAt": now_iso(),
+        }
+        _save_task_skill_index(index)
+    write_json(run_dir / "05-result.json", {"skill": skill_record, "targetDir": str(target_dir), "analysis": analysis})
+    append_log(
+        log_file,
+        "feedback_distill.done",
+        {
+            "skillName": safe_skill,
+            "targetDir": str(target_dir),
+            "distillerSessionID": str(((llm_out.get("session") or {}).get("id") or "")),
+        },
+    )
+    return {
+        "ok": True,
+        "runDir": str(run_dir),
+        "skill": skill_record,
+        "skills": task_skills_response(session_id, task_id).get("skills", []),
+        "analysis": analysis,
+        "distillerSessionID": str(((llm_out.get("session") or {}).get("id") or "")),
+    }
+
+
+def _task_segment_summary(
+    turns: list[dict[str, Any]],
+    *,
+    title: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+) -> dict[str, Any]:
     clean = _dedupe_turn_records(turns)
     if not clean:
         return {
+            "taskId": "",
             "fromStartUserMessageId": "",
             "fromEndAssistantMessageId": "",
             "toEndAssistantMessageId": "",
             "turnCount": 0,
+            "title": str(title or "").strip(),
+            "description": str(description or "").strip(),
+            "summary": summary or "",
         }
     first = clean[0]
     last = clean[-1]
+    from_end = str(first.get("endAssistantMessageId") or "")
+    to_end = str(last.get("endAssistantMessageId") or "")
+    resolved_title = str(title or "").strip()
+    resolved_description = str(description or "").strip()
+    if not resolved_description and summary:
+        resolved_description = str(summary).strip()
+    resolved_summary = _format_task_display_label(title=resolved_title, description=resolved_description)
+    if not resolved_summary:
+        resolved_summary = _summarize_user_input(str(first.get("userInput") or ""))
     return {
+        "taskId": f"task:{from_end}:{to_end}",
         "fromStartUserMessageId": str(first.get("startUserMessageId") or ""),
-        "fromEndAssistantMessageId": str(first.get("endAssistantMessageId") or ""),
-        "toEndAssistantMessageId": str(last.get("endAssistantMessageId") or ""),
+        "fromEndAssistantMessageId": from_end,
+        "toEndAssistantMessageId": to_end,
         "turnCount": len(clean),
+        "title": resolved_title,
+        "description": resolved_description,
+        "summary": resolved_summary,
     }
 
 
@@ -601,9 +1350,858 @@ def _safe_id(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", value or "")
 
 
+def _load_error_diagnosis_index() -> dict[str, Any]:
+    if not ERROR_DIAGNOSIS_INDEX_PATH.exists():
+        return {"diagnoses": {}}
+    try:
+        data = json.loads(ERROR_DIAGNOSIS_INDEX_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("diagnoses"), dict):
+            return data
+    except Exception:
+        pass
+    return {"diagnoses": {}}
+
+
+def _save_error_diagnosis_index(data: dict[str, Any]) -> None:
+    data["updatedAt"] = now_iso()
+    write_json(ERROR_DIAGNOSIS_INDEX_PATH, data)
+
+
+def _trace_primary_payload(trace: dict[str, Any]) -> dict[str, Any]:
+    return trace_primary_turn(trace) if trace.get("schemaVersion") == "trace.session.v1" else trace
+
+
+def _error_actions_for_subtask(subtask: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    actions = subtask.get("actions")
+    if not isinstance(actions, list):
+        return out
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        has_error_status = str(action.get("status") or "") == "error"
+        has_error_payload = action.get("error") not in (None, "", [], {})
+        if has_error_status or has_error_payload:
+            out.append(action)
+    return out
+
+
+def _error_diagnosis_signature(
+    session_id: str,
+    end_assistant_message_id: str,
+    subtask: dict[str, Any],
+    error_actions: list[dict[str, Any]],
+) -> tuple[str, str]:
+    compact_actions = [
+        {
+            "index": a.get("index"),
+            "type": a.get("type"),
+            "tool": a.get("tool"),
+            "status": a.get("status"),
+            "source": a.get("source"),
+            "childSessionID": a.get("childSessionID"),
+            "parentTaskCallID": a.get("parentTaskCallID"),
+            "error": a.get("error"),
+        }
+        for a in (subtask.get("actions") if isinstance(subtask.get("actions"), list) else [])
+        if isinstance(a, dict)
+    ]
+    compact_errors = [
+        {
+            "index": a.get("index"),
+            "type": a.get("type"),
+            "tool": a.get("tool"),
+            "status": a.get("status"),
+            "error": a.get("error"),
+            "source": a.get("source"),
+            "childSessionID": a.get("childSessionID"),
+            "parentTaskCallID": a.get("parentTaskCallID"),
+        }
+        for a in error_actions
+    ]
+    payload = {
+        "sessionId": session_id,
+        "endAssistantMessageId": end_assistant_message_id,
+        "subtaskIndex": subtask.get("index"),
+        "subtaskId": subtask.get("subtaskId"),
+        "actions": compact_actions,
+        "errors": compact_errors,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return digest, raw
+
+
+def _error_diagnosis_run_dir(
+    session_id: str,
+    end_assistant_message_id: str,
+    subtask_index: int,
+    signature_hash: str,
+) -> Path:
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")
+    return (
+        LOG_ROOT
+        / f"{stamp}-{_safe_id(session_id) or 'unknown-session'}-"
+        f"{_safe_id(end_assistant_message_id) or 'unknown-message'}-"
+        f"subtask-{subtask_index}-error-diagnosis-{signature_hash[:8]}"
+    )
+
+
+def _json_preview(value: Any, limit: int = 4000) -> Any:
+    if isinstance(value, str):
+        return value[:limit]
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    if len(text) <= limit:
+        return value
+    return text[:limit]
+
+
+def _compact_trace_for_error_diagnosis(
+    trace: dict[str, Any],
+    subtask: dict[str, Any],
+    error_actions: list[dict[str, Any]],
+    signature_hash: str,
+) -> dict[str, Any]:
+    primary = _trace_primary_payload(trace)
+    session = primary.get("session") if isinstance(primary.get("session"), dict) else {}
+    turn = primary.get("turn") if isinstance(primary.get("turn"), dict) else {}
+
+    compact_actions: list[dict[str, Any]] = []
+    actions = subtask.get("actions") if isinstance(subtask.get("actions"), list) else []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        compact_actions.append(
+            {
+                "index": action.get("index"),
+                "type": action.get("type"),
+                "tool": action.get("tool"),
+                "status": action.get("status"),
+                "durationMs": action.get("durationMs"),
+                "tokenEstimate": action.get("tokenEstimate"),
+                "source": action.get("source"),
+                "childSessionID": action.get("childSessionID"),
+                "parentTaskCallID": action.get("parentTaskCallID"),
+                "input": _json_preview(action.get("input")),
+                "output": _json_preview(action.get("output")),
+                "error": _json_preview(action.get("error")),
+            }
+        )
+
+    return {
+        "schemaVersion": "trace.panel-analysis-input.v1",
+        "diagnosisSignature": signature_hash,
+        "hasError": len(error_actions) > 0,
+        "session": session,
+        "turn": turn,
+        "subtask": {
+            "index": subtask.get("index"),
+            "subtaskId": subtask.get("subtaskId"),
+            "title": subtask.get("title"),
+            "phase": subtask.get("phase"),
+            "todos": subtask.get("todos") or [],
+            "metrics": subtask.get("metrics") or {},
+            "actions": compact_actions,
+        },
+        "errorActions": [
+            {
+                "index": a.get("index"),
+                "type": a.get("type"),
+                "tool": a.get("tool"),
+                "status": a.get("status"),
+                "error": _json_preview(a.get("error")),
+                "source": a.get("source"),
+                "childSessionID": a.get("childSessionID"),
+                "parentTaskCallID": a.get("parentTaskCallID"),
+            }
+            for a in error_actions
+        ],
+    }
+
+
+def _render_error_diagnosis_prompt(input_payload: dict[str, Any]) -> str:
+    template = (PROMPT_ROOT / "error_diagnosis_prompt.md").read_text(encoding="utf-8")
+    return template.replace(
+        "{{ERROR_DIAGNOSIS_INPUT_JSON}}",
+        json.dumps(input_payload, ensure_ascii=False, indent=2, default=str),
+    )
+
+
+def _fallback_panel_analysis_from_raw(raw_text: str, has_error: bool) -> dict[str, Any] | None:
+    text = (raw_text or "").strip()
+    if not text:
+        return None
+    summary = ""
+    m = re.search(r'"summary"\s*:\s*"(.*)"\s*,\s*"rootCause"', text, flags=re.S)
+    if m:
+        summary = m.group(1).strip()
+    if not summary:
+        m = re.search(r'"summary"\s*:\s*"([^"]{8,600})"', text, flags=re.S)
+        if m:
+            summary = m.group(1).strip()
+    if not summary:
+        compact = re.sub(r"\s+", " ", text)
+        summary = compact[:320].strip()
+    if not summary:
+        return None
+    return {
+        "summary": summary,
+        "rootCause": "",
+        "causalChain": [],
+        "evidence": [],
+        "fixSuggestion": "",
+        "confidence": "low" if has_error else "medium",
+        "parseFallback": True,
+    }
+
+
+def run_error_diagnosis_for_trace(
+    trace: dict[str, Any],
+    directory_override: str | None = None,
+    parent_session_id: str | None = None,
+) -> dict[str, Any]:
+    primary = _trace_primary_payload(trace)
+    session = primary.get("session") if isinstance(primary.get("session"), dict) else {}
+    turn = primary.get("turn") if isinstance(primary.get("turn"), dict) else {}
+    session_id = str(session.get("id") or trace_session_id(trace) or "").strip()
+    end_msg_id = str(turn.get("endAssistantMessageId") or trace_primary_end_message_id(trace) or "").strip()
+    trace_dir = str((session.get("directory") or "")).strip()
+    effective_directory = directory_override or trace_dir or OPENCODE_DIRECTORY
+
+    subtasks = primary.get("subtasks")
+    if not isinstance(subtasks, list):
+        return {"ok": True, "count": 0, "items": []}
+
+    items: list[dict[str, Any]] = []
+    for subtask in subtasks:
+        if not isinstance(subtask, dict):
+            continue
+        error_actions = _error_actions_for_subtask(subtask)
+        subtask_index = int(subtask.get("index") or 0)
+        signature_hash, signature_raw = _error_diagnosis_signature(
+            session_id,
+            end_msg_id,
+            subtask,
+            error_actions,
+        )
+        dedup_key = f"{session_id}:{end_msg_id}:{subtask.get('subtaskId') or subtask_index}:{signature_hash}"
+
+        with _error_diagnosis_lock:
+            index = _load_error_diagnosis_index()
+            diagnoses = index.setdefault("diagnoses", {})
+            existing = diagnoses.get(dedup_key) if isinstance(diagnoses.get(dedup_key), dict) else None
+            if existing and existing.get("status") in {"running", "ok"}:
+                items.append({**existing, "dedupKey": dedup_key, "cached": True})
+                continue
+
+            run_dir = _error_diagnosis_run_dir(session_id, end_msg_id, subtask_index, signature_hash)
+            record = {
+                "status": "running",
+                "dedupKey": dedup_key,
+                "signatureHash": signature_hash,
+                "sessionId": session_id,
+                "endAssistantMessageId": end_msg_id,
+                "subtaskIndex": subtask_index,
+                "subtaskId": subtask.get("subtaskId"),
+                "hasError": len(error_actions) > 0,
+                "runDir": str(run_dir),
+                "startedAt": now_iso(),
+            }
+            diagnoses[dedup_key] = record
+            _save_error_diagnosis_index(index)
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log_file = run_dir / "00-run.log"
+        request_payload = _compact_trace_for_error_diagnosis(trace, subtask, error_actions, signature_hash)
+        write_json(run_dir / "01-request.json", request_payload)
+        append_log(
+            log_file,
+            "error_diagnosis.start",
+            {
+                "dedupKey": dedup_key,
+                "sessionId": session_id,
+                "endAssistantMessageId": end_msg_id,
+                "subtaskIndex": subtask_index,
+                "subtaskId": subtask.get("subtaskId"),
+                "hasError": len(error_actions) > 0,
+                "errorActionCount": len(error_actions),
+                "effectiveDirectory": effective_directory,
+            },
+        )
+        (run_dir / "01-signature.json").write_text(signature_raw + "\n", encoding="utf-8")
+        prompt = _render_error_diagnosis_prompt(request_payload)
+        (run_dir / "02-error-diagnosis-prompt.txt").write_text(prompt, encoding="utf-8")
+
+        try:
+            llm_out = opencode_generate_text(
+                prompt,
+                run_dir,
+                log_file,
+                "03-error-diagnosis",
+                directory=effective_directory,
+                parent_session_id=parent_session_id or session_id,
+                retry_in_session_on_timeout=True,
+                max_attempts=MW_ANALYZER_SESSION_ATTEMPTS,
+                retry_prompt=(
+                    "The previous reply did not complete or was not parseable. Continue in this same session: "
+                    "finish the trace panel analysis and output the JSON object only, with no extra prose."
+                ),
+            )
+            write_json(run_dir / "04-error-diagnosis-raw.json", llm_out)
+            parsed = try_parse_json_value(str(llm_out.get("rawText") or ""))
+            if not isinstance(parsed, dict):
+                parsed = _fallback_panel_analysis_from_raw(
+                    str(llm_out.get("rawText") or ""),
+                    len(error_actions) > 0,
+                )
+            if not isinstance(parsed, dict):
+                raise RuntimeError("panel analysis output parse failed")
+            result = {
+                "status": "ok",
+                "dedupKey": dedup_key,
+                "signatureHash": signature_hash,
+                "sessionId": session_id,
+                "endAssistantMessageId": end_msg_id,
+                "subtaskIndex": subtask_index,
+                "subtaskId": subtask.get("subtaskId"),
+                "hasError": len(error_actions) > 0,
+                "runDir": str(run_dir),
+                "diagnosisSessionID": str(((llm_out.get("session") or {}).get("id") or "")),
+                "diagnosis": parsed,
+                "completedAt": now_iso(),
+                "errorActions": [
+                    {
+                        "index": a.get("index"),
+                        "type": a.get("type"),
+                        "tool": a.get("tool"),
+                        "status": a.get("status"),
+                        "error": _json_preview(a.get("error"), 1200),
+                    }
+                    for a in error_actions
+                ],
+            }
+            write_json(run_dir / "05-result.json", result)
+            append_log(log_file, "error_diagnosis.done", {"dedupKey": dedup_key, "diagnosisSessionID": result["diagnosisSessionID"]})
+        except Exception as e:
+            result = {
+                "status": "failed",
+                "dedupKey": dedup_key,
+                "signatureHash": signature_hash,
+                "sessionId": session_id,
+                "endAssistantMessageId": end_msg_id,
+                "subtaskIndex": subtask_index,
+                "subtaskId": subtask.get("subtaskId"),
+                "hasError": len(error_actions) > 0,
+                "runDir": str(run_dir),
+                "error": str(e),
+                "completedAt": now_iso(),
+            }
+            write_json(run_dir / "05-result.json", result)
+            append_log(log_file, "error_diagnosis.failed", {"dedupKey": dedup_key, "error": str(e)})
+
+        with _error_diagnosis_lock:
+            index = _load_error_diagnosis_index()
+            diagnoses = index.setdefault("diagnoses", {})
+            diagnoses[dedup_key] = result
+            _save_error_diagnosis_index(index)
+        items.append(result)
+
+    return {"ok": True, "count": len(items), "items": items}
+
+
+def _panel_analysis_entry_is_newer(candidate: dict[str, Any], existing: dict[str, Any]) -> bool:
+    ca = str(candidate.get("completedAt") or "")
+    cb = str(existing.get("completedAt") or "")
+    if ca and cb:
+        return ca > cb
+    end_a = str(candidate.get("endAssistantMessageId") or "")
+    end_b = str(existing.get("endAssistantMessageId") or "")
+    return end_a > end_b
+
+
+def panel_analysis_for_session(session_id: str) -> dict[str, Any]:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return {"ok": False, "error": "sessionId is required", "count": 0, "items": []}
+    index = _load_error_diagnosis_index()
+    diagnoses = index.get("diagnoses") if isinstance(index.get("diagnoses"), dict) else {}
+    items_by_subtask: dict[str, dict[str, Any]] = {}
+    for entry in diagnoses.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("sessionId") or "").strip() != session_id:
+            continue
+        subtask_id = str(entry.get("subtaskId") or "").strip()
+        if not subtask_id:
+            continue
+        prev = items_by_subtask.get(subtask_id)
+        if prev is None or _panel_analysis_entry_is_newer(entry, prev):
+            merged = dict(entry)
+            merged["cached"] = True
+            items_by_subtask[subtask_id] = merged
+    items = list(items_by_subtask.values())
+    return {"ok": True, "sessionId": session_id, "count": len(items), "items": items}
+
+
+def build_current_stop_error_diagnosis(
+    messages: list[dict[str, Any]],
+    session_id: str,
+    end_msg_id: str,
+    directory_override: str | None,
+    parent_session_id: str | None,
+) -> dict[str, Any]:
+    trace = trace_parser.build_session_trace_bundle(
+        messages=messages,
+        primary_end_assistant_message_id=end_msg_id,
+        session={"id": session_id, "directory": directory_override},
+        directory=directory_override,
+        max_turns=1,
+        fetch_messages=opencode_get_messages,
+    )
+    if not trace:
+        return {"ok": True, "count": 0, "items": [], "reason": "current_trace_not_available"}
+    return run_error_diagnosis_for_trace(
+        trace,
+        directory_override=directory_override,
+        parent_session_id=parent_session_id,
+    )
+
+
 def build_task_switch_run_dir(session_id: str, end_assistant_message_id: str) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")
     return LOG_ROOT / f"{stamp}-{_safe_id(session_id) or 'unknown-session'}-{_safe_id(end_assistant_message_id) or 'unknown-turn'}-task-switch-{uuid4().hex[:8]}"
+
+
+def _complete_task_switch_extraction(
+    *,
+    session_id: str,
+    session_key: str,
+    directory_override: str | None,
+    parent_session_id: str | None,
+    fork_meta: dict[str, Any] | None,
+    previous_task_turns: list[dict[str, Any]],
+    current_turn: dict[str, Any],
+    user_prompt: str,
+    switch_run_dir: Path,
+    switch_log_file: Path,
+    switch_output: dict[str, Any],
+    decision: dict[str, Any],
+) -> None:
+    """Background: build previous-task trace and run analyzer/writer pipeline."""
+    previous_end_msg_id = str(previous_task_turns[-1].get("endAssistantMessageId") or "")
+    try:
+        messages = opencode_get_messages(session_id, directory=directory_override)
+        trace = trace_parser.build_session_trace_bundle(
+            messages=messages,
+            primary_end_assistant_message_id=previous_end_msg_id,
+            session={"id": session_id, "directory": directory_override},
+            directory=directory_override,
+            max_turns=len(previous_task_turns),
+            fetch_messages=opencode_get_messages,
+        )
+        if not trace:
+            write_json(
+                switch_run_dir / "02-trace-build-failed.json",
+                {
+                    "previousTaskTurns": previous_task_turns,
+                    "previousEndAssistantMessageId": previous_end_msg_id,
+                },
+            )
+            append_log(switch_log_file, "task_switch.extraction.failed", {"reason": "trace_build_failed"})
+            return
+
+        if fork_meta:
+            fork_data = trace_parser.build_fork_comparison(
+                fork_meta=fork_meta,
+                directory=directory_override,
+                fetch_messages=opencode_get_messages,
+            )
+            if fork_data:
+                trace["fork"] = fork_data
+
+        extracted_range = {
+            "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
+            "toEndAssistantMessageId": previous_end_msg_id,
+            "turnCount": len(previous_task_turns),
+        }
+        write_json(
+            switch_run_dir / "02-extraction-range.json",
+            {
+                **extracted_range,
+                "previousTaskTurns": previous_task_turns,
+                "nextInFlightTurn": current_turn,
+            },
+        )
+        write_json(switch_run_dir / "03-extracted-trace.json", trace)
+
+        extracted_task_segment = _task_segment_summary(previous_task_turns)
+        result = run_pipeline_with_dedup(
+            trace,
+            directory_override=directory_override,
+            parent_session_id=parent_session_id,
+        )
+        register_task_skill_result(session_id, extracted_task_segment, result)
+        write_json(switch_run_dir / "04-pipeline-result.json", result)
+
+        with _task_switch_lock:
+            state = _load_task_switch_state()
+            sessions = state.setdefault("sessions", {})
+            existing = sessions.get(session_key) if isinstance(sessions.get(session_key), dict) else {}
+            completed_turn = _completed_in_flight_turn(existing, user_prompt) if isinstance(existing, dict) else None
+            next_pending = [completed_turn] if completed_turn else []
+            sessions[session_key] = {
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "pendingTurns": next_pending,
+                **(
+                    {}
+                    if completed_turn
+                    else {
+                        "inFlightTurn": current_turn,
+                        "inFlightTaskSwitch": {
+                            "status": "done",
+                            "runDir": str(switch_run_dir),
+                            "mode": switch_output.get("mode"),
+                            "decision": decision,
+                            "extractedRange": extracted_range,
+                            "pipelineRunDir": result.get("runDir"),
+                        },
+                    }
+                ),
+                "updatedAt": now_iso(),
+                "lastTaskSwitchRunDir": str(switch_run_dir),
+                "lastExtractedRange": extracted_range,
+                "lastExtractedTurns": existing.get("lastExtractedTurns") if isinstance(existing, dict) else previous_task_turns,
+            }
+            _save_task_switch_state(state)
+        write_json(
+            switch_run_dir / "05-state-after.json",
+            {
+                "reason": "task_switched_pipeline_done",
+                "decision": decision,
+                "pendingTurnsAfter": next_pending,
+                "inFlightTurn": None if completed_turn else current_turn,
+                "lastExtractedRange": extracted_range,
+                "pipelineRunDir": result.get("runDir"),
+                "statePath": str(TASK_SWITCH_STATE_PATH),
+            },
+        )
+        append_log(
+            switch_log_file,
+            "task_switch.extraction.done",
+            {"pipelineRunDir": result.get("runDir"), "taskSwitched": True},
+        )
+    except Exception as e:
+        append_log(switch_log_file, "task_switch.extraction.failed", {"error": str(e)})
+        write_json(switch_run_dir / "04-pipeline-result.json", {"ok": False, "error": str(e)})
+
+
+def process_user_prompt_task_switch(
+    messages: list[dict[str, Any]],
+    session_id: str,
+    user_prompt: str,
+    directory_override: str | None,
+    parent_session_id: str | None,
+    fork_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    user_prompt = _normalize_user_prompt(user_prompt)
+    if not session_id or not user_prompt:
+        return {"ok": False, "error": "sessionId and userPrompt are required"}
+
+    prompt_records = trace_parser.collect_turn_prompt_records(messages)
+    completed_turns = _dedupe_turn_records([_turn_record_for_state(x) for x in prompt_records])
+    current_turn = {
+        "userInput": user_prompt,
+        "startUserMessageId": "",
+        "endAssistantMessageId": "",
+        "startIndex": None,
+        "endIndex": None,
+        "created": None,
+        "completed": None,
+    }
+    session_key = _task_switch_session_key(session_id, directory_override)
+    switch_run_dir = build_task_switch_run_dir(session_id, f"prompt-{uuid4().hex[:8]}")
+    switch_run_dir.mkdir(parents=True, exist_ok=True)
+    switch_log_file = switch_run_dir / "00-run.log"
+    append_log(
+        switch_log_file,
+        "task_switch.prompt_ingest.start",
+        {"sessionId": session_id, "sessionKey": session_key, "completedTurnCount": len(completed_turns)},
+    )
+
+    with _task_switch_lock:
+        state = _load_task_switch_state()
+        sessions = state.setdefault("sessions", {})
+        session_state = sessions.get(session_key) if isinstance(sessions.get(session_key), dict) else {}
+        pending_turns = _dedupe_turn_records(session_state.get("pendingTurns") if isinstance(session_state, dict) else [])
+        if not pending_turns:
+            pending_turns = completed_turns
+        in_flight_turn = session_state.get("inFlightTurn") if isinstance(session_state, dict) else None
+        write_json(
+            switch_run_dir / "00-state-before.json",
+            {
+                "sessionKey": session_key,
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "currentTurn": current_turn,
+                "pendingTurnsBefore": pending_turns,
+                "completedTurns": completed_turns,
+                "inFlightTurn": in_flight_turn if isinstance(in_flight_turn, dict) else None,
+                "statePath": str(TASK_SWITCH_STATE_PATH),
+            },
+        )
+        if isinstance(in_flight_turn, dict) and _same_user_prompt(str(in_flight_turn.get("userInput") or ""), user_prompt):
+            in_flight_switch = session_state.get("inFlightTaskSwitch") if isinstance(session_state, dict) else None
+            in_flight_decision = in_flight_switch.get("decision") if isinstance(in_flight_switch, dict) else None
+            _save_task_switch_state(state)
+            append_log(switch_log_file, "task_switch.prompt_ingest.skip", {"reason": "duplicate_in_flight_prompt"})
+            return _skip_ingest_response(
+                "duplicate_in_flight_prompt",
+                session_id,
+                current_turn,
+                pending_turns,
+                {
+                    "runDir": str(switch_run_dir),
+                    "decision": in_flight_decision,
+                },
+            )
+        if not pending_turns:
+            sessions[session_key] = {
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "pendingTurns": [],
+                "inFlightTurn": current_turn,
+                "inFlightTaskSwitch": {
+                    "status": "waiting_for_completed_turn",
+                    "runDir": str(switch_run_dir),
+                    "mode": "none",
+                    "decision": None,
+                },
+                "updatedAt": now_iso(),
+                "lastTaskSwitchRunDir": str(switch_run_dir),
+            }
+            _save_task_switch_state(state)
+            write_json(
+                switch_run_dir / "01-state-after.json",
+                {
+                    "reason": "first_prompt_waiting_for_completed_turn",
+                    "pendingTurnsAfter": [],
+                    "inFlightTurn": current_turn,
+                    "statePath": str(TASK_SWITCH_STATE_PATH),
+                },
+            )
+            append_log(switch_log_file, "task_switch.prompt_ingest.skip", {"reason": "first_prompt_waiting_for_completed_turn"})
+            return _skip_ingest_response(
+                "first_prompt_waiting_for_completed_turn",
+                session_id,
+                current_turn,
+                [],
+                {"runDir": str(switch_run_dir), "decision": None},
+            )
+
+        sessions[session_key] = {
+            "sessionId": session_id,
+            "directory": directory_override or "",
+            "pendingTurns": pending_turns,
+            "inFlightTurn": current_turn,
+            "inFlightTaskSwitch": {
+                "status": "running",
+                "runDir": str(switch_run_dir),
+                "mode": None,
+                "decision": None,
+            },
+            "updatedAt": now_iso(),
+            "lastTaskSwitchRunDir": str(switch_run_dir),
+        }
+        _save_task_switch_state(state)
+
+    append_log(
+        switch_log_file,
+        "task_switch.judge.scheduled",
+        {"sessionId": session_id, "trigger": "user_prompt", "pendingTurnCount": len(pending_turns)},
+    )
+    threading.Thread(
+        target=_run_user_prompt_task_switch_worker,
+        kwargs={
+            "session_id": session_id,
+            "session_key": session_key,
+            "directory_override": directory_override,
+            "parent_session_id": parent_session_id,
+            "fork_meta": fork_meta,
+            "pending_turns": pending_turns,
+            "current_turn": current_turn,
+            "user_prompt": user_prompt,
+            "switch_run_dir": switch_run_dir,
+            "switch_log_file": switch_log_file,
+        },
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "accepted": True,
+        "reason": "task_switch_judge_started",
+        "runDir": str(switch_run_dir),
+        "taskSwitch": {"runDir": str(switch_run_dir), "mode": None, "decision": None},
+        "pendingTurnCount": len(pending_turns),
+    }
+
+
+def _run_user_prompt_task_switch_worker(
+    *,
+    session_id: str,
+    session_key: str,
+    directory_override: str | None,
+    parent_session_id: str | None,
+    fork_meta: dict[str, Any] | None,
+    pending_turns: list[dict[str, Any]],
+    current_turn: dict[str, Any],
+    user_prompt: str,
+    switch_run_dir: Path,
+    switch_log_file: Path,
+) -> None:
+    write_json(switch_run_dir / "01-task-switch-input.json", task_switch_input_payload(pending_turns, current_turn))
+    append_log(
+        switch_log_file,
+        "task_switch.start",
+        {"sessionId": session_id, "trigger": "user_prompt", "pendingTurnCount": len(pending_turns)},
+    )
+
+    try:
+        switch_output = run_task_switch_judge(
+            pending_turns,
+            current_turn,
+            switch_run_dir,
+            switch_log_file,
+            directory=directory_override,
+        )
+    except Exception as e:
+        append_log(switch_log_file, "task_switch.failed", {"error": str(e)})
+        with _task_switch_lock:
+            state = _load_task_switch_state()
+            sessions = state.setdefault("sessions", {})
+            existing = sessions.get(session_key) if isinstance(sessions.get(session_key), dict) else {}
+            if isinstance(existing, dict):
+                sessions[session_key] = {
+                    **existing,
+                    "inFlightTaskSwitch": {
+                        "status": "failed",
+                        "runDir": str(switch_run_dir),
+                        "error": str(e),
+                    },
+                    "updatedAt": now_iso(),
+                }
+                _save_task_switch_state(state)
+        return
+
+    write_json(switch_run_dir / "00-task-switch-raw.json", switch_output)
+    decision = switch_output.get("analysis") if isinstance(switch_output.get("analysis"), dict) else {}
+    switched = bool(decision.get("task_switched"))
+    append_log(switch_log_file, "task_switch.done", {"taskSwitched": switched, "decision": decision})
+
+    if not switched:
+        with _task_switch_lock:
+            state = _load_task_switch_state()
+            sessions = state.setdefault("sessions", {})
+            existing = sessions.get(session_key) if isinstance(sessions.get(session_key), dict) else {}
+            completed_turn = _completed_in_flight_turn(existing, user_prompt) if isinstance(existing, dict) else None
+            next_pending = _dedupe_turn_records([*pending_turns, completed_turn] if completed_turn else pending_turns)
+            sessions[session_key] = {
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "pendingTurns": next_pending,
+                **(
+                    {}
+                    if completed_turn
+                    else {
+                        "inFlightTurn": current_turn,
+                        "inFlightTaskSwitch": {
+                            "status": "done",
+                            "runDir": str(switch_run_dir),
+                            "mode": switch_output.get("mode"),
+                            "decision": decision,
+                        },
+                    }
+                ),
+                "updatedAt": now_iso(),
+                "lastTaskSwitchRunDir": str(switch_run_dir),
+            }
+            _save_task_switch_state(state)
+        write_json(
+            switch_run_dir / "02-state-after.json",
+            {
+                "reason": "task_not_switched_waiting_for_assistant_stop",
+                "decision": decision,
+                "pendingTurnsAfter": next_pending,
+                "inFlightTurn": None if completed_turn else current_turn,
+                "statePath": str(TASK_SWITCH_STATE_PATH),
+            },
+        )
+        return
+
+    previous_task_turns = pending_turns
+    previous_end_msg_id = str(previous_task_turns[-1].get("endAssistantMessageId") or "")
+    extracted_range = {
+        "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
+        "toEndAssistantMessageId": previous_end_msg_id,
+        "turnCount": len(previous_task_turns),
+    }
+
+    with _task_switch_lock:
+        state = _load_task_switch_state()
+        sessions = state.setdefault("sessions", {})
+        sessions[session_key] = {
+            "sessionId": session_id,
+            "directory": directory_override or "",
+            "pendingTurns": [],
+            "inFlightTurn": current_turn,
+            "inFlightTaskSwitch": {
+                "status": "done",
+                "runDir": str(switch_run_dir),
+                "mode": switch_output.get("mode"),
+                "decision": decision,
+                "extractedRange": extracted_range,
+                "pipelineStatus": "running",
+            },
+            "updatedAt": now_iso(),
+            "lastTaskSwitchRunDir": str(switch_run_dir),
+            "lastExtractedRange": extracted_range,
+            "lastExtractedTurns": previous_task_turns,
+        }
+        _save_task_switch_state(state)
+    write_json(
+        switch_run_dir / "02-state-after.json",
+        {
+            "reason": "task_switched_pipeline_started",
+            "decision": decision,
+            "pendingTurnsAfter": [],
+            "inFlightTurn": current_turn,
+            "lastExtractedRange": extracted_range,
+            "statePath": str(TASK_SWITCH_STATE_PATH),
+        },
+    )
+
+    threading.Thread(
+        target=_complete_task_switch_extraction,
+        kwargs={
+            "session_id": session_id,
+            "session_key": session_key,
+            "directory_override": directory_override,
+            "parent_session_id": parent_session_id,
+            "fork_meta": fork_meta,
+            "previous_task_turns": previous_task_turns,
+            "current_turn": current_turn,
+            "user_prompt": user_prompt,
+            "switch_run_dir": switch_run_dir,
+            "switch_log_file": switch_log_file,
+            "switch_output": switch_output,
+            "decision": decision,
+        },
+        daemon=True,
+    ).start()
+    append_log(switch_log_file, "task_switch.extraction.scheduled", {"previousEndAssistantMessageId": previous_end_msg_id})
 
 
 def process_reference_ingest_with_task_switch(
@@ -633,6 +2231,31 @@ def process_reference_ingest_with_task_switch(
         "task_switch.ingest.start",
         {"sessionId": session_id, "endAssistantMessageId": end_msg_id, "sessionKey": session_key},
     )
+    try:
+        current_error_diagnosis = build_current_stop_error_diagnosis(
+            messages,
+            session_id,
+            end_msg_id,
+            directory_override,
+            parent_session_id,
+        )
+        write_json(switch_run_dir / "00b-current-error-diagnosis.json", current_error_diagnosis)
+        append_log(
+            switch_log_file,
+            "error_diagnosis.current_stop.done",
+            {
+                "count": current_error_diagnosis.get("count"),
+                "itemCount": len(current_error_diagnosis.get("items") or []),
+            },
+        )
+    except Exception as e:
+        current_error_diagnosis = {"ok": False, "error": str(e), "count": 0, "items": []}
+        write_json(switch_run_dir / "00b-current-error-diagnosis.json", current_error_diagnosis)
+        append_log(switch_log_file, "error_diagnosis.current_stop.failed", {"error": str(e)})
+
+    def with_current_error_diagnosis(result: dict[str, Any]) -> dict[str, Any]:
+        result["errorDiagnosis"] = current_error_diagnosis
+        return result
 
     with _task_switch_lock:
         state = _load_task_switch_state()
@@ -662,13 +2285,152 @@ def process_reference_ingest_with_task_switch(
                 },
             )
             append_log(switch_log_file, "task_switch.skip", {"reason": "duplicate_pending_turn", "pendingTurnCount": len(pending_turns)})
-            return _skip_ingest_response(
+            return with_current_error_diagnosis(_skip_ingest_response(
                 "duplicate_pending_turn",
                 session_id,
                 current_turn,
                 pending_turns,
                 {"runDir": str(switch_run_dir), "decision": None},
+            ))
+        in_flight_turn = session_state.get("inFlightTurn") if isinstance(session_state, dict) else None
+        if isinstance(in_flight_turn, dict) and _same_user_prompt(
+            str(in_flight_turn.get("userInput") or ""),
+            str(current_turn.get("userInput") or ""),
+        ):
+            early_switch = session_state.get("inFlightTaskSwitch") if isinstance(session_state, dict) else None
+            if not _task_switch_decision_ready(early_switch):
+                early_status = str(early_switch.get("status") or "") if isinstance(early_switch, dict) else ""
+                if early_status != "running":
+                    next_pending = _dedupe_turn_records([*pending_turns, current_turn])
+                    sessions[session_key] = {
+                        "sessionId": session_id,
+                        "directory": directory_override or "",
+                        "pendingTurns": next_pending,
+                        "updatedAt": now_iso(),
+                        "lastTaskSwitchRunDir": str(early_switch.get("runDir") or switch_run_dir) if isinstance(early_switch, dict) else str(switch_run_dir),
+                    }
+                    _save_task_switch_state(state)
+                    write_json(
+                        switch_run_dir / "01-state-after.json",
+                        {
+                            "reason": "in_flight_prompt_completed_without_judge",
+                            "pendingTurnsAfter": next_pending,
+                            "statePath": str(TASK_SWITCH_STATE_PATH),
+                        },
+                    )
+                    append_log(
+                        switch_log_file,
+                        "task_switch.skip",
+                        {"reason": "in_flight_prompt_completed_without_judge", "pendingTurnCount": len(next_pending)},
+                    )
+                    return with_current_error_diagnosis(_skip_ingest_response(
+                        "in_flight_prompt_completed_without_judge",
+                        session_id,
+                        current_turn,
+                        next_pending,
+                        {
+                            "runDir": str(early_switch.get("runDir") or switch_run_dir) if isinstance(early_switch, dict) else str(switch_run_dir),
+                            "mode": early_switch.get("mode") if isinstance(early_switch, dict) else None,
+                            "decision": None,
+                        },
+                    ))
+
+                sessions[session_key] = {
+                    **session_state,
+                    "sessionId": session_id,
+                    "directory": directory_override or "",
+                    "pendingTurns": pending_turns,
+                    "inFlightTurn": in_flight_turn,
+                    "completedInFlightTurn": current_turn,
+                    "updatedAt": now_iso(),
+                    "lastTaskSwitchRunDir": str(early_switch.get("runDir") or switch_run_dir) if isinstance(early_switch, dict) else str(switch_run_dir),
+                }
+                _save_task_switch_state(state)
+                write_json(
+                    switch_run_dir / "01-state-after.json",
+                    {
+                        "reason": "early_prompt_judge_running",
+                        "pendingTurnsAfter": pending_turns,
+                        "completedInFlightTurn": current_turn,
+                        "statePath": str(TASK_SWITCH_STATE_PATH),
+                    },
+                )
+                append_log(
+                    switch_log_file,
+                    "task_switch.skip",
+                    {"reason": "early_prompt_judge_running", "pendingTurnCount": len(pending_turns)},
+                )
+                return with_current_error_diagnosis(_skip_ingest_response(
+                    "early_prompt_judge_running",
+                    session_id,
+                    current_turn,
+                    pending_turns,
+                    {
+                        "runDir": str(early_switch.get("runDir") or switch_run_dir) if isinstance(early_switch, dict) else str(switch_run_dir),
+                        "mode": early_switch.get("mode") if isinstance(early_switch, dict) else None,
+                        "decision": None,
+                    },
+                ))
+
+            early_decision = early_switch.get("decision") if isinstance(early_switch, dict) and isinstance(early_switch.get("decision"), dict) else {}
+            task_switched = bool(early_decision.get("task_switched"))
+            next_pending = [current_turn] if task_switched else _dedupe_turn_records([*pending_turns, current_turn])
+            extracted_turns: list[dict[str, Any]] = []
+            if task_switched:
+                extracted_turns = _dedupe_turn_records(
+                    session_state.get("lastExtractedTurns") if isinstance(session_state, dict) else []
+                )
+            sessions[session_key] = {
+                "sessionId": session_id,
+                "directory": directory_override or "",
+                "pendingTurns": next_pending,
+                "updatedAt": now_iso(),
+                "lastTaskSwitchRunDir": str(early_switch.get("runDir") or switch_run_dir) if isinstance(early_switch, dict) else str(switch_run_dir),
+                **(
+                    {
+                        "lastExtractedRange": early_switch.get("extractedRange"),
+                        "lastExtractedTurns": extracted_turns,
+                    }
+                    if isinstance(early_switch, dict) and isinstance(early_switch.get("extractedRange"), dict)
+                    else {}
+                ),
+            }
+            _save_task_switch_state(state)
+            write_json(
+                switch_run_dir / "01-state-after.json",
+                {
+                    "reason": "early_prompt_already_classified",
+                    "taskSwitched": task_switched,
+                    "decision": early_decision,
+                    "pendingTurnsAfter": next_pending,
+                    "extractedTurnCount": len(extracted_turns),
+                    "statePath": str(TASK_SWITCH_STATE_PATH),
+                },
             )
+            append_log(
+                switch_log_file,
+                "task_switch.skip",
+                {
+                    "reason": "early_prompt_already_classified",
+                    "taskSwitched": task_switched,
+                    "pendingTurnCount": len(next_pending),
+                    "extractedTurnCount": len(extracted_turns),
+                },
+            )
+            return with_current_error_diagnosis(_skip_ingest_response(
+                "early_prompt_already_classified",
+                session_id,
+                current_turn,
+                next_pending,
+                {
+                    "runDir": str(early_switch.get("runDir") or switch_run_dir) if isinstance(early_switch, dict) else str(switch_run_dir),
+                    "mode": early_switch.get("mode") if isinstance(early_switch, dict) else None,
+                    "decision": early_decision,
+                },
+                extracted_turns=extracted_turns if task_switched else None,
+                extracted_brief=_task_brief_from_decision(early_decision, "previous") if task_switched else None,
+                pending_brief=_task_brief_from_decision(early_decision, "current"),
+            ))
         if not pending_turns:
             next_pending = [current_turn]
             sessions[session_key] = {
@@ -688,163 +2450,44 @@ def process_reference_ingest_with_task_switch(
                 },
             )
             append_log(switch_log_file, "task_switch.skip", {"reason": "first_turn_waiting_for_next_prompt", "pendingTurnCount": len(next_pending)})
-            return _skip_ingest_response(
+            return with_current_error_diagnosis(_skip_ingest_response(
                 "first_turn_waiting_for_next_prompt",
                 session_id,
                 current_turn,
                 next_pending,
                 {"runDir": str(switch_run_dir), "decision": None},
-            )
+            ))
 
-    write_json(switch_run_dir / "01-task-switch-input.json", task_switch_input_payload(pending_turns, current_turn))
-    append_log(
-        switch_log_file,
-        "task_switch.start",
-        {"sessionId": session_id, "endAssistantMessageId": end_msg_id, "pendingTurnCount": len(pending_turns)},
-    )
-
-    try:
-        switch_output = run_task_switch_judge(
-            pending_turns,
-            current_turn,
-            switch_run_dir,
-            switch_log_file,
-            directory=directory_override,
-        )
-    except Exception as e:
-        append_log(switch_log_file, "task_switch.failed", {"error": str(e)})
-        return {
-            "ok": False,
-            "error": f"task switch judge failed: {e}",
-            "runDir": str(switch_run_dir),
+        # Turn completed without a matching in-flight prompt (e.g. page reload). Append only — never re-judge.
+        next_pending = _dedupe_turn_records([*pending_turns, current_turn]) if pending_turns else [current_turn]
+        sessions[session_key] = {
+            "sessionId": session_id,
+            "directory": directory_override or "",
+            "pendingTurns": next_pending,
+            "updatedAt": now_iso(),
+            "lastTaskSwitchRunDir": str(switch_run_dir),
         }
-
-    write_json(switch_run_dir / "00-task-switch-raw.json", switch_output)
-    decision = switch_output.get("analysis") if isinstance(switch_output.get("analysis"), dict) else {}
-    switched = bool(decision.get("task_switched"))
-    append_log(switch_log_file, "task_switch.done", {"taskSwitched": switched, "decision": decision})
-
-    if not switched:
-        next_pending = _dedupe_turn_records([*pending_turns, current_turn])
-        with _task_switch_lock:
-            state = _load_task_switch_state()
-            sessions = state.setdefault("sessions", {})
-            sessions[session_key] = {
-                "sessionId": session_id,
-                "directory": directory_override or "",
-                "pendingTurns": next_pending,
-                "updatedAt": now_iso(),
-                "lastTaskSwitchRunDir": str(switch_run_dir),
-            }
-            _save_task_switch_state(state)
+        _save_task_switch_state(state)
         write_json(
-            switch_run_dir / "02-state-after.json",
+            switch_run_dir / "01-state-after.json",
             {
-                "reason": "task_not_switched",
-                "decision": decision,
+                "reason": "turn_completed_append_pending",
                 "pendingTurnsAfter": next_pending,
                 "statePath": str(TASK_SWITCH_STATE_PATH),
             },
         )
-        return _skip_ingest_response(
-            "task_not_switched",
+        append_log(
+            switch_log_file,
+            "turn_completed.append_pending",
+            {"pendingTurnCount": len(next_pending), "note": "no task switch judge on ingest"},
+        )
+        return with_current_error_diagnosis(_skip_ingest_response(
+            "turn_completed_append_pending",
             session_id,
             current_turn,
             next_pending,
-            {"runDir": str(switch_run_dir), "mode": switch_output.get("mode"), "decision": decision},
-        )
-
-    previous_task_turns = pending_turns
-    previous_end_msg_id = str(previous_task_turns[-1].get("endAssistantMessageId") or "")
-    trace = trace_parser.build_session_trace_bundle(
-        messages=messages,
-        primary_end_assistant_message_id=previous_end_msg_id,
-        session={"id": session_id, "directory": directory_override},
-        directory=directory_override,
-        max_turns=len(previous_task_turns),
-        fetch_messages=opencode_get_messages,
-    )
-    if not trace:
-        write_json(
-            switch_run_dir / "02-trace-build-failed.json",
-            {
-                "previousTaskTurns": previous_task_turns,
-                "previousEndAssistantMessageId": previous_end_msg_id,
-            },
-        )
-        return {
-            "ok": False,
-            "error": "Could not build trace for previous task segment",
-            "runDir": str(switch_run_dir),
-            "previousEndAssistantMessageId": previous_end_msg_id,
-        }
-
-    if fork_meta:
-        fork_data = trace_parser.build_fork_comparison(
-            fork_meta=fork_meta,
-            directory=directory_override,
-            fetch_messages=opencode_get_messages,
-        )
-        if fork_data:
-            trace["fork"] = fork_data
-
-    write_json(
-        switch_run_dir / "02-extraction-range.json",
-        {
-            "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
-            "toEndAssistantMessageId": previous_end_msg_id,
-            "turnCount": len(previous_task_turns),
-            "previousTaskTurns": previous_task_turns,
-            "nextPendingTurn": current_turn,
-        },
-    )
-    write_json(switch_run_dir / "03-extracted-trace.json", trace)
-
-    result = run_pipeline_with_dedup(
-        trace,
-        directory_override=directory_override,
-        parent_session_id=parent_session_id,
-    )
-    write_json(switch_run_dir / "04-pipeline-result.json", result)
-
-    with _task_switch_lock:
-        state = _load_task_switch_state()
-        sessions = state.setdefault("sessions", {})
-        sessions[session_key] = {
-            "sessionId": session_id,
-            "directory": directory_override or "",
-            "pendingTurns": [current_turn],
-            "updatedAt": now_iso(),
-            "lastTaskSwitchRunDir": str(switch_run_dir),
-            "lastExtractedRange": {
-                "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
-                "toEndAssistantMessageId": previous_end_msg_id,
-                "turnCount": len(previous_task_turns),
-            },
-        }
-        _save_task_switch_state(state)
-    write_json(
-        switch_run_dir / "05-state-after.json",
-        {
-            "reason": "task_switched",
-            "decision": decision,
-            "pendingTurnsAfter": [current_turn],
-            "lastExtractedRange": {
-                "fromEndAssistantMessageId": str(previous_task_turns[0].get("endAssistantMessageId") or ""),
-                "toEndAssistantMessageId": previous_end_msg_id,
-                "turnCount": len(previous_task_turns),
-            },
-            "statePath": str(TASK_SWITCH_STATE_PATH),
-        },
-    )
-
-    result["taskSwitch"] = {"runDir": str(switch_run_dir), "mode": switch_output.get("mode"), "decision": decision}
-    result["extractedTask"] = {
-        **_task_segment_summary(previous_task_turns),
-        "nextPendingEndAssistantMessageId": end_msg_id,
-    }
-    result["pendingTask"] = _task_segment_summary([current_turn])
-    return result
+            {"runDir": str(switch_run_dir), "decision": None},
+        ))
 
 
 def extract_skill_fields(skill_md: str, default_name: str) -> tuple[str, str]:
@@ -867,14 +2510,7 @@ def extract_skill_fields(skill_md: str, default_name: str) -> tuple[str, str]:
 
 
 def build_pool_summary(project_dir: Path) -> dict[str, Any]:
-    roots = [
-        project_dir / ".opencode" / "skills",
-        Path.home() / ".config" / "opencode" / "skills",
-        project_dir / ".claude" / "skills",
-        Path.home() / ".claude" / "skills",
-        project_dir / ".agents" / "skills",
-        Path.home() / ".agents" / "skills",
-    ]
+    roots = configured_skill_roots(project_dir)
     skills: list[dict[str, Any]] = []
     for root in roots:
         if not root.exists():
@@ -1797,7 +3433,8 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
             self._send_json(
                 200,
                 {
@@ -1808,12 +3445,81 @@ class AppHandler(BaseHTTPRequestHandler):
                     "skillWriteRoot": str(SKILL_WRITE_ROOT),
                     "analyzerMode": MW_ANALYZER_MODE,
                     "taskSwitchMode": MW_TASK_SWITCH_MODE,
+                    "taskSwitchContract": "segments.v1",
+                    "taskSwitchStatePath": str(TASK_SWITCH_STATE_PATH),
+                    "taskSwitchStateExists": TASK_SWITCH_STATE_PATH.exists(),
+                    "skillLoadRoots": [str(x) for x in configured_skill_roots(Path(OPENCODE_DIRECTORY))],
                 },
             )
+            return
+        if parsed.path == "/task-skills":
+            qs = parse_qs(parsed.query)
+            session_id = str((qs.get("sessionId") or [""])[0]).strip()
+            task_id = str((qs.get("taskId") or [""])[0]).strip()
+            directory = str((qs.get("directory") or [""])[0]).strip() or None
+            if not session_id or not task_id:
+                self._send_json(400, {"ok": False, "error": "sessionId and taskId are required"})
+                return
+            self._send_json(200, task_skills_response_for_directory(session_id, task_id, directory))
+            return
+        if parsed.path == "/task-skill-detail":
+            qs = parse_qs(parsed.query)
+            session_id = str((qs.get("sessionId") or [""])[0]).strip()
+            task_id = str((qs.get("taskId") or [""])[0]).strip()
+            skill_key = str((qs.get("skillKey") or [""])[0]).strip()
+            if not session_id or not task_id or not skill_key:
+                self._send_json(400, {"ok": False, "error": "sessionId, taskId and skillKey are required"})
+                return
+            result = task_skill_detail_response(session_id, task_id, skill_key)
+            self._send_json(200 if result.get("ok") else 404, result)
+            return
+        if parsed.path == "/panel-analysis":
+            qs = parse_qs(parsed.query)
+            session_id = str((qs.get("sessionId") or [""])[0]).strip()
+            if not session_id:
+                self._send_json(400, {"ok": False, "error": "sessionId is required"})
+                return
+            self._send_json(200, panel_analysis_for_session(session_id))
             return
         self._send_json(404, {"ok": False, "error": "Not found"})
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/task-feedback-distill":
+            try:
+                body = self._read_json()
+                result = distill_feedback_skill(body)
+                self._send_json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        if self.path == "/task-switch-prompt":
+            try:
+                body = self._read_json()
+                session_id = str(body.get("sessionId") or "").strip() if isinstance(body, dict) else ""
+                user_prompt = str(body.get("userPrompt") or "").strip() if isinstance(body, dict) else ""
+                directory_override = str(body.get("directory") or "").strip() or None if isinstance(body, dict) else None
+                parent_session_id = str(body.get("parentSessionID") or "").strip() or None if isinstance(body, dict) else None
+                fork_meta = body.get("forkMeta") if isinstance(body, dict) and isinstance(body.get("forkMeta"), dict) else None
+                print(
+                    "[memory-worker] task-switch.prompt "
+                    f"sessionId={session_id} promptLen={len(user_prompt)} "
+                    f"taskSwitchMode={MW_TASK_SWITCH_MODE} directory={directory_override or ''} fork={bool(fork_meta)}"
+                )
+                messages = opencode_get_messages(session_id, directory=directory_override)
+                result = process_user_prompt_task_switch(
+                    messages=messages,
+                    session_id=session_id,
+                    user_prompt=user_prompt,
+                    directory_override=directory_override,
+                    parent_session_id=parent_session_id,
+                    fork_meta=fork_meta,
+                )
+                self._send_json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
         if self.path != "/ingest-trace":
             self._send_json(404, {"ok": False, "error": "Not found"})
             return
@@ -1860,13 +3566,22 @@ class AppHandler(BaseHTTPRequestHandler):
             directory_override = str(body.get("directory") or "").strip() if isinstance(body, dict) else ""
             parent_session_id = str(body.get("parentSessionID") or "").strip() if isinstance(body, dict) else ""
             try:
+                error_diagnosis = run_error_diagnosis_for_trace(
+                    trace,
+                    directory_override=directory_override or None,
+                    parent_session_id=parent_session_id or None,
+                )
+            except Exception as diag_err:
+                error_diagnosis = {"ok": False, "error": str(diag_err), "count": 0, "items": []}
+            try:
                 result = run_pipeline_with_dedup(
                     trace,
                     directory_override=directory_override or None,
                     parent_session_id=parent_session_id or None,
                 )
+                result["errorDiagnosis"] = error_diagnosis
             except Exception as inner:
-                result = {"ok": False, "error": str(inner)}
+                result = {"ok": False, "error": str(inner), "errorDiagnosis": error_diagnosis}
             self._send_json(200, result)
         except Exception as e:
             self._send_json(500, {"ok": False, "error": str(e)})

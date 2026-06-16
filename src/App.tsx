@@ -67,7 +67,8 @@ import {
   releaseTraceIngestClaim,
   tryClaimTraceIngest,
 } from './utils/traceIngestClaim'
-import { ingestTraceReference, type MemoryWorkerIngestResult, type MemoryWorkerTaskSegment } from './services/memoryWorkerApi'
+import { fetchPanelAnalysisForSession, ingestTraceReference, notifyTaskSwitchPrompt, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult, type MemoryWorkerTaskSegment } from './services/memoryWorkerApi'
+import { mergePanelAnalysisItemsIntoBucket } from './utils/panelAnalysisStorage'
 import {
   collectInternalSessionIdsFromIngest,
   registerMemoryWorkerInternalSessionIds,
@@ -89,12 +90,14 @@ type TodosSnapshotMap = Record<string, OcTodo[]>
 type TaskSegmentStatus = 'pending' | 'extracted'
 type TaskSegmentTab = {
   id: string
-  title: string
   status: TaskSegmentStatus
   fromStartUserMessageId: string
   fromEndAssistantMessageId: string
   toEndAssistantMessageId: string
   turnCount: number
+  title?: string
+  description?: string
+  summary?: string
   taskSwitchRunDir?: string
   pipelineRunDir?: string
 }
@@ -115,12 +118,7 @@ const SUBTASK_PANEL_MIN_WIDTH = 420
 const SUBTASK_PANEL_MAX_WIDTH = 1040
 
 function taskSegmentId(status: TaskSegmentStatus, segment: MemoryWorkerTaskSegment): string {
-  return `${status}:${segment.fromEndAssistantMessageId}:${segment.toEndAssistantMessageId}`
-}
-
-function taskSegmentTitle(status: TaskSegmentStatus, turnCount: number): string {
-  if (status === 'pending') return turnCount > 1 ? `Current (${turnCount})` : 'Current'
-  return turnCount > 1 ? `Task (${turnCount})` : 'Task'
+  return segment.taskId || `${status}:${segment.fromEndAssistantMessageId}:${segment.toEndAssistantMessageId}`
 }
 
 function taskSegmentFromWorker(
@@ -131,13 +129,40 @@ function taskSegmentFromWorker(
   if (!segment.fromStartUserMessageId || !segment.toEndAssistantMessageId) return null
   return {
     id: taskSegmentId(status, segment),
-    title: taskSegmentTitle(status, segment.turnCount),
     status,
     fromStartUserMessageId: segment.fromStartUserMessageId,
     fromEndAssistantMessageId: segment.fromEndAssistantMessageId,
     toEndAssistantMessageId: segment.toEndAssistantMessageId,
     turnCount: segment.turnCount,
+    title: segment.title?.trim() || undefined,
+    description: segment.description?.trim() || undefined,
+    summary: segment.summary?.trim() || undefined,
     ...meta,
+  }
+}
+
+function isTaskSwitchedIngestResult(result: MemoryWorkerIngestResult): boolean {
+  const decision = result.taskSwitch?.decision
+  if (!decision || typeof decision !== 'object') return false
+  return (decision as { task_switched?: boolean }).task_switched === true
+}
+
+function loadJsonObjectFromLs<T extends Record<string, unknown>>(key: string): T {
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return {} as T
+    const parsed = JSON.parse(raw) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as T) : ({} as T)
+  } catch {
+    return {} as T
+  }
+}
+
+function saveJsonObjectToLs(key: string, value: unknown): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    /* ignore */
   }
 }
 
@@ -316,8 +341,22 @@ function App() {
   /** User message sent; still polling for assistant completion */
   const [waitingForAssistantReply, setWaitingForAssistantReply] = useState(false)
   const [latestTurnTrace, setLatestTurnTrace] = useState<TurnTrace | null>(null)
-  const [taskSegmentsBySessionId, setTaskSegmentsBySessionId] = useState<Record<string, TaskSegmentTab[]>>({})
-  const [activeTaskSegmentBySessionId, setActiveTaskSegmentBySessionId] = useState<Record<string, string>>({})
+  const [taskSegmentsBySessionId, setTaskSegmentsBySessionId] = useState<Record<string, TaskSegmentTab[]>>(() =>
+    loadJsonObjectFromLs<Record<string, TaskSegmentTab[]>>(STORAGE_KEYS.taskSegments),
+  )
+  const [panelAnalysisBySessionId, setPanelAnalysisBySessionId] = useState<
+    Record<string, Record<string, MemoryWorkerErrorDiagnosis>>
+  >(() => loadJsonObjectFromLs<Record<string, Record<string, MemoryWorkerErrorDiagnosis>>>(STORAGE_KEYS.panelAnalysis))
+  const errorDiagnosisBySubtaskId = useMemo(
+    () => (selectedSessionId ? panelAnalysisBySessionId[selectedSessionId] ?? {} : {}),
+    [panelAnalysisBySessionId, selectedSessionId],
+  )
+  const [activeTaskSegmentBySessionId, setActiveTaskSegmentBySessionId] = useState<Record<string, string>>(() =>
+    loadJsonObjectFromLs<Record<string, string>>(STORAGE_KEYS.activeTaskSegments),
+  )
+  const [taskSegmentManuallySelectedBySessionId, setTaskSegmentManuallySelectedBySessionId] = useState<Record<string, boolean>>(() =>
+    loadJsonObjectFromLs<Record<string, boolean>>(STORAGE_KEYS.taskSegmentManualSelection),
+  )
   /** Ingest completed successfully for this sessionId:stopId */
   const processedTraceTurnKeysRef = useRef<Set<string>>(new Set())
   /** Debounced ingest callback has started (do not release claim on effect cleanup) */
@@ -383,6 +422,35 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEYS.closedDirectories, JSON.stringify(closedDirectories))
   }, [closedDirectories])
+
+  useEffect(() => {
+    saveJsonObjectToLs(STORAGE_KEYS.taskSegments, taskSegmentsBySessionId)
+  }, [taskSegmentsBySessionId])
+
+  useEffect(() => {
+    saveJsonObjectToLs(STORAGE_KEYS.activeTaskSegments, activeTaskSegmentBySessionId)
+  }, [activeTaskSegmentBySessionId])
+
+  useEffect(() => {
+    saveJsonObjectToLs(STORAGE_KEYS.taskSegmentManualSelection, taskSegmentManuallySelectedBySessionId)
+  }, [taskSegmentManuallySelectedBySessionId])
+
+  useEffect(() => {
+    saveJsonObjectToLs(STORAGE_KEYS.panelAnalysis, panelAnalysisBySessionId)
+  }, [panelAnalysisBySessionId])
+
+  const mergePanelAnalysisItems = useCallback((sessionId: string, items: MemoryWorkerErrorDiagnosis[]) => {
+    if (!sessionId || items.length === 0) return
+    setPanelAnalysisBySessionId((prev) => {
+      const { bucket, changed } = mergePanelAnalysisItemsIntoBucket(prev[sessionId] ?? {}, items)
+      if (!changed) return prev
+      return { ...prev, [sessionId]: bucket }
+    })
+  }, [])
+
+  const handleSelectSession = useCallback((sessionId: string) => {
+    setSelectedSessionId(sessionId)
+  }, [])
 
   const sessionsInFolder = useMemo(() => {
     return sessions
@@ -553,7 +621,37 @@ function App() {
     if (actionKey !== null) setLinkedSubtaskIndex(subtaskIndex)
   }, [])
 
+  const handleSelectTaskSegment = useCallback((sessionId: string, taskSegmentId: string) => {
+    setTaskSegmentManuallySelectedBySessionId((prev) => ({ ...prev, [sessionId]: true }))
+    setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [sessionId]: taskSegmentId }))
+  }, [])
+
   const applyMemoryWorkerTaskSegments = useCallback((sessionId: string, result: MemoryWorkerIngestResult) => {
+    console.info('[VibeTrace][task-segments response]', {
+      sessionId,
+      reason: result.reason,
+      ok: result.ok,
+      duplicate: result.duplicate,
+      pendingTask: result.pendingTask,
+      extractedTask: result.extractedTask,
+      taskSwitch: result.taskSwitch,
+      errorDiagnosis: result.errorDiagnosis,
+    })
+    const diagnosisItems = result.errorDiagnosis?.items ?? []
+    if (diagnosisItems.length > 0) {
+      mergePanelAnalysisItems(sessionId, diagnosisItems)
+      console.info('[VibeTrace][error-diagnosis received]', {
+        sessionId,
+        count: diagnosisItems.length,
+        items: diagnosisItems.map((item) => ({
+          subtaskId: item.subtaskId,
+          status: item.status,
+          runDir: item.runDir,
+          diagnosisSessionID: item.diagnosisSessionID,
+          cached: item.cached,
+        })),
+      })
+    }
     const nextTabs: TaskSegmentTab[] = []
     const taskSwitchRunDir = result.taskSwitch?.runDir
     const pipelineRunDir = result.runDir
@@ -570,27 +668,61 @@ function App() {
       })
       if (tab) nextTabs.push(tab)
     }
-    if (nextTabs.length === 0) return
+    if (nextTabs.length === 0) {
+      console.warn('[VibeTrace][task-segments missing]', {
+        sessionId,
+        reason: result.reason,
+        keys: Object.keys(result),
+      })
+      return
+    }
 
     setTaskSegmentsBySessionId((prev) => {
       const existing = prev[sessionId] ?? []
       const byId = new Map(existing.map((tab) => [tab.id, tab]))
+      const taskSwitched = isTaskSwitchedIngestResult(result)
       for (const tab of nextTabs) {
         if (tab.status === 'pending') {
           for (const [id, old] of byId) {
-            if (old.status === 'pending') byId.delete(id)
+            if (old.status !== 'pending') continue
+            if (taskSwitched) {
+              byId.set(id, { ...old, status: 'extracted' })
+            } else {
+              byId.delete(id)
+            }
           }
         }
-        byId.set(tab.id, tab)
+        const prior = byId.get(tab.id)
+        byId.set(tab.id, prior ? { ...prior, ...tab } : tab)
       }
       return { ...prev, [sessionId]: [...byId.values()] }
     })
 
     const preferred = nextTabs.find((tab) => tab.status === 'pending') ?? nextTabs[nextTabs.length - 1]
     if (preferred) {
-      setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [sessionId]: preferred.id }))
+      setActiveTaskSegmentBySessionId((prev) => {
+        if (taskSegmentManuallySelectedBySessionId[sessionId] && prev[sessionId]) return prev
+        return { ...prev, [sessionId]: preferred.id }
+      })
     }
-  }, [])
+    console.info('[VibeTrace][task-segments applied]', {
+      sessionId,
+      added: nextTabs,
+      active: preferred?.id,
+    })
+  }, [taskSegmentManuallySelectedBySessionId, mergePanelAnalysisItems])
+
+  useEffect(() => {
+    if (!selectedSessionId) return
+    const cached = panelAnalysisBySessionId[selectedSessionId]
+    const count = cached ? Object.keys(cached).length : 0
+    if (count > 0) {
+      console.info('[VibeTrace][panel-analysis] restored from localStorage', {
+        sessionId: selectedSessionId,
+        count,
+      })
+    }
+  }, [selectedSessionId, panelAnalysisBySessionId])
 
   /** Clear action-outline selection when clicking outside flow nodes (sidebar, transcript, todos, composer, etc.). Blank flow canvas already clears via `onSelectAction(null)`. */
   useEffect(() => {
@@ -873,23 +1005,35 @@ function App() {
     return unsubscribe
   }, [selectedSessionId, refreshSessions])
 
-  // Load messages + todos when session changes
+  // Load messages + todos + panel analysis when session changes
   const loadSessionData = useCallback(async (sessionId: string, directory?: string) => {
     if (!sessionId) return
     setLoading(true)
     try {
-      const [msgs, td] = await Promise.all([
+      const [msgs, td, panelBatch] = await Promise.all([
         getMessages(sessionId, 'initial load / session switch', directory),
         getTodos(sessionId, directory),
+        fetchPanelAnalysisForSession(sessionId).catch((err) => {
+          console.warn('[VibeTrace][panel-analysis] worker hydrate failed', { sessionId, err })
+          return { ok: false, count: 0, items: [] as MemoryWorkerErrorDiagnosis[] }
+        }),
       ])
+      if (selectedSessionIdRef.current !== sessionId) return
       setMessages(msgs)
       setTodos(td)
+      if (panelBatch.items?.length) {
+        mergePanelAnalysisItems(sessionId, panelBatch.items)
+        console.info('[VibeTrace][panel-analysis] hydrated from worker', {
+          sessionId,
+          count: panelBatch.items.length,
+        })
+      }
     } catch {
       /* loading errors surface via empty state; avoid noisy console */
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [mergePanelAnalysisItems])
 
   useEffect(() => {
     void loadSessionData(selectedSessionId, activeSessionDirectory)
@@ -1017,6 +1161,15 @@ function App() {
     if (!activeTaskSegmentId) return null
     return taskSegmentsForActiveSession.find((tab) => tab.id === activeTaskSegmentId) ?? null
   }, [activeTaskSegmentId, taskSegmentsForActiveSession])
+
+  useEffect(() => {
+    if (!selectedSessionId || taskSegmentsForActiveSession.length === 0) return
+    if (activeTaskSegmentId && taskSegmentsForActiveSession.some((tab) => tab.id === activeTaskSegmentId)) return
+    const latest = taskSegmentsForActiveSession[taskSegmentsForActiveSession.length - 1]
+    if (latest) {
+      setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [selectedSessionId]: latest.id }))
+    }
+  }, [activeTaskSegmentId, selectedSessionId, taskSegmentsForActiveSession])
 
   const visibleSubtasksForTaskSegment = useMemo(() => {
     if (!activeTaskSegment) return visibleSubtasks
@@ -1304,10 +1457,20 @@ function App() {
     const sid = selectedSessionId
     const text = buildUserMessageWithGuidance(payload.combinedText)
     const images = payload.imageParts
+    const rawUserPrompt = payload.combinedText.trim()
     // OpenCode often finishes POST /message only after the agent turn — awaiting here would keep the composer disabled.
     // Fire-and-forget like fork’s first message: rely on SSE + a follow-up GET /message poll.
     void (async () => {
       try {
+        void notifyTaskSwitchPrompt({
+          sessionId: sid,
+          userPrompt: rawUserPrompt,
+          directory: dir,
+          parentSessionID: sid,
+          forkMeta: resolveForkIngestMeta(sid, sessionsRef.current) ?? undefined,
+        })
+          .then((result) => applyMemoryWorkerTaskSegments(sid, result))
+          .catch((e) => console.warn('[VibeTrace][task-switch prompt failed]', e))
         await sendMessage(sid, text, dir, { imageParts: images, model: composerModelRef.trim() || undefined })
         const msgs = await getMessages(sid, 'after POST /message completes', dir)
         setMessages(msgs)
@@ -1325,7 +1488,7 @@ function App() {
         setWaitingForAssistantReply(false)
       }
     })()
-  }, [selectedSessionId, sessions, composerModelRef])
+  }, [selectedSessionId, sessions, composerModelRef, applyMemoryWorkerTaskSegments])
 
   const handleAbortMessage = useCallback(async () => {
     if (!selectedSessionId) return
@@ -1530,10 +1693,20 @@ function App() {
 
         const userText = forkPrompt.trim()
         if (userText.length > 0) {
+          const guidedUserText = buildUserMessageWithGuidance(userText)
           // POST /message may return only after the agent turn; don’t block the composer on it.
           void (async () => {
             try {
-              await sendMessage(forked.id, buildUserMessageWithGuidance(userText), forked.directory, {
+              void notifyTaskSwitchPrompt({
+                sessionId: forked.id,
+                userPrompt: userText,
+                directory: forked.directory,
+                parentSessionID: forked.id,
+                forkMeta: resolveForkIngestMeta(forked.id, sessionsRef.current) ?? undefined,
+              })
+                .then((result) => applyMemoryWorkerTaskSegments(forked.id, result))
+                .catch((err) => console.warn('[VibeTrace][fork task-switch prompt failed]', err))
+              await sendMessage(forked.id, guidedUserText, forked.directory, {
                 model: composerModelRef.trim() || undefined,
               })
               const msgsAfterSend = await getMessages(
@@ -1571,7 +1744,7 @@ function App() {
         setForkBusy(false)
       }
     },
-    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks, refreshSessions, composerModelRef],
+    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks, refreshSessions, composerModelRef, applyMemoryWorkerTaskSegments],
   )
 
   const handleAnalyzeFromAction = useCallback((action: MappedAction & { row: number }) => {
@@ -1596,7 +1769,7 @@ function App() {
         selectedDirectory={selectedDirectory}
         onSelectDirectory={handleSelectDirectory}
         selectedSessionId={selectedSessionId}
-        onSelectSession={setSelectedSessionId}
+        onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
         creatingSession={creatingSession}
         onArchiveSession={handleArchiveSession}
@@ -1718,7 +1891,7 @@ function App() {
         >
           <div
             style={{
-              height: 44,
+              height: 48,
               padding: '0 14px',
               display: 'flex',
               alignItems: 'center',
@@ -1875,8 +2048,8 @@ function App() {
               flexDirection: 'column',
               minHeight: 0,
               minWidth: 0,
-              padding: '12px 14px',
-              gap: 12,
+              padding: '12px 14px 0',
+              gap: 0,
             }}
           >
             <SubtaskDebugPanel
@@ -1894,9 +2067,11 @@ function App() {
               onSelectAction={handleSelectAction}
               taskTabs={taskSegmentsForActiveSession}
               activeTaskTabId={activeTaskSegmentId}
+              sessionId={selectedSessionId}
+              errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
               onSelectTaskTab={
                 selectedSessionId
-                  ? (id) => setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [selectedSessionId]: id }))
+                  ? (id) => handleSelectTaskSegment(selectedSessionId, id)
                   : undefined
               }
             />
@@ -1942,9 +2117,11 @@ function App() {
           onSelectAction={handleSelectAction}
           taskTabs={taskSegmentsForActiveSession}
           activeTaskTabId={activeTaskSegmentId}
+          sessionId={selectedSessionId}
+          errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
           onSelectTaskTab={
             selectedSessionId
-              ? (id) => setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [selectedSessionId]: id }))
+              ? (id) => handleSelectTaskSegment(selectedSessionId, id)
               : undefined
           }
         />

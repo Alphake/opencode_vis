@@ -19,6 +19,11 @@ export const STORAGE_KEYS = {
   closedDirectories: `${APP_STORAGE_NAMESPACE}.closed.directories.v1`,
   composerModelRef: `${APP_STORAGE_NAMESPACE}.opencodeComposerModelRef`,
   subtaskPanelWidth: `${APP_STORAGE_NAMESPACE}.layout.subtaskPanelWidth.v1`,
+  taskSegments: `${APP_STORAGE_NAMESPACE}.taskSegments.v1`,
+  activeTaskSegments: `${APP_STORAGE_NAMESPACE}.activeTaskSegments.v1`,
+  taskSegmentManualSelection: `${APP_STORAGE_NAMESPACE}.taskSegmentManualSelection.v1`,
+  /** Per-session subtask panel analysis (trace summary / error diagnosis) keyed by subtaskId */
+  panelAnalysis: `${APP_STORAGE_NAMESPACE}.panelAnalysis.v1`,
   /** Prefix for `${prefix}${sessionId}` fork-panel snapshot entries */
   forkPanelPrefix: `${APP_STORAGE_NAMESPACE}:fork-panel:`,
 } as const

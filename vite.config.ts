@@ -87,6 +87,11 @@ export default defineConfig(({ mode }) => {
         ...(useMemoryWorkerProxy
           ? {
               '/ingest-trace': { target: mwTarget, changeOrigin: true },
+              '/task-switch-prompt': { target: mwTarget, changeOrigin: true },
+              '/task-skills': { target: mwTarget, changeOrigin: true },
+              '/task-skill-detail': { target: mwTarget, changeOrigin: true },
+              '/task-feedback-distill': { target: mwTarget, changeOrigin: true },
+              '/panel-analysis': { target: mwTarget, changeOrigin: true },
               '/health': { target: mwTarget, changeOrigin: true },
             }
           : {}),

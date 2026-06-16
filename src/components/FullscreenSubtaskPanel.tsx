@@ -3,6 +3,7 @@ import type { RefObject } from 'react'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
+import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
 import SubtaskDebugPanel, { type SubtaskTaskTab } from './SubtaskDebugPanel'
 
 type SubtaskSelection = { subtaskIndex: number; actionKey: string } | null
@@ -24,6 +25,8 @@ interface Props {
   taskTabs?: SubtaskTaskTab[]
   activeTaskTabId?: string
   onSelectTaskTab?: (id: string) => void
+  sessionId?: string
+  errorDiagnosisBySubtaskId?: Record<string, MemoryWorkerErrorDiagnosis>
 }
 
 /**
@@ -47,6 +50,8 @@ export default function FullscreenSubtaskPanel({
   taskTabs = [],
   activeTaskTabId,
   onSelectTaskTab,
+  sessionId,
+  errorDiagnosisBySubtaskId,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -187,6 +192,8 @@ export default function FullscreenSubtaskPanel({
             taskTabs={taskTabs}
             activeTaskTabId={activeTaskTabId}
             onSelectTaskTab={onSelectTaskTab}
+            sessionId={sessionId}
+            errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
           />
         </div>
       </div>

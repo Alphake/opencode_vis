@@ -66,6 +66,11 @@ export function collectInternalSessionIdsFromIngest(result: MemoryWorkerIngestRe
   if (analyzerId) ids.push(analyzerId)
   const writerId = typeof result.writerSessionID === 'string' ? result.writerSessionID.trim() : ''
   if (writerId) ids.push(writerId)
+  const diagnosisItems = result.errorDiagnosis?.items ?? []
+  for (const item of diagnosisItems) {
+    const sid = typeof item.diagnosisSessionID === 'string' ? item.diagnosisSessionID.trim() : ''
+    if (sid) ids.push(sid)
+  }
   const writerResults = result.writerResults
   if (Array.isArray(writerResults)) {
     for (const item of writerResults) {

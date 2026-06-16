@@ -962,6 +962,7 @@ def build_turn_trace(
         trace_subtasks.append(
             {
                 "index": subtask_index,
+                "subtaskId": subtask.get("subtask_id"),
                 "title": metrics["title"],
                 "phase": subtask.get("phase"),
                 "todos": subtask.get("todos") or [],

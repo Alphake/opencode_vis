@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useId, useMemo, useState } from 're
 import * as d3 from 'd3'
 import { Tooltip } from 'react-tooltip'
 import type { MappedAction, OcMessage } from '../types/opencode'
+import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
 import { buildCompactMappedActionTooltipHtml } from '../utils/actionTooltipMapping'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import {
@@ -325,67 +326,71 @@ export type FlowEndSummary = {
   webSearchQueries: string[]
   writeFileCount: number
   changedFilePaths: string[]
+  errorDiagnosis?: MemoryWorkerErrorDiagnosis
 }
 
-const FLOW_END_MAX_LINES = 12
-const FLOW_END_PATH_MAX_CHARS = 72
-
-function truncatePathForFlowEnd(p: string): string {
-  const t = p.trim()
-  if (t.length <= FLOW_END_PATH_MAX_CHARS) return t
-  return `${t.slice(0, FLOW_END_PATH_MAX_CHARS - 1)}…`
-}
-
-function flowEndListRows(items: string[], esc: (s: string) => string): { html: string; more: number } {
-  const shown = items.slice(0, FLOW_END_MAX_LINES)
-  const more = items.length > shown.length ? items.length - shown.length : 0
-  const html = shown
+function flowEndDiagnosisList(items: string[] | undefined, esc: (s: string) => string): string {
+  const values = (items ?? []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 4)
+  if (values.length === 0) return ''
+  return values
     .map(
-      (p) =>
-        `<div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.4;color:#24292f;">${esc(truncatePathForFlowEnd(p))}</div>`,
+      (x) =>
+        `<div style="font-size:11px;line-height:1.45;color:#4B5563;margin-top:3px;">• ${esc(x)}</div>`,
     )
     .join('')
-  return { html, more }
+}
+
+function buildFlowEndDiagnosisHtml(item: MemoryWorkerErrorDiagnosis | undefined, esc: (s: string) => string): string {
+  if (!item) return ''
+  if (item.status === 'running') {
+    return `<div style="border-top:1px solid #D0E2FF;margin-top:10px;padding-top:10px;">
+<div style="font-size:12px;font-weight:700;color:#1D4ED8;margin-bottom:4px;">Trace summary</div>
+<div style="font-size:11px;line-height:1.45;color:#374151;">正在分析本子 panel 轨迹…</div>
+</div>`
+  }
+  const hasError =
+    item.hasError === true ||
+    (Array.isArray(item.errorActions) && item.errorActions.length > 0)
+  if (item.status === 'failed') {
+    return `<div style="border-top:1px solid #F1D0BC;margin-top:10px;padding-top:10px;">
+<div style="font-size:12px;font-weight:700;color:#B42318;margin-bottom:4px;">Trace summary</div>
+<div style="font-size:11px;line-height:1.45;color:#7A2E0E;">Panel analysis failed${item.error ? ` · ${esc(String(item.error))}` : ''}</div>
+${item.runDir ? `<div style="font-size:10px;line-height:1.4;color:#9A3412;margin-top:5px;">Log · ${esc(item.runDir)}</div>` : ''}
+</div>`
+  }
+  const d = item.diagnosis
+  if (!d) return ''
+  const confidence = d.confidence ? String(d.confidence) : 'unknown'
+  const causal = flowEndDiagnosisList(d.causalChain, esc)
+  const evidence = flowEndDiagnosisList(d.evidence, esc)
+  const borderColor = hasError ? '#F1D0BC' : '#D0E2FF'
+  const headingColor = hasError ? '#B45309' : '#1D4ED8'
+  const bodyColor = hasError ? '#7A2E0E' : '#374151'
+  return `<div style="border-top:1px solid ${borderColor};margin-top:10px;padding-top:10px;">
+<div style="font-size:12px;font-weight:700;color:${headingColor};margin-bottom:4px;">Trace summary · ${esc(confidence)}</div>
+${d.summary ? `<div style="font-size:11px;line-height:1.45;color:#24292f;margin-bottom:6px;">${esc(String(d.summary))}</div>` : ''}
+${hasError && d.rootCause ? `<div style="font-size:11px;line-height:1.45;color:${bodyColor};"><strong>Root cause</strong> · ${esc(String(d.rootCause))}</div>` : ''}
+${hasError && causal ? `<div style="font-size:11px;font-weight:650;color:${bodyColor};margin-top:7px;">Causal chain</div>${causal}` : ''}
+${hasError && evidence ? `<div style="font-size:11px;font-weight:650;color:${bodyColor};margin-top:7px;">Evidence</div>${evidence}` : ''}
+${hasError && d.fixSuggestion ? `<div style="font-size:11px;line-height:1.45;color:#24292f;margin-top:7px;"><strong>Fix</strong> · ${esc(String(d.fixSuggestion))}</div>` : ''}
+${item.runDir ? `<div style="font-size:10px;line-height:1.4;color:#9A3412;margin-top:7px;">Log · ${esc(item.runDir)}</div>` : ''}
+</div>`
+}
+
+function buildFlowEndPlaceholderHtml(esc: (s: string) => string): string {
+  return `<div style="border-top:1px solid #E5E7EB;margin-top:10px;padding-top:10px;">
+<div style="font-size:12px;font-weight:700;color:#6B7280;margin-bottom:4px;">Trace summary</div>
+<div style="font-size:11px;line-height:1.45;color:#6B7280;">${esc('本轮 assistant 结束后会自动生成一句话总结；有错时附加错因分析。刷新页面后从本地缓存或 memory worker 恢复。')}</div>
+</div>`
 }
 
 function buildFlowEndTooltipHtml(s: FlowEndSummary): string {
   const esc = escapeHtml
-  const readPaths = s.readFilePaths ?? []
-  const writePaths = s.changedFilePaths ?? []
-  const queries = s.webSearchQueries ?? []
-
-  const readList = flowEndListRows(readPaths, esc)
-  const readMore =
-    readList.more > 0
-      ? `<div style="font-size:11px;color:#57606a;margin-top:4px;">+ ${readList.more} more</div>`
-      : ''
-  const globLine =
-    s.globMatchFileCount > 0
-      ? `<div style="font-size:11px;color:#57606a;margin-top:6px;">Glob · ~${esc(String(s.globMatchFileCount))} file(s) matched</div>`
-      : ''
-
-  const qList = flowEndListRows(queries, esc)
-  const qMore =
-    qList.more > 0
-      ? `<div style="font-size:11px;color:#57606a;margin-top:4px;">+ ${qList.more} more</div>`
-      : ''
-
-  const writeList = flowEndListRows(writePaths, esc)
-  const writeMore =
-    writeList.more > 0
-      ? `<div style="font-size:11px;color:#57606a;margin-top:4px;">+ ${writeList.more} more</div>`
-      : ''
+  const diagnosis = buildFlowEndDiagnosisHtml(s.errorDiagnosis, esc)
+  const body = diagnosis || buildFlowEndPlaceholderHtml(esc)
 
   return `<div class="action-tip-root action-tip-root--compact" style="text-align:left;max-width:min(440px,92vw);">
-<div style="font-size:12px;font-weight:600;color:#24292f;margin-bottom:4px;">Read</div>
-<div style="font-size:11px;color:#57606a;margin-bottom:6px;">${esc(String(s.readFileTotalCount))} file(s) (paths + glob)</div>
-${readList.html}${readMore}${globLine}
-<div style="font-size:12px;font-weight:600;color:#24292f;margin-top:10px;margin-bottom:4px;">Web search</div>
-<div style="font-size:11px;color:#57606a;margin-bottom:6px;">${esc(String(s.webSearchCount))} call(s) · keywords / URLs</div>
-${qList.html}${qMore}
-<div style="font-size:12px;font-weight:600;color:#24292f;margin-top:10px;margin-bottom:4px;">Write / edit</div>
-<div style="font-size:11px;color:#57606a;margin-bottom:6px;">${esc(String(s.writeFileCount))} file(s)</div>
-${writeList.html}${writeMore}
+${body}
 </div>`
 }
 

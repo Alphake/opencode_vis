@@ -42,8 +42,6 @@ export default function MessageInput({
   disabled,
   isRunning,
   aborting,
-  agentName,
-  modelName,
   composerModelRef = '',
   onComposerModelRefChange,
   composerModelOptions = [],
@@ -136,7 +134,7 @@ export default function MessageInput({
   }
 
   return (
-    <div style={{ padding: '10px 16px' }}>
+    <div style={{ padding: '10px 16px 0' }}>
       {SHOW_COMPOSER_MODEL_UI && (
         <div
           style={{
@@ -192,7 +190,8 @@ export default function MessageInput({
         style={{
           background: '#FFFFFF',
           border: '1px solid #E8E8E8',
-          borderRadius: '8px',
+          borderBottom: 'none',
+          borderRadius: '8px 8px 0 0',
           overflow: 'hidden',
         }}
       >
@@ -346,21 +345,6 @@ export default function MessageInput({
 
       {attachError && (
         <div style={{ marginTop: 6, fontSize: 11, color: '#C62828' }}>{attachError}</div>
-      )}
-
-      {(agentName || modelName) && (
-        <div
-          style={{
-            marginTop: 6,
-            fontSize: 11,
-            color: '#999',
-            display: 'flex',
-            gap: 12,
-          }}
-        >
-          {agentName && <span>{agentName}</span>}
-          {modelName && <span>{modelName}</span>}
-        </div>
       )}
     </div>
   )
