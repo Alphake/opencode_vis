@@ -26,10 +26,13 @@ PROMPT_ROOT = REPO_ROOT / "memory_worker" / "prompts"
 INGEST_DEDUP_INDEX = LOG_ROOT / "ingest-dedup-index.json"
 TASK_SWITCH_STATE_PATH = LOG_ROOT / "task-switch-state.json"
 TASK_SKILL_INDEX_PATH = LOG_ROOT / "task-skill-index.json"
+SKILL_HISTORY_INDEX_PATH = LOG_ROOT / "skill-history-index.json"
+TASK_SEGMENTS_INDEX_PATH = LOG_ROOT / "task-segments-index.json"
 ERROR_DIAGNOSIS_INDEX_PATH = LOG_ROOT / "error-diagnosis-index.json"
 INGEST_DEDUP_STALE_RUNNING_SEC = 900
 _ingest_dedup_lock = threading.Lock()
 _task_switch_lock = threading.Lock()
+_task_segments_lock = threading.Lock()
 _error_diagnosis_lock = threading.Lock()
 
 _TRACE_PARSER_SPEC = importlib.util.spec_from_file_location("trace_parser", WORKER_ROOT / "trace_parser.py")
@@ -479,6 +482,154 @@ def _mock_task_switch_decision(pending_turns: list[dict[str, Any]], current_turn
     }
 
 
+def _record_json_parse_outcome(
+    *,
+    phase: str,
+    raw_text: str,
+    parsed: Any,
+    salvaged: bool,
+    log_file: Path | None = None,
+    run_dir: Path | None = None,
+    error: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "phase": phase,
+        "strictParseOk": parsed is not None and not salvaged and not error,
+        "salvaged": salvaged,
+        "error": error,
+        "rawPreview": (raw_text or "")[:1200],
+    }
+    if isinstance(parsed, (dict, list)):
+        payload["parsedPreview"] = parsed
+    if log_file is not None:
+        if error:
+            append_log(log_file, "json.parse.failed", payload)
+        elif salvaged:
+            append_log(log_file, "json.parse.salvaged", payload)
+        else:
+            append_log(log_file, "json.parse.ok", {"phase": phase})
+    if run_dir is not None and (salvaged or error):
+        write_json(run_dir / "00-json-parse-salvage.json", payload)
+
+
+def _extract_json_string_field_before(text: str, field: str, next_field: str) -> str:
+    """Pull a string field when the model embeds unescaped quotes inside the value."""
+    marker = f'"{field}"'
+    idx = text.find(marker)
+    if idx < 0:
+        return ""
+    colon = text.find(":", idx + len(marker))
+    if colon < 0:
+        return ""
+    quote = text.find('"', colon + 1)
+    if quote < 0:
+        return ""
+    next_marker = f'"{next_field}"'
+    next_idx = text.find(next_marker, quote + 1)
+    if next_idx < 0:
+        return ""
+    body = text[quote + 1 : next_idx].rstrip()
+    if body.endswith(","):
+        body = body[:-1].rstrip()
+    if body.endswith('"'):
+        body = body[:-1]
+    return body.strip()
+
+
+def _parse_task_block_from_text(text: str, role: str) -> dict[str, str]:
+    pattern = re.compile(
+        rf'"{re.escape(role)}_task"\s*:\s*\{{\s*"title"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"description"\s*:\s*"((?:\\.|[^"\\])*)"\s*\}}',
+        flags=re.S,
+    )
+    match = pattern.search(text)
+    if not match:
+        return {"title": "", "description": ""}
+    return {"title": match.group(1), "description": match.group(2)}
+
+
+def _parse_task_switch_decision(
+    raw_text: str,
+    *,
+    log_file: Path | None = None,
+    run_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    parsed = try_parse_json_object(raw_text)
+    if isinstance(parsed, dict) and isinstance(parsed.get("task_switched"), bool):
+        _record_json_parse_outcome(
+            phase="task_switch",
+            raw_text=raw_text,
+            parsed=parsed,
+            salvaged=False,
+            log_file=log_file,
+            run_dir=run_dir,
+        )
+        return parsed
+
+    text = (raw_text or "").strip()
+    if not text:
+        _record_json_parse_outcome(
+            phase="task_switch",
+            raw_text=raw_text,
+            parsed=None,
+            salvaged=False,
+            log_file=log_file,
+            run_dir=run_dir,
+            error="empty model output",
+        )
+        return None
+
+    normalized = (
+        text.replace("\u201c", "'")
+        .replace("\u201d", "'")
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+    )
+    parsed = try_parse_json_object(normalized)
+    if isinstance(parsed, dict) and isinstance(parsed.get("task_switched"), bool):
+        _record_json_parse_outcome(
+            phase="task_switch",
+            raw_text=raw_text,
+            parsed=parsed,
+            salvaged=True,
+            log_file=log_file,
+            run_dir=run_dir,
+        )
+        parsed["_salvaged"] = True
+        return parsed
+
+    switch_match = re.search(r'"task_switched"\s*:\s*(true|false)', text, re.I)
+    if not switch_match:
+        _record_json_parse_outcome(
+            phase="task_switch",
+            raw_text=raw_text,
+            parsed=None,
+            salvaged=False,
+            log_file=log_file,
+            run_dir=run_dir,
+            error="task_switched field not found after strict parse failed",
+        )
+        return None
+
+    confidence_match = re.search(r'"confidence"\s*:\s*"([^"]*)"', text, re.I)
+    salvaged = {
+        "task_switched": switch_match.group(1).lower() == "true",
+        "confidence": (confidence_match.group(1) if confidence_match else "medium").strip() or "medium",
+        "reason": _extract_json_string_field_before(text, "reason", "previous_task"),
+        "previous_task": _parse_task_block_from_text(text, "previous"),
+        "current_task": _parse_task_block_from_text(text, "current"),
+        "_salvaged": True,
+    }
+    _record_json_parse_outcome(
+        phase="task_switch",
+        raw_text=raw_text,
+        parsed=salvaged,
+        salvaged=True,
+        log_file=log_file,
+        run_dir=run_dir,
+    )
+    return salvaged
+
+
 def run_task_switch_judge(
     pending_turns: list[dict[str, Any]],
     current_turn: dict[str, Any],
@@ -507,9 +658,23 @@ def run_task_switch_judge(
         directory=directory,
         parent_session_id=None,
     )
-    parsed = try_parse_json_object(llm_out.get("rawText", ""))
+    parsed = _parse_task_switch_decision(
+        str(llm_out.get("rawText") or ""),
+        log_file=log_file,
+        run_dir=run_dir,
+    )
     if not isinstance(parsed, dict) or not isinstance(parsed.get("task_switched"), bool):
         raise RuntimeError("TaskSwitchJudge output parse failed")
+    if parsed.pop("_salvaged", None):
+        append_log(
+            log_file,
+            "task_switch.parse.salvaged",
+            {
+                "taskSwitched": parsed.get("task_switched"),
+                "reasonPreview": str(parsed.get("reason") or "")[:120],
+                "salvageArtifact": str(run_dir / "00-json-parse-salvage.json"),
+            },
+        )
     return {"mode": "opencode", **llm_out, "analysis": parsed}
 
 
@@ -543,6 +708,8 @@ def _skip_ingest_response(
     pending_turns: list[dict[str, Any]],
     task_switch: dict[str, Any] | None = None,
     *,
+    directory_override: str | None = None,
+    task_switched: bool | None = None,
     extracted_turns: list[dict[str, Any]] | None = None,
     extracted_brief: dict[str, str] | None = None,
     pending_brief: dict[str, str] | None = None,
@@ -571,7 +738,383 @@ def _skip_ingest_response(
             title=brief.get("title"),
             description=brief.get("description"),
         )
+    resolved_task_switched = bool(task_switched)
+    if not resolved_task_switched and isinstance(task_switch, dict):
+        decision = task_switch.get("decision")
+        if isinstance(decision, dict):
+            resolved_task_switched = bool(decision.get("task_switched"))
+    _persist_task_segments_from_response(
+        session_id,
+        directory_override,
+        out,
+        task_switched=resolved_task_switched,
+    )
     return out
+
+
+def _load_task_segments_index() -> dict[str, Any]:
+    if not TASK_SEGMENTS_INDEX_PATH.exists():
+        return {"sessions": {}}
+    try:
+        data = json.loads(TASK_SEGMENTS_INDEX_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("sessions"), dict):
+            return data
+    except Exception:
+        pass
+    return {"sessions": {}}
+
+
+def _save_task_segments_index(data: dict[str, Any]) -> None:
+    data["updatedAt"] = now_iso()
+    write_json(TASK_SEGMENTS_INDEX_PATH, data)
+
+
+def _task_segment_tab_record(
+    segment: dict[str, Any],
+    *,
+    status: str,
+    task_switch_run_dir: str = "",
+    pipeline_run_dir: str = "",
+) -> dict[str, Any] | None:
+    task_id = str(segment.get("taskId") or "").strip()
+    if not task_id:
+        return None
+    title = str(segment.get("title") or "").strip()
+    description = str(segment.get("description") or "").strip()
+    summary = str(segment.get("summary") or "").strip()
+    if not title and not description:
+        summary = ""
+    elif not summary:
+        summary = _format_task_display_label(title=title, description=description)
+    return {
+        "taskId": task_id,
+        "status": status,
+        "fromStartUserMessageId": str(segment.get("fromStartUserMessageId") or ""),
+        "fromEndAssistantMessageId": str(segment.get("fromEndAssistantMessageId") or ""),
+        "toEndAssistantMessageId": str(segment.get("toEndAssistantMessageId") or ""),
+        "turnCount": int(segment.get("turnCount") or 0),
+        "title": title,
+        "description": description,
+        "summary": summary,
+        "taskSwitchRunDir": str(task_switch_run_dir or "").strip(),
+        "pipelineRunDir": str(pipeline_run_dir or "").strip(),
+    }
+
+
+def _merge_task_tab_record(prior: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(prior, dict):
+        return new
+    merged = {**prior, **new}
+    for field in ("title", "description", "summary", "taskSwitchRunDir", "pipelineRunDir"):
+        if not str(new.get(field) or "").strip():
+            merged[field] = str(prior.get(field) or "").strip()
+    return merged
+
+
+def _load_task_switch_events_for_session(session_id: str) -> list[dict[str, Any]]:
+    session_id = str(session_id or "").strip()
+    if not session_id or not LOG_ROOT.exists():
+        return []
+    safe_sid = _safe_id(session_id) or session_id
+    events: list[dict[str, Any]] = []
+    for path in LOG_ROOT.iterdir():
+        if not path.is_dir() or "task-switch" not in path.name:
+            continue
+        if safe_sid not in path.name and session_id not in path.name:
+            continue
+        raw_path = path / "00-task-switch-raw.json"
+        if not raw_path.exists():
+            continue
+        try:
+            raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        decision = raw.get("analysis") if isinstance(raw.get("analysis"), dict) else {}
+        if not bool(decision.get("task_switched")):
+            continue
+        extracted_to = ""
+        pending_to = ""
+        state_path = path / "02-state-after.json"
+        if state_path.exists():
+            try:
+                state_after = json.loads(state_path.read_text(encoding="utf-8"))
+                if isinstance(state_after, dict):
+                    extracted_range = state_after.get("lastExtractedRange")
+                    if isinstance(extracted_range, dict):
+                        extracted_to = str(extracted_range.get("toEndAssistantMessageId") or "")
+                    in_flight = state_after.get("inFlightTurn")
+                    if isinstance(in_flight, dict):
+                        pending_to = str(in_flight.get("endAssistantMessageId") or "")
+            except Exception:
+                pass
+        if not extracted_to or not pending_to:
+            input_path = path / "01-task-switch-input.json"
+            if input_path.exists():
+                try:
+                    switch_input = json.loads(input_path.read_text(encoding="utf-8"))
+                    if isinstance(switch_input, dict):
+                        prev_prompts = switch_input.get("previous_user_prompts")
+                        if isinstance(prev_prompts, list) and prev_prompts:
+                            last_prev = prev_prompts[-1]
+                            if isinstance(last_prev, dict):
+                                extracted_to = extracted_to or str(last_prev.get("endAssistantMessageId") or "")
+                        current_prompt = switch_input.get("current_user_prompt")
+                        if isinstance(current_prompt, dict):
+                            pending_to = pending_to or str(current_prompt.get("endAssistantMessageId") or "")
+                except Exception:
+                    pass
+        events.append(
+            {
+                "runDir": str(path),
+                "extractedToEnd": extracted_to,
+                "pendingToEnd": pending_to,
+                "previousBrief": _task_brief_from_decision(decision, "previous"),
+                "currentBrief": _task_brief_from_decision(decision, "current"),
+                "mtime": path.stat().st_mtime,
+            }
+        )
+    events.sort(key=lambda item: float(item.get("mtime") or 0))
+    return events
+
+
+def _enrich_task_segment_tabs(session_id: str, tabs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    if not tabs:
+        return tabs, False
+    events = _load_task_switch_events_for_session(session_id)
+    if not events:
+        return tabs, False
+    latest_event = events[-1]
+    enriched: list[dict[str, Any]] = []
+    changed = False
+    for raw_tab in tabs:
+        if not isinstance(raw_tab, dict):
+            continue
+        has_title = bool(str(raw_tab.get("title") or "").strip())
+        has_description = bool(str(raw_tab.get("description") or "").strip())
+        if has_title and has_description:
+            enriched.append(raw_tab)
+            continue
+        status = str(raw_tab.get("status") or "")
+        to_end = str(raw_tab.get("toEndAssistantMessageId") or "")
+        run_dir = str(raw_tab.get("taskSwitchRunDir") or "").strip()
+        brief: dict[str, str] = {"title": "", "description": ""}
+        for ev in events:
+            if run_dir and str(ev.get("runDir") or "") == run_dir:
+                brief = ev["previousBrief"] if status == "extracted" else ev["currentBrief"]
+                break
+            if status == "extracted" and to_end and to_end == str(ev.get("extractedToEnd") or ""):
+                brief = ev["previousBrief"]
+            elif status == "pending" and to_end and to_end == str(ev.get("pendingToEnd") or ""):
+                brief = ev["currentBrief"]
+        if status == "pending" and not brief.get("title") and not brief.get("description"):
+            brief = latest_event["currentBrief"]
+        updates: dict[str, str] = {}
+        if not has_title and brief.get("title"):
+            updates["title"] = brief["title"]
+        if not has_description and brief.get("description"):
+            updates["description"] = brief["description"]
+        if not updates:
+            enriched.append(raw_tab)
+            continue
+        title = updates.get("title") or str(raw_tab.get("title") or "").strip()
+        description = updates.get("description") or str(raw_tab.get("description") or "").strip()
+        updates["summary"] = _format_task_display_label(title=title, description=description)
+        enriched.append({**raw_tab, **updates})
+        changed = True
+    return enriched, changed
+
+
+def _persist_task_segments_index_tabs(session_id: str, directory: str | None, tabs: list[dict[str, Any]]) -> None:
+    session_id = str(session_id or "").strip()
+    if not session_id or not tabs:
+        return
+    session_key = _task_switch_session_key(session_id, directory)
+    with _task_segments_lock:
+        index = _load_task_segments_index()
+        sessions = index.setdefault("sessions", {})
+        entry = sessions.setdefault(
+            session_key,
+            {"sessionId": session_id, "directory": (directory or "").strip(), "tabs": []},
+        )
+        entry["tabs"] = tabs
+        entry["updatedAt"] = now_iso()
+        _save_task_segments_index(index)
+
+
+def _persist_task_segments(
+    session_id: str,
+    directory: str | None,
+    *,
+    extracted_task: dict[str, Any] | None = None,
+    pending_task: dict[str, Any] | None = None,
+    task_switched: bool = False,
+    task_switch_run_dir: str = "",
+    pipeline_run_dir: str = "",
+) -> None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return
+    extracted_record = (
+        _task_segment_tab_record(
+            extracted_task,
+            status="extracted",
+            task_switch_run_dir=task_switch_run_dir,
+            pipeline_run_dir=pipeline_run_dir,
+        )
+        if isinstance(extracted_task, dict)
+        else None
+    )
+    pending_record = (
+        _task_segment_tab_record(
+            pending_task,
+            status="pending",
+            task_switch_run_dir=task_switch_run_dir,
+        )
+        if isinstance(pending_task, dict)
+        else None
+    )
+    if not extracted_record and not pending_record:
+        return
+    session_key = _task_switch_session_key(session_id, directory)
+    with _task_segments_lock:
+        index = _load_task_segments_index()
+        sessions = index.setdefault("sessions", {})
+        entry = sessions.setdefault(
+            session_key,
+            {"sessionId": session_id, "directory": (directory or "").strip(), "tabs": []},
+        )
+        tabs_by_id: dict[str, dict[str, Any]] = {}
+        for tab in entry.get("tabs") if isinstance(entry.get("tabs"), list) else []:
+            if not isinstance(tab, dict):
+                continue
+            task_id = str(tab.get("taskId") or "").strip()
+            if task_id:
+                tabs_by_id[task_id] = tab
+        if task_switched:
+            for task_id, tab in list(tabs_by_id.items()):
+                if str(tab.get("status") or "") == "pending":
+                    tabs_by_id[task_id] = {**tab, "status": "extracted"}
+        if extracted_record:
+            prior = tabs_by_id.get(extracted_record["taskId"])
+            tabs_by_id[extracted_record["taskId"]] = _merge_task_tab_record(prior, extracted_record)
+        if pending_record:
+            for task_id, tab in list(tabs_by_id.items()):
+                if str(tab.get("status") or "") != "pending":
+                    continue
+                if task_id == pending_record["taskId"]:
+                    continue
+                if task_switched:
+                    tabs_by_id[task_id] = {**tab, "status": "extracted"}
+                else:
+                    del tabs_by_id[task_id]
+            prior = tabs_by_id.get(pending_record["taskId"])
+            tabs_by_id[pending_record["taskId"]] = _merge_task_tab_record(prior, pending_record)
+        entry["tabs"] = list(tabs_by_id.values())
+        entry["updatedAt"] = now_iso()
+        _save_task_segments_index(index)
+
+
+def _persist_task_segments_from_response(
+    session_id: str,
+    directory: str | None,
+    response: dict[str, Any],
+    *,
+    task_switched: bool = False,
+) -> None:
+    if not isinstance(response, dict):
+        return
+    task_switch = response.get("taskSwitch") if isinstance(response.get("taskSwitch"), dict) else {}
+    _persist_task_segments(
+        session_id,
+        directory,
+        extracted_task=response.get("extractedTask") if isinstance(response.get("extractedTask"), dict) else None,
+        pending_task=response.get("pendingTask") if isinstance(response.get("pendingTask"), dict) else None,
+        task_switched=task_switched,
+        task_switch_run_dir=str(task_switch.get("runDir") or ""),
+        pipeline_run_dir=str(response.get("runDir") or ""),
+    )
+
+
+def _task_segments_from_switch_state(session_id: str) -> list[dict[str, Any]]:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return []
+    state = _load_task_switch_state()
+    sessions = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
+    tabs_by_id: dict[str, dict[str, Any]] = {}
+    for entry in sessions.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("sessionId") or "").strip() != session_id:
+            continue
+        in_flight_switch = entry.get("inFlightTaskSwitch") if isinstance(entry.get("inFlightTaskSwitch"), dict) else {}
+        decision = in_flight_switch.get("decision") if isinstance(in_flight_switch.get("decision"), dict) else {}
+        switch_run_dir = str(in_flight_switch.get("runDir") or "")
+        last_turns = entry.get("lastExtractedTurns")
+        if isinstance(last_turns, list) and last_turns:
+            brief = _task_brief_from_decision(decision, "previous") if decision else {}
+            segment = _task_segment_summary(
+                _dedupe_turn_records(last_turns),
+                title=brief.get("title"),
+                description=brief.get("description"),
+            )
+            record = _task_segment_tab_record(
+                segment,
+                status="extracted",
+                task_switch_run_dir=switch_run_dir,
+            )
+            if record:
+                tabs_by_id[record["taskId"]] = record
+        pending_turns = _dedupe_turn_records(entry.get("pendingTurns") if isinstance(entry.get("pendingTurns"), list) else [])
+        in_flight_turn = entry.get("inFlightTurn")
+        if isinstance(in_flight_turn, dict):
+            pending_turns = _dedupe_turn_records([*pending_turns, in_flight_turn])
+        if pending_turns:
+            brief = _task_brief_from_decision(decision, "current") if decision else {}
+            segment = _task_segment_summary(
+                pending_turns,
+                title=brief.get("title"),
+                description=brief.get("description"),
+            )
+            record = _task_segment_tab_record(segment, status="pending", task_switch_run_dir=switch_run_dir)
+            if record:
+                tabs_by_id[record["taskId"]] = record
+    return list(tabs_by_id.values())
+
+
+def task_segments_for_session(session_id: str) -> dict[str, Any]:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return {"ok": False, "error": "sessionId is required", "count": 0, "tabs": []}
+    index = _load_task_segments_index()
+    sessions = index.get("sessions") if isinstance(index.get("sessions"), dict) else {}
+    tabs_by_id: dict[str, dict[str, Any]] = {}
+    for entry in sessions.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("sessionId") or "").strip() != session_id:
+            continue
+        for tab in entry.get("tabs") if isinstance(entry.get("tabs"), list) else []:
+            if not isinstance(tab, dict):
+                continue
+            task_id = str(tab.get("taskId") or "").strip()
+            if task_id:
+                tabs_by_id[task_id] = tab
+    if not tabs_by_id:
+        for tab in _task_segments_from_switch_state(session_id):
+            task_id = str(tab.get("taskId") or "").strip()
+            if task_id:
+                tabs_by_id[task_id] = tab
+    raw_tabs = list(tabs_by_id.values())
+    tabs, enriched = _enrich_task_segment_tabs(session_id, raw_tabs)
+    if enriched and tabs:
+        directory = ""
+        for entry in sessions.values():
+            if isinstance(entry, dict) and str(entry.get("sessionId") or "").strip() == session_id:
+                directory = str(entry.get("directory") or "").strip()
+                break
+        _persist_task_segments_index_tabs(session_id, directory or None, tabs)
+    return {"ok": True, "sessionId": session_id, "count": len(tabs), "tabs": tabs}
 
 
 def _load_task_skill_index() -> dict[str, Any]:
@@ -648,6 +1191,398 @@ def _enrich_skill_provenance(
     write_json(provenance_path, payload)
 
 
+def _normalize_skill_path_marker(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).expanduser().resolve()).lower()
+    except Exception:
+        return raw.lower()
+
+
+def _load_skill_history_index() -> dict[str, Any]:
+    if not SKILL_HISTORY_INDEX_PATH.exists():
+        return {"skills": {}}
+    try:
+        data = json.loads(SKILL_HISTORY_INDEX_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {"skills": {}}
+    except Exception:
+        return {"skills": {}}
+
+
+def _save_skill_history_index(data: dict[str, Any]) -> None:
+    SKILL_HISTORY_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SKILL_HISTORY_INDEX_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _truncate_text(value: Any, max_len: int = 240) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 1].rstrip()}…"
+
+
+def _summarize_file_guidance(file_guidance: Any) -> list[dict[str, str]]:
+    if not isinstance(file_guidance, list):
+        return []
+    rows: list[dict[str, str]] = []
+    for item in file_guidance:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("relative_path") or "SKILL.md").strip()
+        operation = str(item.get("operation") or item.get("action") or "UPDATE").upper()
+        reason = str(item.get("reason") or "").strip()
+        guidance = item.get("guidance")
+        summary = ""
+        if isinstance(guidance, dict):
+            parts = [
+                str(guidance.get("section_capability") or "").strip(),
+                str(guidance.get("description") or "").strip(),
+            ]
+            summary = " · ".join(part for part in parts if part)
+        elif isinstance(guidance, str):
+            summary = guidance.strip()
+        rows.append(
+            {
+                "path": path,
+                "operation": operation,
+                "reason": reason,
+                "summary": _truncate_text(summary, 180),
+            }
+        )
+    return rows
+
+
+def _one_line_change_summary(*, operation: str, rationale: str, changes: list[dict[str, str]]) -> str:
+    op = str(operation or "UPDATE").upper()
+    if op == "CREATE":
+        lead = "新增 skill"
+    elif op == "DELETE":
+        lead = "删除 skill"
+    elif op == "NONE":
+        lead = "无需改动"
+    elif op == "MANUAL_EDIT":
+        lead = "手动编辑 SKILL.md"
+    else:
+        lead = "更新 skill"
+    if changes:
+        first = changes[0]
+        path = str(first.get("path") or "SKILL.md")
+        detail = str(first.get("summary") or first.get("reason") or rationale or "").strip()
+        if detail:
+            return _truncate_text(f"{lead} · {path} · {detail}", 280)
+        return _truncate_text(f"{lead} · {path}", 280)
+    if rationale:
+        return _truncate_text(f"{lead} · {rationale}", 280)
+    return lead
+
+
+def _history_entry_from_pipeline_suggestion(
+    suggestion: dict[str, Any],
+    *,
+    session_id: str,
+    task_id: str,
+    task_segment: dict[str, Any] | None,
+    run_dir: str,
+    created_at: str,
+) -> dict[str, Any]:
+    operation = str(suggestion.get("operation") or "UPDATE").upper()
+    rationale = str(suggestion.get("rationale") or "").strip()
+    changes = _summarize_file_guidance(suggestion.get("file_guidance"))
+    trace_anchors = suggestion.get("trace_anchors") if isinstance(suggestion.get("trace_anchors"), list) else []
+    task_label = ""
+    if isinstance(task_segment, dict):
+        task_label = str(task_segment.get("summary") or task_segment.get("title") or task_segment.get("description") or "").strip()
+    return {
+        "id": f"pipeline:{run_dir}:{created_at}",
+        "source": "pipeline",
+        "channel": "task_switch",
+        "operation": operation,
+        "rationale": rationale,
+        "summary": _one_line_change_summary(operation=operation, rationale=rationale, changes=changes),
+        "changes": changes,
+        "traceAnchors": trace_anchors,
+        "createdAt": created_at,
+        "sessionId": session_id,
+        "taskId": task_id,
+        "taskLabel": task_label,
+        "runDir": run_dir,
+        "skillName": str(suggestion.get("skill_name") or "").strip(),
+    }
+
+
+def _history_entry_from_feedback_analysis(
+    analysis: dict[str, Any],
+    *,
+    session_id: str,
+    task_id: str,
+    task_segment: dict[str, Any] | None,
+    run_dir: str,
+    created_at: str,
+    user_comment: str = "",
+    feedback_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    operation = str(analysis.get("operation") or "CREATE").upper()
+    rationale = str(analysis.get("rationale") or user_comment or "").strip()
+    trace_anchors = analysis.get("trace_anchors") if isinstance(analysis.get("trace_anchors"), list) else []
+    task_label = ""
+    if isinstance(feedback_context, dict):
+        task_label = str(feedback_context.get("taskLabel") or "").strip()
+    if not task_label and isinstance(task_segment, dict):
+        task_label = str(task_segment.get("summary") or task_segment.get("title") or "").strip()
+    steps = [str(item).strip() for item in (analysis.get("steps") or []) if str(item).strip()]
+    changes = [{"path": "SKILL.md", "operation": operation, "reason": rationale, "summary": _truncate_text(steps[0], 180) if steps else ""}]
+    return {
+        "id": f"feedback:{run_dir}:{created_at}",
+        "source": "feedback_distill",
+        "channel": "feedback",
+        "operation": operation,
+        "rationale": rationale,
+        "summary": _one_line_change_summary(operation=operation, rationale=rationale, changes=changes),
+        "changes": changes,
+        "traceAnchors": trace_anchors,
+        "createdAt": created_at,
+        "sessionId": session_id,
+        "taskId": task_id,
+        "taskLabel": task_label,
+        "runDir": run_dir,
+        "userComment": user_comment,
+        "feedbackContext": feedback_context or {},
+        "skillName": str(analysis.get("skill_name") or "").strip(),
+    }
+
+
+def append_skill_history_entry(skill_path: str, entry: dict[str, Any]) -> None:
+    marker = _normalize_skill_path_marker(skill_path)
+    if not marker:
+        return
+    with _task_switch_lock:
+        index = _load_skill_history_index()
+        skills = index.setdefault("skills", {})
+        bucket = skills.setdefault(
+            marker,
+            {
+                "skillPath": str(entry.get("skillPath") or skill_path),
+                "skillName": str(entry.get("skillName") or Path(skill_path).name),
+                "entries": [],
+            },
+        )
+        entries = [x for x in bucket.get("entries", []) if isinstance(x, dict)]
+        entry_id = str(entry.get("id") or uuid4().hex)
+        if any(str(x.get("id") or "") == entry_id for x in entries):
+            return
+        payload = {**entry, "id": entry_id}
+        entries.append(payload)
+        entries.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+        bucket["entries"] = entries[:80]
+        bucket["skillPath"] = str(entry.get("skillPath") or skill_path)
+        if entry.get("skillName"):
+            bucket["skillName"] = str(entry.get("skillName"))
+        _save_skill_history_index(index)
+
+
+def _pipeline_suggestion_for_skill(run_dir_raw: str, skill_name: str) -> dict[str, Any] | None:
+    if not run_dir_raw:
+        return None
+    suggestions_path = Path(run_dir_raw) / "05-skill-suggestions.json"
+    payload = _safe_read_json_file(suggestions_path)
+    if not isinstance(payload, dict):
+        return None
+    suggestions = payload.get("skill_suggestions")
+    if not isinstance(suggestions, list):
+        return None
+    normalized_name = str(skill_name or "").strip().lower()
+    for item in suggestions:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("skill_name") or "").strip().lower()
+        if normalized_name and candidate == normalized_name:
+            return item
+    return suggestions[0] if suggestions and isinstance(suggestions[0], dict) else None
+
+
+def _synthesize_history_from_skill_record(skill: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(task.get("sessionId") or "").strip()
+    task_id = str(task.get("taskId") or "").strip()
+    task_segment = task.get("taskSegment") if isinstance(task.get("taskSegment"), dict) else {}
+    created_at = str(skill.get("createdAt") or task.get("updatedAt") or now_iso())
+    skill_path = str(skill.get("skillPath") or "")
+    skill_name = str(skill.get("skillName") or Path(skill_path).name if skill_path else "")
+    feedback_run_dir = str(skill.get("feedbackRunDir") or "").strip()
+    if feedback_run_dir:
+        analysis = _safe_read_json_file(Path(feedback_run_dir) / "04-feedback-analysis.json")
+        request = _safe_read_json_file(Path(feedback_run_dir) / "01-request.json")
+        comment = ""
+        feedback_context: dict[str, Any] = {}
+        if isinstance(request, dict):
+            comment = str(request.get("comment") or "").strip()
+            feedback_context = request.get("feedbackContext") if isinstance(request.get("feedbackContext"), dict) else {}
+        if isinstance(analysis, dict):
+            entry = _history_entry_from_feedback_analysis(
+                analysis,
+                session_id=session_id,
+                task_id=task_id,
+                task_segment=task_segment,
+                run_dir=feedback_run_dir,
+                created_at=created_at,
+                user_comment=comment,
+                feedback_context=feedback_context,
+            )
+            entry["skillPath"] = skill_path
+            entry["skillName"] = skill_name
+            return entry
+    pipeline_run_dir = str(task.get("pipelineRunDir") or "").strip()
+    suggestion = _pipeline_suggestion_for_skill(pipeline_run_dir, skill_name)
+    if isinstance(suggestion, dict):
+        entry = _history_entry_from_pipeline_suggestion(
+            suggestion,
+            session_id=session_id,
+            task_id=task_id,
+            task_segment=task_segment,
+            run_dir=pipeline_run_dir,
+            created_at=created_at,
+        )
+        entry["skillPath"] = skill_path
+        entry["skillName"] = skill_name
+        if not entry.get("rationale"):
+            entry["rationale"] = str(skill.get("rationale") or "")
+        if not entry.get("summary") or entry.get("summary") == "更新 skill":
+            entry["summary"] = _one_line_change_summary(
+                operation=str(entry.get("operation") or skill.get("operation") or "UPDATE"),
+                rationale=str(entry.get("rationale") or ""),
+                changes=entry.get("changes") if isinstance(entry.get("changes"), list) else [],
+            )
+        return entry
+    operation = str(skill.get("operation") or "UPDATE").upper()
+    rationale = str(skill.get("rationale") or "").strip()
+    return {
+        "id": f"task-record:{session_id}:{task_id}:{created_at}",
+        "source": "pipeline" if not feedback_run_dir else "feedback_distill",
+        "channel": "feedback" if feedback_run_dir else "task_switch",
+        "operation": operation,
+        "rationale": rationale,
+        "summary": _one_line_change_summary(operation=operation, rationale=rationale, changes=[]),
+        "changes": [],
+        "traceAnchors": [],
+        "createdAt": created_at,
+        "sessionId": session_id,
+        "taskId": task_id,
+        "taskLabel": str(task_segment.get("summary") or task_segment.get("title") or "").strip(),
+        "runDir": feedback_run_dir or pipeline_run_dir,
+        "skillPath": skill_path,
+        "skillName": skill_name,
+    }
+
+
+def collect_skill_distill_history(skill_path: str) -> list[dict[str, Any]]:
+    marker = _normalize_skill_path_marker(skill_path)
+    if not marker:
+        return []
+    entries: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    history_index = _load_skill_history_index()
+    bucket = (history_index.get("skills") or {}).get(marker)
+    if isinstance(bucket, dict):
+        for item in bucket.get("entries", []):
+            if not isinstance(item, dict):
+                continue
+            entry_id = str(item.get("id") or "")
+            if entry_id:
+                seen_ids.add(entry_id)
+            entries.append(item)
+
+    task_index = _load_task_skill_index()
+    for task in (task_index.get("tasks") or {}).values():
+        if not isinstance(task, dict):
+            continue
+        for skill in task.get("skills", []):
+            if not isinstance(skill, dict):
+                continue
+            if _normalize_skill_path_marker(str(skill.get("skillPath") or "")) != marker:
+                continue
+            synthesized = _synthesize_history_from_skill_record(skill, task)
+            entry_id = str(synthesized.get("id") or "")
+            if entry_id and entry_id in seen_ids:
+                continue
+            if entry_id:
+                seen_ids.add(entry_id)
+            entries.append(synthesized)
+
+    entries.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+    return entries
+
+
+def _skill_path_is_writable(skill_dir: Path) -> bool:
+    try:
+        resolved = skill_dir.expanduser().resolve()
+    except Exception:
+        return False
+    for root in configured_skill_roots(Path(OPENCODE_DIRECTORY)):
+        try:
+            root_resolved = root.expanduser().resolve()
+            resolved.relative_to(root_resolved)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def save_task_skill_md(payload: dict[str, Any]) -> dict[str, Any]:
+    skill_path_raw = str(payload.get("skillPath") or payload.get("skillKey") or "").strip()
+    content = payload.get("content")
+    session_id = str(payload.get("sessionId") or "").strip()
+    task_id = str(payload.get("taskId") or "").strip()
+    if not skill_path_raw:
+        return {"ok": False, "error": "skillPath is required"}
+    if not isinstance(content, str):
+        return {"ok": False, "error": "content must be a string"}
+
+    skill_dir = Path(skill_path_raw)
+    if not skill_dir.exists() or not skill_dir.is_dir():
+        return {"ok": False, "error": f"skill directory not found: {skill_dir}"}
+    if not _skill_path_is_writable(skill_dir):
+        return {"ok": False, "error": "skill path is outside configured skill roots"}
+
+    skill_md_path = skill_dir / "SKILL.md"
+    skill_md_path.write_text(content, encoding="utf-8")
+    created_at = now_iso()
+    skill_name = skill_dir.name
+    try:
+        parsed_name, _desc = extract_skill_fields(content, skill_dir.name)
+        if parsed_name:
+            skill_name = parsed_name
+    except Exception:
+        pass
+
+    entry = {
+        "id": f"manual:{created_at}:{uuid4().hex[:8]}",
+        "source": "manual_edit",
+        "channel": "manual",
+        "operation": "MANUAL_EDIT",
+        "rationale": "用户在 Skill Panel 中直接编辑并保存 SKILL.md。",
+        "summary": "手动编辑 SKILL.md",
+        "changes": [{"path": "SKILL.md", "operation": "UPDATE", "reason": "manual edit", "summary": ""}],
+        "traceAnchors": [],
+        "createdAt": created_at,
+        "sessionId": session_id,
+        "taskId": task_id,
+        "runDir": "",
+        "skillPath": str(skill_dir.resolve()),
+        "skillName": skill_name,
+    }
+    append_skill_history_entry(str(skill_dir.resolve()), entry)
+
+    return {
+        "ok": True,
+        "skillMd": content,
+        "skillMdPath": str(skill_md_path),
+        "skillName": skill_name,
+        "historyEntry": entry,
+    }
+
+
 def register_task_skill_result(
     session_id: str,
     task_segment: dict[str, Any],
@@ -658,6 +1593,21 @@ def register_task_skill_result(
         return
     skills = _skill_records_from_pipeline_result(pipeline_result)
     pipeline_run_dir = str(pipeline_result.get("runDir") or "")
+    writer_results = pipeline_result.get("writerResults")
+    suggestions_by_index: dict[int, dict[str, Any]] = {}
+    if isinstance(writer_results, list):
+        for item in writer_results:
+            if not isinstance(item, dict):
+                continue
+            idx = int(item.get("index") or 0)
+            suggestion = item.get("suggestion")
+            if isinstance(suggestion, dict):
+                suggestions_by_index[idx] = suggestion
+    suggestions_payload = _safe_read_json_file(Path(pipeline_run_dir) / "05-skill-suggestions.json") if pipeline_run_dir else None
+    suggestions_list: list[dict[str, Any]] = []
+    if isinstance(suggestions_payload, dict) and isinstance(suggestions_payload.get("skill_suggestions"), list):
+        suggestions_list = [x for x in suggestions_payload.get("skill_suggestions") if isinstance(x, dict)]
+
     for skill in skills:
         skill_path = str(skill.get("skillPath") or "").strip()
         if skill_path:
@@ -669,20 +1619,42 @@ def register_task_skill_result(
                 source="pipeline",
                 pipeline_run_dir=pipeline_run_dir,
             )
+        skill_name = str(skill.get("skillName") or "").strip()
+        suggestion = _pipeline_suggestion_for_skill(pipeline_run_dir, skill_name)
+        if not isinstance(suggestion, dict) and suggestions_list:
+            suggestion = suggestions_list[0]
+        if isinstance(suggestion, dict):
+            created_at = str(skill.get("createdAt") or now_iso())
+            history_entry = _history_entry_from_pipeline_suggestion(
+                suggestion,
+                session_id=session_id,
+                task_id=task_id,
+                task_segment=task_segment,
+                run_dir=pipeline_run_dir,
+                created_at=created_at,
+            )
+            history_entry["skillPath"] = skill_path
+            history_entry["skillName"] = skill_name
+            append_skill_history_entry(skill_path, history_entry)
+
     with _task_switch_lock:
         index = _load_task_skill_index()
         tasks = index.setdefault("tasks", {})
         key = _task_skill_key(session_id, task_id)
         existing = tasks.get(key) if isinstance(tasks.get(key), dict) else {}
         merged_skills = [x for x in existing.get("skills", []) if isinstance(x, dict)]
-        seen = {str(x.get("skillPath") or x.get("skillName") or "") for x in merged_skills}
-        for skill in skills:
-            marker = str(skill.get("skillPath") or skill.get("skillName") or "")
-            if marker and marker in seen:
-                continue
+        by_marker: dict[str, dict[str, Any]] = {}
+        for item in merged_skills:
+            marker = _normalize_skill_path_marker(str(item.get("skillPath") or item.get("skillName") or ""))
             if marker:
-                seen.add(marker)
-            merged_skills.append(skill)
+                by_marker[marker] = item
+        for skill in skills:
+            marker = _normalize_skill_path_marker(str(skill.get("skillPath") or skill.get("skillName") or ""))
+            if marker:
+                by_marker[marker] = {**by_marker.get(marker, {}), **skill}
+            else:
+                merged_skills.append(skill)
+        merged_skills = list(by_marker.values()) if by_marker else merged_skills
         tasks[key] = {
             **existing,
             "sessionId": session_id,
@@ -930,6 +1902,7 @@ def task_skill_detail_response(session_id: str, task_id: str, skill_key: str) ->
         "skillReadError": skill_read_error,
         "provenance": provenance,
         "feedback": feedback_detail,
+        "history": collect_skill_distill_history(str(skill_dir.resolve() if skill_dir.exists() else skill.get("skillPath") or "")),
     }
 
 
@@ -1047,14 +2020,10 @@ def distill_feedback_skill(payload: dict[str, Any]) -> dict[str, Any]:
     skill_md = (
         f"---\nname: {safe_skill}\n"
         f"description: {description}\n---\n\n"
-        f"> generated by feedback distiller session\n\n"
         f"## 能力说明\n\n{description}\n\n"
-        f"## 使用方式\n\n{bullet_lines(triggers, f'当任务与 `{task_id}` 中的反馈模式相似时使用。')}\n\n"
+        f"## 使用方式\n\n{bullet_lines(triggers, '当遇到相似任务场景时使用本 skill。')}\n\n"
         f"## 步骤流程\n\n{bullet_lines(steps)}\n\n"
-        f"## 注意事项 / 约束\n\n{bullet_lines(constraints)}\n\n"
-        f"## 用户反馈\n\n{comment or 'none'}\n\n"
-        f"## 蒸馏依据\n\n{rationale or 'none'}\n\n"
-        f"## 轨迹锚点\n\n```json\n{json.dumps(trace_anchors or selected_anchor, ensure_ascii=False, indent=2)}\n```\n"
+        f"## 注意事项 / 约束\n\n{bullet_lines(constraints)}\n"
     )
     skill_path = target_dir / "SKILL.md"
     skill_path.write_text(skill_md, encoding="utf-8")
@@ -1084,6 +2053,19 @@ def distill_feedback_skill(payload: dict[str, Any]) -> dict[str, Any]:
         "feedbackRunDir": str(run_dir),
         "distillerSessionID": str(((llm_out.get("session") or {}).get("id") or "")),
     }
+    history_entry = _history_entry_from_feedback_analysis(
+        analysis,
+        session_id=session_id,
+        task_id=task_id,
+        task_segment=task_segment,
+        run_dir=str(run_dir),
+        created_at=str(skill_record["createdAt"]),
+        user_comment=comment,
+        feedback_context=feedback_context,
+    )
+    history_entry["skillPath"] = str(target_dir.resolve())
+    history_entry["skillName"] = safe_skill
+    append_skill_history_entry(str(target_dir.resolve()), history_entry)
     with _task_switch_lock:
         index = _load_task_skill_index()
         tasks = index.setdefault("tasks", {})
@@ -2025,6 +3007,7 @@ def process_user_prompt_task_switch(
                     "runDir": str(switch_run_dir),
                     "decision": in_flight_decision,
                 },
+                directory_override=directory_override,
             )
         if not pending_turns:
             sessions[session_key] = {
@@ -2058,6 +3041,7 @@ def process_user_prompt_task_switch(
                 current_turn,
                 [],
                 {"runDir": str(switch_run_dir), "decision": None},
+                directory_override=directory_override,
             )
 
         sessions[session_key] = {
@@ -2240,6 +3224,26 @@ def _run_user_prompt_task_switch_worker(
             "statePath": str(TASK_SWITCH_STATE_PATH),
         },
     )
+    prev_brief = _task_brief_from_decision(decision, "previous")
+    curr_brief = _task_brief_from_decision(decision, "current")
+    extracted_segment = _task_segment_summary(
+        previous_task_turns,
+        title=prev_brief.get("title"),
+        description=prev_brief.get("description"),
+    )
+    pending_segment = _task_segment_summary(
+        [current_turn],
+        title=curr_brief.get("title"),
+        description=curr_brief.get("description"),
+    )
+    _persist_task_segments(
+        session_id,
+        directory_override,
+        extracted_task=extracted_segment if extracted_segment.get("taskId") else None,
+        pending_task=pending_segment if pending_segment.get("taskId") else None,
+        task_switched=True,
+        task_switch_run_dir=str(switch_run_dir),
+    )
 
     threading.Thread(
         target=_complete_task_switch_extraction,
@@ -2354,6 +3358,7 @@ def process_reference_ingest_with_task_switch(
                 current_turn,
                 pending_turns,
                 {"runDir": str(switch_run_dir), "decision": None},
+                directory_override=directory_override,
             ))
         in_flight_turn = session_state.get("inFlightTurn") if isinstance(session_state, dict) else None
         if isinstance(in_flight_turn, dict) and _same_user_prompt(
@@ -2396,6 +3401,7 @@ def process_reference_ingest_with_task_switch(
                             "mode": early_switch.get("mode") if isinstance(early_switch, dict) else None,
                             "decision": None,
                         },
+                        directory_override=directory_override,
                     ))
 
                 sessions[session_key] = {
@@ -2433,6 +3439,7 @@ def process_reference_ingest_with_task_switch(
                         "mode": early_switch.get("mode") if isinstance(early_switch, dict) else None,
                         "decision": None,
                     },
+                    directory_override=directory_override,
                 ))
 
             early_decision = early_switch.get("decision") if isinstance(early_switch, dict) and isinstance(early_switch.get("decision"), dict) else {}
@@ -2490,6 +3497,8 @@ def process_reference_ingest_with_task_switch(
                     "mode": early_switch.get("mode") if isinstance(early_switch, dict) else None,
                     "decision": early_decision,
                 },
+                directory_override=directory_override,
+                task_switched=task_switched,
                 extracted_turns=extracted_turns if task_switched else None,
                 extracted_brief=_task_brief_from_decision(early_decision, "previous") if task_switched else None,
                 pending_brief=_task_brief_from_decision(early_decision, "current"),
@@ -2519,6 +3528,7 @@ def process_reference_ingest_with_task_switch(
                 current_turn,
                 next_pending,
                 {"runDir": str(switch_run_dir), "decision": None},
+                directory_override=directory_override,
             ))
 
         # Turn completed without a matching in-flight prompt (e.g. page reload). Append only — never re-judge.
@@ -2550,6 +3560,7 @@ def process_reference_ingest_with_task_switch(
             current_turn,
             next_pending,
             {"runDir": str(switch_run_dir), "decision": None},
+            directory_override=directory_override,
         ))
 
 
@@ -3544,6 +4555,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, panel_analysis_for_session(session_id))
             return
+        if parsed.path == "/task-segments":
+            qs = parse_qs(parsed.query)
+            session_id = str((qs.get("sessionId") or [""])[0]).strip()
+            if not session_id:
+                self._send_json(400, {"ok": False, "error": "sessionId is required"})
+                return
+            self._send_json(200, task_segments_for_session(session_id))
+            return
         self._send_json(404, {"ok": False, "error": "Not found"})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -3551,6 +4570,15 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 result = distill_feedback_skill(body)
+                self._send_json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        if self.path == "/task-skill-save":
+            try:
+                body = self._read_json()
+                result = save_task_skill_md(body if isinstance(body, dict) else {})
                 self._send_json(200 if result.get("ok") else 400, result)
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})

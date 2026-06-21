@@ -91,6 +91,20 @@ export interface MemoryWorkerTaskSegment {
   nextPendingEndAssistantMessageId?: string
 }
 
+export interface MemoryWorkerTaskSegmentTab extends MemoryWorkerTaskSegment {
+  status: 'pending' | 'extracted'
+  taskSwitchRunDir?: string
+  pipelineRunDir?: string
+}
+
+export interface MemoryWorkerTaskSegmentBatch {
+  ok: boolean
+  sessionId: string
+  count: number
+  tabs: MemoryWorkerTaskSegmentTab[]
+  error?: string
+}
+
 export interface TaskSkillRecord {
   skillName: string
   skillPath: string
@@ -99,6 +113,33 @@ export interface TaskSkillRecord {
   rationale?: string
   createdAt?: string
   feedbackRunDir?: string
+}
+
+export interface SkillDistillChange {
+  path: string
+  operation: string
+  reason?: string
+  summary?: string
+}
+
+export interface SkillDistillHistoryEntry {
+  id: string
+  source: 'pipeline' | 'feedback_distill' | 'manual_edit' | string
+  channel: 'task_switch' | 'feedback' | 'manual' | string
+  operation: string
+  rationale?: string
+  summary?: string
+  changes?: SkillDistillChange[]
+  traceAnchors?: Array<Record<string, unknown>>
+  createdAt?: string
+  sessionId?: string
+  taskId?: string
+  taskLabel?: string
+  runDir?: string
+  userComment?: string
+  feedbackContext?: Record<string, unknown>
+  skillName?: string
+  skillPath?: string
 }
 
 export interface TaskSkillsResult {
@@ -128,6 +169,23 @@ export interface TaskSkillDetailResult {
     result?: unknown
     error?: string
   }
+  history?: SkillDistillHistoryEntry[]
+  error?: string
+}
+
+export interface SaveTaskSkillMdRequest {
+  skillPath: string
+  content: string
+  sessionId?: string
+  taskId?: string
+}
+
+export interface SaveTaskSkillMdResult {
+  ok: boolean
+  skillMd?: string
+  skillMdPath?: string
+  skillName?: string
+  historyEntry?: SkillDistillHistoryEntry
   error?: string
 }
 
@@ -252,6 +310,18 @@ export async function fetchPanelAnalysisForSession(
   return parseMemoryWorkerJson<MemoryWorkerErrorDiagnosisBatch>(text, '/panel-analysis')
 }
 
+export async function fetchTaskSegmentsForSession(
+  sessionId: string,
+): Promise<MemoryWorkerTaskSegmentBatch> {
+  const qs = new URLSearchParams({ sessionId })
+  const res = await fetch(`${BASE}/task-segments?${qs.toString()}`)
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`memory-worker /task-segments failed: ${res.status} ${text}`)
+  }
+  return parseMemoryWorkerJson<MemoryWorkerTaskSegmentBatch>(text, '/task-segments')
+}
+
 export async function fetchTaskSkillDetail(
   sessionId: string,
   taskId: string,
@@ -264,6 +334,19 @@ export async function fetchTaskSkillDetail(
     throw new Error(`memory-worker /task-skill-detail failed: ${res.status} ${text}`)
   }
   return parseMemoryWorkerJson<TaskSkillDetailResult>(text, '/task-skill-detail')
+}
+
+export async function saveTaskSkillMd(req: SaveTaskSkillMdRequest): Promise<SaveTaskSkillMdResult> {
+  const res = await fetch(`${BASE}/task-skill-save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`memory-worker /task-skill-save failed: ${res.status} ${text}`)
+  }
+  return parseMemoryWorkerJson<SaveTaskSkillMdResult>(text, '/task-skill-save')
 }
 
 export async function distillTaskFeedback(req: FeedbackDistillRequest): Promise<TaskSkillsResult & { runDir?: string; skill?: TaskSkillRecord }> {

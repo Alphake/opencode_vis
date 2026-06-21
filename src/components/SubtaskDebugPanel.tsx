@@ -17,7 +17,9 @@ import {
   distillTaskFeedback,
   fetchTaskSkillDetail,
   fetchTaskSkills,
+  saveTaskSkillMd,
   type MemoryWorkerErrorDiagnosis,
+  type SkillDistillHistoryEntry,
   type TaskSkillDetailResult,
   type TaskSkillRecord,
 } from '../services/memoryWorkerApi'
@@ -66,6 +68,62 @@ function firstUserMessageIndex(subtask: AssistantSubtask): number | null {
   const indices = subtask.userMessageIndices ?? []
   if (indices.length === 0) return null
   return Math.min(...indices)
+}
+
+function distillChannelLabel(channel: string | undefined, source: string | undefined): string {
+  if (channel === 'feedback' || source === 'feedback_distill') return '用户 Feedback'
+  if (channel === 'manual' || source === 'manual_edit') return '手动编辑'
+  return '任务切换 · Pipeline'
+}
+
+function operationBadgeStyle(operation: string | undefined): { bg: string; color: string; border: string } {
+  const op = String(operation || 'UPDATE').toUpperCase()
+  if (op === 'CREATE') return { bg: '#ECFDF3', color: '#027A48', border: '#ABEFC6' }
+  if (op === 'DELETE') return { bg: '#FEF3F2', color: '#B42318', border: '#FECDCA' }
+  if (op === 'NONE') return { bg: '#F2F4F7', color: '#475467', border: '#E4E7EC' }
+  if (op === 'MANUAL_EDIT') return { bg: '#F4F3FF', color: '#5925DC', border: '#D9D6FE' }
+  return { bg: '#EFF8FF', color: '#175CD3', border: '#B2DDFF' }
+}
+
+function formatHistoryTimestamp(value: string | undefined): string {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function _truncateDisplayText(text: string, maxLen: number): string {
+  const clean = text.trim()
+  if (clean.length <= maxLen) return clean
+  return `${clean.slice(0, maxLen - 1).trimEnd()}…`
+}
+
+function extractHistoryAnchorIndex(entry: SkillDistillHistoryEntry): number | null {
+  const anchors = entry.traceAnchors ?? []
+  for (const anchor of anchors) {
+    if (typeof anchor.subtaskIndex === 'number') return anchor.subtaskIndex
+    if (typeof anchor.panelIndex === 'number') return anchor.panelIndex
+  }
+  return null
+}
+
+function extractHistoryQuotes(entry: SkillDistillHistoryEntry): string[] {
+  const quotes: string[] = []
+  for (const anchor of entry.traceAnchors ?? []) {
+    const quote = anchor.quote_or_summary ?? anchor.summary
+    if (typeof quote === 'string' && quote.trim()) quotes.push(quote.trim())
+  }
+  if (quotes.length === 0 && entry.userComment?.trim()) {
+    quotes.push(entry.userComment.trim())
+  }
+  return quotes.slice(0, 2)
+}
+
+function historyEntryBodyText(entry: SkillDistillHistoryEntry): string {
+  const rationale = entry.rationale?.trim() || ''
+  const summary = entry.summary?.trim() || ''
+  if (rationale && summary && rationale !== summary) return rationale
+  return rationale || summary || 'Skill 变更记录'
 }
 
 interface SubtaskDebugPanelProps {
@@ -128,6 +186,11 @@ export default function SubtaskDebugPanel({
   const [selectedSkillDetail, setSelectedSkillDetail] = useState<TaskSkillDetailResult | null>(null)
   const [skillDetailLoading, setSkillDetailLoading] = useState(false)
   const [skillDetailError, setSkillDetailError] = useState('')
+  const [skillMdDraft, setSkillMdDraft] = useState('')
+  const [skillMdEditing, setSkillMdEditing] = useState(false)
+  const [skillMdDirty, setSkillMdDirty] = useState(false)
+  const [skillMdSaving, setSkillMdSaving] = useState(false)
+  const [skillMdSaveError, setSkillMdSaveError] = useState('')
   const [copiedSkillPath, setCopiedSkillPath] = useState(false)
   const [selectedFeedbackSubtaskIndices, setSelectedFeedbackSubtaskIndices] = useState<number[]>([])
   const [panelFeedbackByIndex, setPanelFeedbackByIndex] = useState<Record<number, string>>({})
@@ -163,17 +226,16 @@ export default function SubtaskDebugPanel({
   const canShowSkillDock = Boolean(
     activeDisplayTask && (activeDisplayTask.turnCount > 0 || visibleSubtasks.length > 0),
   )
-  const activeTaskTitle = useMemo(() => activeDisplayTask?.title?.trim() || '', [activeDisplayTask])
-  const activeTaskDescription = useMemo(() => {
-    if (activeDisplayTask?.description?.trim()) return activeDisplayTask.description.trim()
-    if (activeDisplayTask?.summary?.trim() && !activeDisplayTask?.title?.trim()) {
-      return activeDisplayTask.summary.trim()
-    }
+  const activeTaskTitle = useMemo(() => {
+    if (activeDisplayTask?.title?.trim()) return activeDisplayTask.title.trim()
     const startId = activeDisplayTask?.fromStartUserMessageId
     if (!startId) return ''
     const message = messages.find((m) => m.info.id === startId)
-    return summarizeTaskText(userMessageText(message))
+    return summarizeTaskText(userMessageText(message), 80)
   }, [activeDisplayTask, messages])
+  const activeTaskDescription = useMemo(() => {
+    return activeDisplayTask?.description?.trim() || ''
+  }, [activeDisplayTask])
   const showTaskBrief = Boolean(activeTaskTitle || activeTaskDescription)
 
   useEffect(() => {
@@ -651,15 +713,6 @@ export default function SubtaskDebugPanel({
     setDraftPanelFeedback('')
   }
 
-  const formatDetailJson = (value: unknown) => {
-    if (value == null || value === '') return '—'
-    if (typeof value === 'string') return value
-    try {
-      return JSON.stringify(value, null, 2)
-    } catch {
-      return String(value)
-    }
-  }
 
   const openSkillDetail = (skill: TaskSkillRecord) => {
     if (!sessionId || !activeTaskId) return
@@ -667,6 +720,10 @@ export default function SubtaskDebugPanel({
     setSelectedSkillRecord(skill)
     setSelectedSkillDetail(null)
     setSkillDetailError('')
+    setSkillMdDraft('')
+    setSkillMdEditing(false)
+    setSkillMdDirty(false)
+    setSkillMdSaveError('')
     setCopiedSkillPath(false)
     if (!skillKey) {
       setSkillDetailError('Skill record is missing a readable key.')
@@ -676,6 +733,7 @@ export default function SubtaskDebugPanel({
     void fetchTaskSkillDetail(sessionId, activeTaskId, skillKey)
       .then((result) => {
         setSelectedSkillDetail(result)
+        setSkillMdDraft(result.skillMd || '')
         setSkillDetailError(result.skillReadError || '')
       })
       .catch((err: unknown) => {
@@ -690,7 +748,70 @@ export default function SubtaskDebugPanel({
     setSelectedSkillRecord(null)
     setSelectedSkillDetail(null)
     setSkillDetailError('')
+    setSkillMdDraft('')
+    setSkillMdEditing(false)
+    setSkillMdDirty(false)
+    setSkillMdSaveError('')
     setCopiedSkillPath(false)
+  }
+
+  const enterSkillMdEdit = () => {
+    if (skillDetailLoading) return
+    setSkillMdDraft(selectedSkillDetail?.skillMd || '')
+    setSkillMdEditing(true)
+    setSkillMdDirty(false)
+    setSkillMdSaveError('')
+  }
+
+  const cancelSkillMdEdit = () => {
+    setSkillMdDraft(selectedSkillDetail?.skillMd || '')
+    setSkillMdEditing(false)
+    setSkillMdDirty(false)
+    setSkillMdSaveError('')
+  }
+
+  const saveSkillMdDraft = () => {
+    const skillPath = selectedSkillRecord?.skillPath || ''
+    const skillKey =
+      selectedSkillRecord?.skillPath ||
+      selectedSkillRecord?.skillName ||
+      selectedSkillRecord?.feedbackRunDir ||
+      ''
+    if (!skillPath || !skillMdDraft.trim() || !sessionId || !activeTaskId || !skillKey) return
+    setSkillMdSaving(true)
+    setSkillMdSaveError('')
+    void saveTaskSkillMd({
+      skillPath,
+      content: skillMdDraft,
+      sessionId,
+      taskId: activeTaskId,
+    })
+      .then(() =>
+        fetchTaskSkillDetail(sessionId, activeTaskId, skillKey).then((result) => {
+          setSelectedSkillDetail(result)
+          setSkillMdDraft(result.skillMd || skillMdDraft)
+          setSkillMdEditing(false)
+          setSkillMdDirty(false)
+          setSkillDetailError(result.skillReadError || '')
+        }),
+      )
+      .catch((err: unknown) => {
+        setSkillMdSaveError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        setSkillMdSaving(false)
+      })
+  }
+
+  const navigateFromSkillHistory = (entry: SkillDistillHistoryEntry) => {
+    if (entry.taskId && entry.taskId !== activeTaskId) {
+      onSelectTaskTab?.(entry.taskId)
+    }
+    const anchorIndex = extractHistoryAnchorIndex(entry)
+    if (anchorIndex !== null) {
+      window.setTimeout(() => onSelectSubtask(anchorIndex), entry.taskId && entry.taskId !== activeTaskId ? 120 : 0)
+    }
+    closeSkillDetail()
   }
 
   const copySelectedSkillPath = () => {
@@ -702,16 +823,9 @@ export default function SubtaskDebugPanel({
     })
   }
 
-  const detailRequest = selectedSkillDetail?.feedback?.request as
-    | {
-        comment?: unknown
-        feedbackContext?: unknown
-        selectedAnchor?: unknown
-        taskSegment?: unknown
-      }
-    | null
-    | undefined
-  const detailAnalysis = selectedSkillDetail?.feedback?.analysis ?? selectedSkillDetail?.feedback?.result
+  const distillHistory = selectedSkillDetail?.history ?? []
+  const skillMdSectionHeight =
+    !skillDetailLoading && distillHistory.length > 0 ? 'min(460px, 52vh)' : 'min(580px, 70vh)'
 
   return (
     <div
@@ -790,7 +904,7 @@ export default function SubtaskDebugPanel({
                       ? 'Task 1 live view from current OpenCode messages'
                       : [
                           tab.title?.trim() || null,
-                          tab.description?.trim() || tab.summary?.trim() || null,
+                          tab.description?.trim() || null,
                           `${tab.status === 'pending' ? 'Latest task' : 'Older extracted task'} · ${tab.turnCount} turn${tab.turnCount === 1 ? '' : 's'}`,
                         ]
                           .filter(Boolean)
@@ -996,14 +1110,13 @@ export default function SubtaskDebugPanel({
             flexShrink: 0,
             marginTop: 8,
             border: '1px solid #D8DEE8',
-            borderBottom: 'none',
-            borderRadius: '12px 12px 0 0',
+            borderRadius: 8,
             background: '#FBFCFE',
             padding: 10,
             display: 'flex',
             flexDirection: 'column',
             gap: 7,
-            boxShadow: '0 -6px 18px rgba(15, 23, 42, 0.05)',
+            boxShadow: '0 1px 3px rgba(15, 23, 42, 0.06)',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexShrink: 0 }}>
@@ -1522,7 +1635,7 @@ export default function SubtaskDebugPanel({
                   {selectedSkillDetail?.skillMdPath || selectedSkillRecord.skillPath || 'Loading path...'}
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 8, flex: '0 0 auto' }}>
+              <div style={{ display: 'flex', gap: 8, flex: '0 0 auto', alignItems: 'center' }}>
                 <button
                   type="button"
                   onClick={copySelectedSkillPath}
@@ -1568,8 +1681,8 @@ export default function SubtaskDebugPanel({
               style={{
                 padding: 14,
                 overflow: 'auto',
-                display: 'grid',
-                gridTemplateColumns: 'minmax(0, 1.1fr) minmax(280px, 0.9fr)',
+                display: 'flex',
+                flexDirection: 'column',
                 gap: 12,
               }}
             >
@@ -1580,140 +1693,353 @@ export default function SubtaskDebugPanel({
                   borderRadius: 12,
                   background: '#FCFCFD',
                   overflow: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  flex: '0 0 auto',
+                  height: skillMdSectionHeight,
+                  minHeight: skillMdSectionHeight,
+                  maxHeight: skillMdSectionHeight,
                 }}
               >
                 <div
                   style={{
                     padding: '8px 10px',
                     borderBottom: '1px solid #EAECF0',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    color: '#1F2937',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
                   }}
                 >
-                  SKILL.md
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>SKILL.md</div>
+                    {skillMdEditing ? (
+                      <span style={{ fontSize: 9, color: '#185EA8', fontWeight: 700 }}>编辑中</span>
+                    ) : null}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flex: '0 0 auto', alignItems: 'center' }}>
+                    {skillMdEditing ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={cancelSkillMdEdit}
+                          disabled={skillMdSaving}
+                          style={{
+                            border: '1px solid #E5E7EB',
+                            borderRadius: 7,
+                            background: '#FFFFFF',
+                            color: '#4B5563',
+                            padding: '4px 8px',
+                            fontSize: 10,
+                            cursor: skillMdSaving ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          onClick={saveSkillMdDraft}
+                          disabled={skillMdSaving || skillDetailLoading || !skillMdDraft.trim() || !skillMdDirty}
+                          style={{
+                            border: '1px solid #7EB3F5',
+                            borderRadius: 7,
+                            background:
+                              skillMdSaving || skillDetailLoading || !skillMdDraft.trim() || !skillMdDirty
+                                ? '#EAF4FF'
+                                : '#185EA8',
+                            color:
+                              skillMdSaving || skillDetailLoading || !skillMdDraft.trim() || !skillMdDirty
+                                ? '#98A2B3'
+                                : '#FFFFFF',
+                            padding: '4px 10px',
+                            fontSize: 10,
+                            fontWeight: 700,
+                            cursor:
+                              skillMdSaving || skillDetailLoading || !skillMdDraft.trim() || !skillMdDirty
+                                ? 'not-allowed'
+                                : 'pointer',
+                          }}
+                        >
+                          {skillMdSaving ? '保存中…' : '保存'}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={enterSkillMdEdit}
+                        disabled={skillDetailLoading || Boolean(skillDetailError && !selectedSkillDetail?.skillMd)}
+                        style={{
+                          border: '1px solid #7EB3F5',
+                          borderRadius: 7,
+                          background: '#EAF4FF',
+                          color: '#185EA8',
+                          padding: '4px 10px',
+                          fontSize: 10,
+                          fontWeight: 700,
+                          cursor:
+                            skillDetailLoading || Boolean(skillDetailError && !selectedSkillDetail?.skillMd)
+                              ? 'not-allowed'
+                              : 'pointer',
+                        }}
+                      >
+                        编辑
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <pre
-                  style={{
-                    margin: 0,
-                    padding: 12,
-                    minHeight: 360,
-                    maxHeight: 540,
-                    overflow: 'auto',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    fontSize: 11,
-                    lineHeight: 1.55,
-                    color: '#111827',
-                    background: '#FFFFFF',
-                  }}
-                >
-                  {skillDetailLoading
-                    ? 'Loading SKILL.md...'
-                    : selectedSkillDetail?.skillMd || skillDetailError || 'No SKILL.md content.'}
-                </pre>
+                {skillDetailLoading ? (
+                  <div style={{ padding: 12, fontSize: 11, color: '#667085', flex: 1 }}>Loading SKILL.md...</div>
+                ) : (
+                  <div
+                    style={{
+                      flex: 1,
+                      minHeight: 0,
+                      margin: 8,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {skillMdEditing ? (
+                      <textarea
+                        value={skillMdDraft}
+                        onChange={(e) => {
+                          setSkillMdDraft(e.target.value)
+                          setSkillMdDirty(e.target.value !== (selectedSkillDetail?.skillMd || ''))
+                          setSkillMdSaveError('')
+                        }}
+                        autoFocus
+                        spellCheck={false}
+                        style={{
+                          margin: 0,
+                          padding: 12,
+                          flex: 1,
+                          minHeight: 0,
+                          width: '100%',
+                          boxSizing: 'border-box',
+                          resize: 'none',
+                          overflow: 'auto',
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          fontSize: 11,
+                          lineHeight: 1.55,
+                          color: '#111827',
+                          background: '#FFFFFF',
+                          border: '2px solid #7EB3F5',
+                          borderRadius: 10,
+                          outline: 'none',
+                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                        }}
+                      />
+                    ) : (
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={enterSkillMdEdit}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            enterSkillMdEdit()
+                          }
+                        }}
+                        title="点击编辑 SKILL.md"
+                        style={{
+                          flex: 1,
+                          minHeight: 0,
+                          overflow: 'auto',
+                          borderRadius: 10,
+                          border: '1px dashed #CBD5E1',
+                          background: '#FFFFFF',
+                          cursor: skillDetailError && !selectedSkillDetail?.skillMd ? 'not-allowed' : 'pointer',
+                          transition: 'border-color 120ms ease, box-shadow 120ms ease',
+                        }}
+                        onMouseEnter={(e) => {
+                          if (skillDetailError && !selectedSkillDetail?.skillMd) return
+                          e.currentTarget.style.borderColor = '#7EB3F5'
+                          e.currentTarget.style.boxShadow = 'inset 0 0 0 1px #B2DDFF'
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = '#CBD5E1'
+                          e.currentTarget.style.boxShadow = 'none'
+                        }}
+                      >
+                        <pre
+                          style={{
+                            margin: 0,
+                            padding: 12,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontSize: 11,
+                            lineHeight: 1.55,
+                            color: '#111827',
+                            background: 'transparent',
+                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                          }}
+                        >
+                          {selectedSkillDetail?.skillMd || skillDetailError || 'No SKILL.md content.'}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {skillDetailError ? (
+                  <div style={{ padding: '0 12px 10px', fontSize: 10, color: '#B42318' }}>{skillDetailError}</div>
+                ) : null}
+                {skillMdSaveError ? (
+                  <div style={{ padding: '0 12px 10px', fontSize: 10, color: '#B42318' }}>{skillMdSaveError}</div>
+                ) : null}
               </section>
 
-              <section style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div
-                  style={{
-                    border: '1px solid #EAECF0',
-                    borderRadius: 12,
-                    background: '#FFFFFF',
-                    padding: 10,
-                  }}
-                >
-                  <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>
-                    Distill history
-                  </div>
-                  <div style={{ marginTop: 6, fontSize: 10, color: '#667085', lineHeight: 1.45 }}>
-                    {selectedSkillRecord.feedbackRunDir
-                      ? selectedSkillRecord.feedbackRunDir
-                      : 'No feedback run directory.'}
-                  </div>
-                  {skillDetailError ? (
-                    <div style={{ marginTop: 8, fontSize: 10, color: '#B42318', lineHeight: 1.45 }}>
-                      {skillDetailError}
-                    </div>
-                  ) : null}
+              {!skillDetailLoading && distillHistory.length > 0 ? (
+              <section
+                style={{
+                  minWidth: 0,
+                  border: '1px solid #EAECF0',
+                  borderRadius: 12,
+                  background: '#FFFFFF',
+                  padding: 10,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                  flex: '0 0 auto',
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>Distill 历史</div>
                 </div>
 
-                <div
-                  style={{
-                    border: '1px solid #EAECF0',
-                    borderRadius: 12,
-                    background: '#F9FAFB',
-                    padding: 10,
-                  }}
-                >
-                  <div style={{ fontSize: 10, fontWeight: 800, color: '#344054' }}>Overall feedback</div>
-                  <pre
+                  <div
                     style={{
-                      margin: '6px 0 0',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      fontSize: 10,
-                      lineHeight: 1.5,
-                      color: '#475467',
-                      fontFamily: 'inherit',
+                      display: 'flex',
+                      gap: 8,
+                      overflowX: 'auto',
+                      paddingBottom: 2,
                     }}
                   >
-                    {formatDetailJson(detailRequest?.comment)}
-                  </pre>
-                </div>
+                    {distillHistory.map((entry, index) => {
+                      const badge = operationBadgeStyle(entry.operation)
+                      const quotes = extractHistoryQuotes(entry)
+                      const anchorIndex = extractHistoryAnchorIndex(entry)
+                      const canNavigate = Boolean(entry.taskId) || anchorIndex !== null
+                      const bodyText = historyEntryBodyText(entry)
+                      const panelFeedback = Array.isArray(entry.feedbackContext?.selectedPanels)
+                        ? (entry.feedbackContext?.selectedPanels as Array<{ comment?: string; sourceIndex?: number }>)
+                        : []
+                      const panelComments = panelFeedback
+                        .map((panel, panelIndex) => {
+                          const label = `Panel #${typeof panel.sourceIndex === 'number' ? panel.sourceIndex + 1 : panelIndex + 1}`
+                          return panel.comment ? `${label}: ${panel.comment}` : label
+                        })
+                        .slice(0, 2)
+                      return (
+                        <div
+                          key={entry.id || `${entry.createdAt}-${index}`}
+                          style={{
+                            flex: '0 0 280px',
+                            border: '1px solid #EAECF0',
+                            borderRadius: 10,
+                            background: '#FCFCFD',
+                            padding: 10,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 6,
+                            minHeight: 120,
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                              <span
+                                style={{
+                                  fontSize: 9,
+                                  fontWeight: 800,
+                                  color: badge.color,
+                                  background: badge.bg,
+                                  border: `1px solid ${badge.border}`,
+                                  borderRadius: 999,
+                                  padding: '1px 7px',
+                                }}
+                              >
+                                {String(entry.operation || 'UPDATE').toUpperCase()}
+                              </span>
+                              <span style={{ fontSize: 9, color: '#475467' }}>
+                                {distillChannelLabel(entry.channel, entry.source)}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: 9, color: '#98A2B3', whiteSpace: 'nowrap' }}>
+                              {formatHistoryTimestamp(entry.createdAt)}
+                            </span>
+                          </div>
 
-                <div
-                  style={{
-                    border: '1px solid #EAECF0',
-                    borderRadius: 12,
-                    background: '#F9FAFB',
-                    padding: 10,
-                  }}
-                >
-                  <div style={{ fontSize: 10, fontWeight: 800, color: '#344054' }}>
-                    Selected trace / context
+                          <div style={{ fontSize: 10, color: '#111827', lineHeight: 1.5, flex: 1 }}>
+                            {bodyText}
+                          </div>
+
+                          {entry.taskLabel ? (
+                            <div style={{ fontSize: 9, color: '#667085' }}>任务：{entry.taskLabel}</div>
+                          ) : null}
+
+                          {entry.channel === 'feedback' && entry.userComment?.trim() ? (
+                            <div
+                              style={{
+                                fontSize: 9,
+                                color: '#92400E',
+                                lineHeight: 1.45,
+                                padding: '5px 7px',
+                                borderRadius: 7,
+                                background: '#FFFAEB',
+                                border: '1px solid #FEDF89',
+                              }}
+                            >
+                              用户说：{entry.userComment.trim()}
+                            </div>
+                          ) : null}
+
+                          {panelComments.length > 0 ? (
+                            <div style={{ fontSize: 9, color: '#475467', lineHeight: 1.45 }}>
+                              {panelComments.join(' · ')}
+                            </div>
+                          ) : null}
+
+                          {quotes.length > 0 && entry.channel !== 'feedback' ? (
+                            <div style={{ fontSize: 9, color: '#667085', lineHeight: 1.45 }}>
+                              「{_truncateDisplayText(quotes[0], 120)}」
+                            </div>
+                          ) : null}
+
+                          {(entry.changes ?? []).length > 0 && entry.channel === 'task_switch' ? (
+                            <div style={{ fontSize: 9, color: '#667085', lineHeight: 1.45 }}>
+                              改动：{(entry.changes ?? [])
+                                .slice(0, 2)
+                                .map((change) => change.path)
+                                .join('、')}
+                            </div>
+                          ) : null}
+
+                          {canNavigate ? (
+                            <button
+                              type="button"
+                              onClick={() => navigateFromSkillHistory(entry)}
+                              style={{
+                                alignSelf: 'flex-start',
+                                border: '1px solid #CBD5E1',
+                                borderRadius: 8,
+                                background: '#FFFFFF',
+                                color: '#344054',
+                                padding: '3px 8px',
+                                fontSize: 9,
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {anchorIndex !== null ? `查看 Panel #${anchorIndex + 1}` : '查看来源 Task'}
+                            </button>
+                          ) : null}
+                        </div>
+                      )
+                    })}
                   </div>
-                  <pre
-                    style={{
-                      margin: '6px 0 0',
-                      maxHeight: 180,
-                      overflow: 'auto',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      fontSize: 10,
-                      lineHeight: 1.45,
-                      color: '#475467',
-                    }}
-                  >
-                    {formatDetailJson(detailRequest?.feedbackContext ?? detailRequest?.selectedAnchor)}
-                  </pre>
-                </div>
-
-                <div
-                  style={{
-                    border: '1px solid #EAECF0',
-                    borderRadius: 12,
-                    background: '#F9FAFB',
-                    padding: 10,
-                  }}
-                >
-                  <div style={{ fontSize: 10, fontWeight: 800, color: '#344054' }}>Distill result</div>
-                  <pre
-                    style={{
-                      margin: '6px 0 0',
-                      maxHeight: 220,
-                      overflow: 'auto',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      fontSize: 10,
-                      lineHeight: 1.45,
-                      color: '#475467',
-                    }}
-                  >
-                    {skillDetailLoading ? 'Loading history...' : formatDetailJson(detailAnalysis)}
-                  </pre>
-                </div>
               </section>
+              ) : null}
             </div>
           </div>
         </div>

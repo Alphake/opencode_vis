@@ -93,6 +93,29 @@
 
 **只输出一个 JSON array**。不要 Markdown 说明、不要代码块包裹。
 
+### JSON 输出硬性约束（必须遵守）
+
+1. **只输出纯 JSON 数组**，首字符 `[`，末字符 `]`；不要任何前后说明。
+2. **禁止** Markdown 代码围栏（不要 \`\`\`json）。
+3. string 内引号必须 `\"` 转义或使用中文书名号/单引号；**禁止**未转义的 ASCII 双引号 `"`。
+4. 即使全部 `NONE`，也至少输出一个元素的 array。
+
+### 合法输出示例（结构示意，仅一条元素）
+
+```json
+[
+  {
+    "subtask_ref": { "index": 0, "title": "调研插件存储", "scope": "subtask" },
+    "operation": "CREATE",
+    "skill_name": "agent-plugin-storage-survey",
+    "source_skill_absolute_path": "",
+    "rationale": "用户要求调研 plugin 数据存储方案，步骤可复用",
+    "file_guidance": [],
+    "trace_anchors": [{ "turn_ref": "turn-0", "quote_or_summary": "用户原话摘要" }]
+  }
+]
+```
+
 数组每个元素 = 一个 skill 建议：
 
 ```json

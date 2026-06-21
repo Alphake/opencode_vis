@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { SHOW_COMPOSER_MODEL_UI } from '../config/featureFlags'
-import { COMPOSER_MODEL_DOM_ID } from '../config/storageKeys'
+import { COMPOSER_MODEL_DOM_ID, MAIN_COLUMN_BOTTOM_INSET_PX } from '../config/storageKeys'
 import type { OcComposerModelOption } from '../services/opencodeApi'
 import { prepareOutgoingFromFiles } from '../utils/messageAttachments'
 
@@ -47,7 +47,6 @@ export default function MessageInput({
   composerModelOptions = [],
   composerModelsLoading = false,
   composerModelsError = null,
-  envBootstrapModel = null,
 }: MessageInputProps) {
   const [text, setText] = useState('')
   const [files, setFiles] = useState<File[]>([])
@@ -68,14 +67,19 @@ export default function MessageInput({
     (text.trim().length > 0 || files.length > 0) && !sending && !disabled
   const canAbort = Boolean(isRunning && onAbort && !aborting && !disabled)
 
-  const nextSendModelHint = useMemo(() => {
-    if (!SHOW_COMPOSER_MODEL_UI) return ''
-    const picked = composerModelRef.trim()
-    if (picked) return picked
-    const env = (envBootstrapModel && envBootstrapModel.trim()) || ''
-    if (env) return `${env}（VITE_OPENCODE_DEFAULT_MODEL）`
-    return 'OpenCode 服务端默认'
-  }, [composerModelRef, envBootstrapModel])
+  const groupedModelOptions = useMemo(() => {
+    const groups = new Map<string, { providerName: string; options: OcComposerModelOption[] }>()
+    for (const option of composerModelOptions) {
+      const pid = option.providerId || option.ref.split('/')[0] || 'other'
+      const existing = groups.get(pid)
+      if (existing) {
+        existing.options.push(option)
+      } else {
+        groups.set(pid, { providerName: option.providerName || pid, options: [option] })
+      }
+    }
+    return [...groups.values()]
+  }, [composerModelOptions])
 
   const handleSend = async () => {
     if (!canSend) return
@@ -134,64 +138,12 @@ export default function MessageInput({
   }
 
   return (
-    <div style={{ padding: '10px 16px 0' }}>
-      {SHOW_COMPOSER_MODEL_UI && (
-        <div
-          style={{
-            marginBottom: 8,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 4,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label htmlFor={COMPOSER_MODEL_DOM_ID} style={{ fontSize: 11, color: '#666', flexShrink: 0 }}>
-              模型
-            </label>
-            <select
-              id={COMPOSER_MODEL_DOM_ID}
-              value={composerModelRef.trim() ? composerModelRef.trim() : ''}
-              onChange={(e) => onComposerModelRefChange?.(e.target.value)}
-              disabled={disabled || !onComposerModelRefChange || composerModelsLoading}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                fontSize: 11,
-                padding: '6px 8px',
-                borderRadius: 6,
-                border: '1px solid #E8E8E8',
-                background: '#FFFFFF',
-                color: '#333',
-              }}
-            >
-              <option value="">默认（不在请求里指定 model）</option>
-              {composerModelOptions.map((o) => (
-                <option key={o.ref} value={o.ref}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            {composerModelsLoading && (
-              <span style={{ fontSize: 10, color: '#999', flexShrink: 0 }}>加载中…</span>
-            )}
-          </div>
-          {composerModelsError && (
-            <div style={{ fontSize: 10, color: '#C62828', lineHeight: 1.4 }}>
-              无法拉取模型列表（需要 OpenCode 暴露 GET /config/providers）：{composerModelsError}
-            </div>
-          )}
-          <div style={{ fontSize: 10, color: '#888', lineHeight: 1.4 }}>
-            下一条消息将使用：<span style={{ color: '#555' }}>{nextSendModelHint}</span>
-          </div>
-        </div>
-      )}
-
+    <div style={{ padding: `10px 16px ${MAIN_COLUMN_BOTTOM_INSET_PX}px` }}>
       <div
         style={{
           background: '#FFFFFF',
           border: '1px solid #E8E8E8',
-          borderBottom: 'none',
-          borderRadius: '8px 8px 0 0',
+          borderRadius: 8,
           overflow: 'hidden',
         }}
       >
@@ -297,6 +249,7 @@ export default function MessageInput({
             style={{
               width: 32,
               height: 32,
+              flexShrink: 0,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -312,6 +265,38 @@ export default function MessageInput({
             </svg>
           </button>
 
+          {SHOW_COMPOSER_MODEL_UI && (
+            <select
+              id={COMPOSER_MODEL_DOM_ID}
+              value={composerModelRef.trim() ? composerModelRef.trim() : ''}
+              onChange={(e) => onComposerModelRefChange?.(e.target.value)}
+              disabled={disabled || !onComposerModelRefChange || composerModelsLoading}
+              title={composerModelsError ?? undefined}
+              aria-label="模型"
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: 11,
+                padding: '6px 8px',
+                borderRadius: 6,
+                border: '1px solid #E8E8E8',
+                background: '#FFFFFF',
+                color: '#333',
+              }}
+            >
+              <option value="">{composerModelsLoading ? '加载模型…' : '默认模型'}</option>
+              {groupedModelOptions.map((group) => (
+                <optgroup key={group.providerName} label={group.providerName}>
+                  {group.options.map((o) => (
+                    <option key={o.ref} value={o.ref}>
+                      {o.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          )}
+
           <button
             type="button"
             onClick={() => void (canAbort ? handleAbort() : handleSend())}
@@ -319,6 +304,7 @@ export default function MessageInput({
             style={{
               width: 32,
               height: 32,
+              flexShrink: 0,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -342,6 +328,12 @@ export default function MessageInput({
           </button>
         </div>
       </div>
+
+      {composerModelsError && (
+        <div style={{ marginTop: 6, fontSize: 10, color: '#C62828', lineHeight: 1.4 }}>
+          无法拉取模型列表：{composerModelsError}
+        </div>
+      )}
 
       {attachError && (
         <div style={{ marginTop: 6, fontSize: 11, color: '#C62828' }}>{attachError}</div>

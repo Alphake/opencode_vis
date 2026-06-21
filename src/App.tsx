@@ -46,7 +46,7 @@ import {
   getLatestTodowriteBatchProgress,
 } from './utils/todoRegistry'
 import { SHOW_COMPOSER_MODEL_UI } from './config/featureFlags'
-import { STORAGE_KEYS } from './config/storageKeys'
+import { STORAGE_KEYS, MAIN_COLUMN_BOTTOM_INSET_PX } from './config/storageKeys'
 import { buildUserMessageWithGuidance } from './config/harnessGuidance'
 import {
   buildForkPanelSnapshotBundle,
@@ -67,13 +67,21 @@ import {
   releaseTraceIngestClaim,
   tryClaimTraceIngest,
 } from './utils/traceIngestClaim'
-import { fetchPanelAnalysisForSession, inheritForkTaskState, ingestTraceReference, notifyTaskSwitchPrompt, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult, type MemoryWorkerTaskSegment } from './services/memoryWorkerApi'
+import { fetchPanelAnalysisForSession, fetchTaskSegmentsForSession, inheritForkTaskState, ingestTraceReference, notifyTaskSwitchPrompt, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult } from './services/memoryWorkerApi'
 import { mergePanelAnalysisItemsIntoBucket } from './utils/panelAnalysisStorage'
+import {
+  cloneTaskSegmentTabs,
+  mergeTaskSegmentTabs,
+  taskSegmentFromWorker,
+  taskSegmentTabsFromWorkerBatch,
+  type TaskSegmentTab,
+} from './utils/taskSegmentStorage'
 import {
   collectInternalSessionIdsFromIngest,
   registerMemoryWorkerInternalSessionIds,
   shouldSkipTraceIngestForSession,
 } from './utils/memoryWorkerSessions'
+import { scheduleMwInternalSessionRefresh } from './utils/mwInternalSessionRefresh'
 import { traceSessionTurnLimit } from './config/traceIngest'
 
 declare global {
@@ -87,20 +95,13 @@ declare global {
 
 /** Map: message index containing a todo write → todos captured at that instant (for replaying diffs) */
 type TodosSnapshotMap = Record<string, OcTodo[]>
-type TaskSegmentStatus = 'pending' | 'extracted'
-type TaskSegmentTab = {
-  id: string
-  status: TaskSegmentStatus
-  fromStartUserMessageId: string
-  fromEndAssistantMessageId: string
-  toEndAssistantMessageId: string
-  turnCount: number
-  title?: string
-  description?: string
-  summary?: string
-  taskSwitchRunDir?: string
-  pipelineRunDir?: string
+
+function isTaskSwitchedIngestResult(result: MemoryWorkerIngestResult): boolean {
+  const decision = result.taskSwitch?.decision
+  if (!decision || typeof decision !== 'object') return false
+  return (decision as { task_switched?: boolean }).task_switched === true
 }
+
 const AUTO_ABORT_STUCK_RUNNING_AFTER_MS = 24 * 60 * 60 * 1000
 const TRACE_EXTRACTION_DEBOUNCE_MS = 650
 const SSE_SYNC_DEBOUNCE_MS = 350
@@ -116,40 +117,6 @@ const MESSAGE_PANEL_MIN_WIDTH = 420
 const SUBTASK_PANEL_DEFAULT_WIDTH = 630
 const SUBTASK_PANEL_MIN_WIDTH = 420
 const SUBTASK_PANEL_MAX_WIDTH = 1040
-
-function taskSegmentId(status: TaskSegmentStatus, segment: MemoryWorkerTaskSegment): string {
-  return segment.taskId || `${status}:${segment.fromEndAssistantMessageId}:${segment.toEndAssistantMessageId}`
-}
-
-function taskSegmentFromWorker(
-  status: TaskSegmentStatus,
-  segment: MemoryWorkerTaskSegment,
-  meta?: Pick<TaskSegmentTab, 'taskSwitchRunDir' | 'pipelineRunDir'>,
-): TaskSegmentTab | null {
-  if (!segment.fromStartUserMessageId || !segment.toEndAssistantMessageId) return null
-  return {
-    id: taskSegmentId(status, segment),
-    status,
-    fromStartUserMessageId: segment.fromStartUserMessageId,
-    fromEndAssistantMessageId: segment.fromEndAssistantMessageId,
-    toEndAssistantMessageId: segment.toEndAssistantMessageId,
-    turnCount: segment.turnCount,
-    title: segment.title?.trim() || undefined,
-    description: segment.description?.trim() || undefined,
-    summary: segment.summary?.trim() || undefined,
-    ...meta,
-  }
-}
-
-function isTaskSwitchedIngestResult(result: MemoryWorkerIngestResult): boolean {
-  const decision = result.taskSwitch?.decision
-  if (!decision || typeof decision !== 'object') return false
-  return (decision as { task_switched?: boolean }).task_switched === true
-}
-
-function cloneTaskSegmentTabs(tabs: TaskSegmentTab[]): TaskSegmentTab[] {
-  return tabs.map((tab) => ({ ...tab }))
-}
 
 function resolveTaskTabsSourceSessionId(
   segmentsBySession: Record<string, TaskSegmentTab[]>,
@@ -574,7 +541,7 @@ function App() {
   const composerModelOptionsForUi = useMemo(() => {
     const t = composerModelRef.trim()
     if (!t || composerModelOptions.some((o) => o.ref === t)) return composerModelOptions
-    return [...composerModelOptions, { ref: t, label: `${t}（本地已保存）` }].sort((a, b) =>
+    return [...composerModelOptions, { ref: t, label: `${t}（本地已保存）`, providerId: t.split('/')[0] || 'saved', providerName: '已保存' }].sort((a, b) =>
       a.ref.localeCompare(b.ref),
     )
   }, [composerModelOptions, composerModelRef])
@@ -693,23 +660,9 @@ function App() {
 
     setTaskSegmentsBySessionId((prev) => {
       const existing = prev[sessionId] ?? []
-      const byId = new Map(existing.map((tab) => [tab.id, tab]))
       const taskSwitched = isTaskSwitchedIngestResult(result)
-      for (const tab of nextTabs) {
-        if (tab.status === 'pending') {
-          for (const [id, old] of byId) {
-            if (old.status !== 'pending') continue
-            if (taskSwitched) {
-              byId.set(id, { ...old, status: 'extracted' })
-            } else {
-              byId.delete(id)
-            }
-          }
-        }
-        const prior = byId.get(tab.id)
-        byId.set(tab.id, prior ? { ...prior, ...tab } : tab)
-      }
-      return { ...prev, [sessionId]: [...byId.values()] }
+      const merged = mergeTaskSegmentTabs(existing, nextTabs, { taskSwitched })
+      return { ...prev, [sessionId]: merged }
     })
 
     const preferred = nextTabs.find((tab) => tab.status === 'pending') ?? nextTabs[nextTabs.length - 1]
@@ -724,7 +677,10 @@ function App() {
       added: nextTabs,
       active: preferred?.id,
     })
-  }, [taskSegmentManuallySelectedBySessionId, mergePanelAnalysisItems])
+    if (isTaskSwitchedIngestResult(result) || result.extractedTask) {
+      scheduleMwInternalSessionRefresh(refreshSessions)
+    }
+  }, [taskSegmentManuallySelectedBySessionId, mergePanelAnalysisItems, refreshSessions])
 
   useEffect(() => {
     if (!selectedSessionId) return
@@ -880,6 +836,7 @@ function App() {
           } else {
             processedTraceTurnKeysRef.current.add(traceKey)
             registerMemoryWorkerInternalSessionIds(collectInternalSessionIdsFromIngest(ingestResult))
+            scheduleMwInternalSessionRefresh(refreshSessions)
             console.info('[VibeTrace][memory-worker ingest ok]', {
               runId: ingestResult.runId,
               runDir: ingestResult.runDir,
@@ -900,7 +857,7 @@ function App() {
         releaseTraceIngestClaim(sid, endAssistantMessageId)
       }
     }
-  }, [messages, selectedSessionId, sessions, loading, applyMemoryWorkerTaskSegments])
+  }, [messages, selectedSessionId, sessions, loading, applyMemoryWorkerTaskSegments, refreshSessions])
 
   useEffect(() => {
     window.__vibetraceDebug = {
@@ -1019,17 +976,21 @@ function App() {
     return unsubscribe
   }, [selectedSessionId, refreshSessions])
 
-  // Load messages + todos + panel analysis when session changes
+  // Load messages + todos + panel analysis + task tabs when session changes
   const loadSessionData = useCallback(async (sessionId: string, directory?: string) => {
     if (!sessionId) return
     setLoading(true)
     try {
-      const [msgs, td, panelBatch] = await Promise.all([
+      const [msgs, td, panelBatch, taskSegmentBatch] = await Promise.all([
         getMessages(sessionId, 'initial load / session switch', directory),
         getTodos(sessionId, directory),
         fetchPanelAnalysisForSession(sessionId).catch((err) => {
           console.warn('[VibeTrace][panel-analysis] worker hydrate failed', { sessionId, err })
           return { ok: false, count: 0, items: [] as MemoryWorkerErrorDiagnosis[] }
+        }),
+        fetchTaskSegmentsForSession(sessionId).catch((err) => {
+          console.warn('[VibeTrace][task-segments] worker hydrate failed', { sessionId, err })
+          return { ok: false, sessionId, count: 0, tabs: [] }
         }),
       ])
       if (selectedSessionIdRef.current !== sessionId) return
@@ -1040,6 +1001,18 @@ function App() {
         console.info('[VibeTrace][panel-analysis] hydrated from worker', {
           sessionId,
           count: panelBatch.items.length,
+        })
+      }
+      const workerTabs = taskSegmentTabsFromWorkerBatch(taskSegmentBatch.tabs ?? [])
+      if (workerTabs.length > 0) {
+        setTaskSegmentsBySessionId((prev) => {
+          const existing = prev[sessionId] ?? []
+          const merged = mergeTaskSegmentTabs(existing, workerTabs)
+          return { ...prev, [sessionId]: merged }
+        })
+        console.info('[VibeTrace][task-segments] hydrated from worker', {
+          sessionId,
+          count: workerTabs.length,
         })
       }
     } catch {
@@ -1484,7 +1457,8 @@ function App() {
           forkMeta: resolveForkIngestMeta(sid, sessionsRef.current) ?? undefined,
         })
           .then((result) => applyMemoryWorkerTaskSegments(sid, result))
-          .catch((e) => console.warn('[VibeTrace][task-switch prompt failed]', e))
+          .catch((err) => console.warn('[VibeTrace][task-switch prompt failed]', err))
+        scheduleMwInternalSessionRefresh(refreshSessions)
         await sendMessage(sid, text, dir, { imageParts: images, model: composerModelRef.trim() || undefined })
         const msgs = await getMessages(sid, 'after POST /message completes', dir)
         setMessages(msgs)
@@ -1502,7 +1476,7 @@ function App() {
         setWaitingForAssistantReply(false)
       }
     })()
-  }, [selectedSessionId, sessions, composerModelRef, applyMemoryWorkerTaskSegments])
+  }, [selectedSessionId, sessions, composerModelRef, applyMemoryWorkerTaskSegments, refreshSessions])
 
   const handleAbortMessage = useCallback(async () => {
     if (!selectedSessionId) return
@@ -2111,7 +2085,7 @@ function App() {
               flexDirection: 'column',
               minHeight: 0,
               minWidth: 0,
-              padding: '12px 14px 0',
+              padding: `12px 14px ${MAIN_COLUMN_BOTTOM_INSET_PX}px`,
               gap: 0,
             }}
           >

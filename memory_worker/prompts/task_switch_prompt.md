@@ -56,7 +56,36 @@
 
 ## Output
 
-只输出一个 JSON object，不要 Markdown，不要代码块：
+只输出一个 JSON object，不要 Markdown，不要代码块。
+
+### JSON 输出硬性约束（必须遵守）
+
+1. **只输出纯 JSON 对象**，首字符必须是 `{`，末字符必须是 `}`；不要任何前后说明文字。
+2. **禁止**用 Markdown 代码围栏（不要 \`\`\`json）。
+3. 所有 string 值里如需引号，必须用 `\"` 转义，或改用中文书名号/单引号；**禁止**在 JSON 字符串内出现未转义的 ASCII 双引号 `"`。
+4. 字段名、类型必须与下方 schema 一致；boolean 只能是 `true`/`false`（不加引号）。
+
+### 合法输出示例（仅替换内容，格式必须一致）
+
+```json
+{
+  "task_switched": true,
+  "confidence": "high",
+  "reason": "当前输入明确表示切换任务，话题从图表可视化转为查找在线图标库",
+  "previous_task": {
+    "title": "生成水果数据图表",
+    "description": "用 HTML 与图标制作水果销量可视化"
+  },
+  "current_task": {
+    "title": "查找在线图标库",
+    "description": "找 agent 可直接引用的在线 icon 库"
+  }
+}
+```
+
+错误示例（会导致解析失败）：`"reason": "用户说"切换任务"..."` — 内嵌未转义双引号。
+
+### Schema
 
 ```json
 {

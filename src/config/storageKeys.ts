@@ -30,3 +30,6 @@ export const STORAGE_KEYS = {
 
 /** Composer `<select>` DOM id — must match `<label htmlFor>`; unrelated to persistence key spelling */
 export const COMPOSER_MODEL_DOM_ID = `${APP_STORAGE_NAMESPACE}-composer-model`
+
+/** Bottom inset for composer / skill dock — keep MessageInput and VibeTrace panel in sync. */
+export const MAIN_COLUMN_BOTTOM_INSET_PX = 10

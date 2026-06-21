@@ -59,6 +59,29 @@
 
 执行完成后，只输出一个 JSON 对象。不要输出 Markdown 或额外解释。
 
+### JSON 输出硬性约束（必须遵守）
+
+1. **只输出纯 JSON 对象**；不要代码围栏与前后说明。
+2. string 内 ASCII 双引号必须 `\"` 转义；禁止未转义内嵌 `"`。
+3. `status` 只能是 `ok`、`skipped`、`failed` 之一（字符串）。
+
+### 合法输出示例
+
+```json
+{
+  "status": "ok",
+  "applied_actions": [
+    { "path": "SKILL.md", "operation": "CREATE", "result": "ok", "note": "" }
+  ],
+  "validation": {
+    "covered_required_actions": true,
+    "unexpected_changes": "none",
+    "script_sanity": "ok",
+    "notes": ""
+  }
+}
+```
+
 ```json
 {
   "status": "ok | skipped | failed",

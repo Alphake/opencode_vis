@@ -91,8 +91,10 @@ export default defineConfig(({ mode }) => {
               '/fork-inherit-task-state': { target: mwTarget, changeOrigin: true },
               '/task-skills': { target: mwTarget, changeOrigin: true },
               '/task-skill-detail': { target: mwTarget, changeOrigin: true },
+              '/task-skill-save': { target: mwTarget, changeOrigin: true },
               '/task-feedback-distill': { target: mwTarget, changeOrigin: true },
               '/panel-analysis': { target: mwTarget, changeOrigin: true },
+              '/task-segments': { target: mwTarget, changeOrigin: true },
               '/health': { target: mwTarget, changeOrigin: true },
             }
           : {}),

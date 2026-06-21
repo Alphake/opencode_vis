@@ -259,6 +259,8 @@ export async function getMessages(sessionId: string, _reason?: string, directory
 export interface OcComposerModelOption {
   ref: string
   label: string
+  providerId: string
+  providerName: string
 }
 
 /**
@@ -290,6 +292,7 @@ export async function getComposerModelOptions(directory?: string): Promise<{
     const pr = p as Record<string, unknown>
     const pid = typeof pr.id === 'string' ? pr.id.trim() : ''
     if (!pid) continue
+    const providerName = typeof pr.name === 'string' && pr.name.trim() ? pr.name.trim() : pid
     const models = pr.models && typeof pr.models === 'object' ? (pr.models as Record<string, unknown>) : {}
     for (const m of Object.values(models)) {
       if (!m || typeof m !== 'object') continue
@@ -297,8 +300,13 @@ export async function getComposerModelOptions(directory?: string): Promise<{
       const mid = typeof mr.id === 'string' ? mr.id.trim() : ''
       if (!mid) continue
       const name = typeof mr.name === 'string' ? mr.name.trim() : ''
-      const label = name && name !== mid ? `${pid}/${mid} — ${name}` : `${pid}/${mid}`
-      opts.push({ ref: `${pid}/${mid}`, label })
+      const costRaw = mr.cost && typeof mr.cost === 'object' ? (mr.cost as Record<string, unknown>) : {}
+      const inputCost = Number(costRaw.input)
+      const outputCost = Number(costRaw.output)
+      const isFree = inputCost === 0 && outputCost === 0
+      const freeTag = isFree ? ' · Free' : ''
+      const label = name && name !== mid ? `${pid}/${mid} — ${name}${freeTag}` : `${pid}/${mid}${freeTag}`
+      opts.push({ ref: `${pid}/${mid}`, label, providerId: pid, providerName })
     }
   }
   opts.sort((a, b) => a.ref.localeCompare(b.ref))
