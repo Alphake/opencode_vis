@@ -88,6 +88,7 @@ export default defineConfig(({ mode }) => {
           ? {
               '/ingest-trace': { target: mwTarget, changeOrigin: true },
               '/task-switch-prompt': { target: mwTarget, changeOrigin: true },
+              '/fork-inherit-task-state': { target: mwTarget, changeOrigin: true },
               '/task-skills': { target: mwTarget, changeOrigin: true },
               '/task-skill-detail': { target: mwTarget, changeOrigin: true },
               '/task-feedback-distill': { target: mwTarget, changeOrigin: true },

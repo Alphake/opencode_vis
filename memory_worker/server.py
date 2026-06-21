@@ -1899,6 +1899,58 @@ def _complete_task_switch_extraction(
         write_json(switch_run_dir / "04-pipeline-result.json", {"ok": False, "error": str(e)})
 
 
+def _inherit_task_switch_state_for_fork(
+    *,
+    fork_meta: dict[str, Any] | None,
+    session_id: str,
+    directory_override: str | None,
+) -> bool:
+    if not isinstance(fork_meta, dict):
+        return False
+    source_parent = str(fork_meta.get("sourceParentSessionId") or "").strip()
+    forked_id = str(fork_meta.get("forkedSessionId") or "").strip()
+    if not source_parent or not forked_id or forked_id != session_id:
+        return False
+
+    parent_key = _task_switch_session_key(source_parent, directory_override)
+    fork_key = _task_switch_session_key(session_id, directory_override)
+
+    with _task_switch_lock:
+        state = _load_task_switch_state()
+        sessions = state.setdefault("sessions", {})
+        fork_state = sessions.get(fork_key) if isinstance(sessions.get(fork_key), dict) else {}
+        if isinstance(fork_state, dict) and (
+            _dedupe_turn_records(fork_state.get("pendingTurns"))
+            or fork_state.get("lastExtractedTurns")
+            or fork_state.get("lastExtractedRange")
+        ):
+            return False
+        parent_state = sessions.get(parent_key)
+        if not isinstance(parent_state, dict):
+            return False
+        sessions[fork_key] = {
+            **parent_state,
+            "sessionId": session_id,
+            "updatedAt": now_iso(),
+        }
+        _save_task_switch_state(state)
+        return True
+
+
+def inherit_fork_task_state(body: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(body.get("sessionId") or "").strip()
+    source_parent = str(body.get("sourceParentSessionId") or "").strip()
+    directory_override = str(body.get("directory") or "").strip() or None
+    if not session_id or not source_parent:
+        return {"ok": False, "error": "sessionId and sourceParentSessionId are required"}
+    inherited = _inherit_task_switch_state_for_fork(
+        fork_meta={"sourceParentSessionId": source_parent, "forkedSessionId": session_id},
+        session_id=session_id,
+        directory_override=directory_override,
+    )
+    return {"ok": True, "inherited": inherited}
+
+
 def process_user_prompt_task_switch(
     messages: list[dict[str, Any]],
     session_id: str,
@@ -1910,6 +1962,12 @@ def process_user_prompt_task_switch(
     user_prompt = _normalize_user_prompt(user_prompt)
     if not session_id or not user_prompt:
         return {"ok": False, "error": "sessionId and userPrompt are required"}
+
+    _inherit_task_switch_state_for_fork(
+        fork_meta=fork_meta,
+        session_id=session_id,
+        directory_override=directory_override,
+    )
 
     prompt_records = trace_parser.collect_turn_prompt_records(messages)
     completed_turns = _dedupe_turn_records([_turn_record_for_state(x) for x in prompt_records])
@@ -2223,6 +2281,11 @@ def process_reference_ingest_with_task_switch(
         }
     current_turn = _turn_record_for_state(current_record)
     session_key = _task_switch_session_key(session_id, directory_override)
+    _inherit_task_switch_state_for_fork(
+        fork_meta=fork_meta,
+        session_id=session_id,
+        directory_override=directory_override,
+    )
     switch_run_dir = build_task_switch_run_dir(session_id, end_msg_id)
     switch_run_dir.mkdir(parents=True, exist_ok=True)
     switch_log_file = switch_run_dir / "00-run.log"
@@ -3488,6 +3551,15 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 result = distill_feedback_skill(body)
+                self._send_json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        if self.path == "/fork-inherit-task-state":
+            try:
+                body = self._read_json()
+                result = inherit_fork_task_state(body if isinstance(body, dict) else {})
                 self._send_json(200 if result.get("ok") else 400, result)
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})

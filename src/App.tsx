@@ -67,7 +67,7 @@ import {
   releaseTraceIngestClaim,
   tryClaimTraceIngest,
 } from './utils/traceIngestClaim'
-import { fetchPanelAnalysisForSession, ingestTraceReference, notifyTaskSwitchPrompt, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult, type MemoryWorkerTaskSegment } from './services/memoryWorkerApi'
+import { fetchPanelAnalysisForSession, inheritForkTaskState, ingestTraceReference, notifyTaskSwitchPrompt, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult, type MemoryWorkerTaskSegment } from './services/memoryWorkerApi'
 import { mergePanelAnalysisItemsIntoBucket } from './utils/panelAnalysisStorage'
 import {
   collectInternalSessionIdsFromIngest,
@@ -145,6 +145,20 @@ function isTaskSwitchedIngestResult(result: MemoryWorkerIngestResult): boolean {
   const decision = result.taskSwitch?.decision
   if (!decision || typeof decision !== 'object') return false
   return (decision as { task_switched?: boolean }).task_switched === true
+}
+
+function cloneTaskSegmentTabs(tabs: TaskSegmentTab[]): TaskSegmentTab[] {
+  return tabs.map((tab) => ({ ...tab }))
+}
+
+function resolveTaskTabsSourceSessionId(
+  segmentsBySession: Record<string, TaskSegmentTab[]>,
+  selectedId: string | undefined,
+  forkTargetId: string,
+): string | null {
+  if (selectedId && (segmentsBySession[selectedId]?.length ?? 0) > 0) return selectedId
+  if ((segmentsBySession[forkTargetId]?.length ?? 0) > 0) return forkTargetId
+  return null
 }
 
 function loadJsonObjectFromLs<T extends Record<string, unknown>>(key: string): T {
@@ -1650,6 +1664,18 @@ function App() {
         return
       }
       const dir = sessions.find((s) => s.id === targetSessionId)?.directory ?? activeSessionDirectory
+      const tabsSourceId = resolveTaskTabsSourceSessionId(
+        taskSegmentsBySessionId,
+        selectedSessionId ?? undefined,
+        targetSessionId,
+      )
+      const inheritedTabs = tabsSourceId
+        ? cloneTaskSegmentTabs(taskSegmentsBySessionId[tabsSourceId] ?? [])
+        : []
+      const inheritedActiveTabId = tabsSourceId ? activeTaskSegmentBySessionId[tabsSourceId] : undefined
+      const inheritedManualSelection = tabsSourceId
+        ? Boolean(taskSegmentManuallySelectedBySessionId[tabsSourceId])
+        : false
 
       setForkBusy(true)
       try {
@@ -1679,6 +1705,43 @@ function App() {
           saveForkPanelSnapshotBundle(forked.id, bundle)
         }
 
+        if (inheritedTabs.length > 0) {
+          setTaskSegmentsBySessionId((prev) => ({
+            ...prev,
+            [forked.id]: inheritedTabs,
+          }))
+          if (inheritedActiveTabId) {
+            setActiveTaskSegmentBySessionId((prev) => ({
+              ...prev,
+              [forked.id]: inheritedActiveTabId,
+            }))
+          }
+          if (inheritedManualSelection) {
+            setTaskSegmentManuallySelectedBySessionId((prev) => ({
+              ...prev,
+              [forked.id]: true,
+            }))
+          }
+          console.info('[VibeTrace][fork inherited task tabs]', {
+            forkedSessionId: forked.id,
+            sourceSessionId: tabsSourceId,
+            tabCount: inheritedTabs.length,
+            activeTabId: inheritedActiveTabId,
+          })
+        }
+
+        const forkMetaForWorker = {
+          forkAnchorMessageId: action.messageID,
+          sourceParentSessionId: targetSessionId,
+          forkedSessionId: forked.id,
+          ...(action.partId ? { forkAnchorPartId: action.partId } : {}),
+        }
+        void inheritForkTaskState({
+          sessionId: forked.id,
+          sourceParentSessionId: targetSessionId,
+          directory: forked.directory,
+        }).catch((err) => console.warn('[VibeTrace][fork inherit task-switch state failed]', err))
+
         const list = await refreshSessions([forked.directory])
         setSessions(list)
         setApiConnected(true)
@@ -1702,7 +1765,7 @@ function App() {
                 userPrompt: userText,
                 directory: forked.directory,
                 parentSessionID: forked.id,
-                forkMeta: resolveForkIngestMeta(forked.id, sessionsRef.current) ?? undefined,
+                forkMeta: forkMetaForWorker,
               })
                 .then((result) => applyMemoryWorkerTaskSegments(forked.id, result))
                 .catch((err) => console.warn('[VibeTrace][fork task-switch prompt failed]', err))
@@ -1744,7 +1807,7 @@ function App() {
         setForkBusy(false)
       }
     },
-    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks, refreshSessions, composerModelRef, applyMemoryWorkerTaskSegments],
+    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks, refreshSessions, composerModelRef, applyMemoryWorkerTaskSegments, taskSegmentsBySessionId, activeTaskSegmentBySessionId, taskSegmentManuallySelectedBySessionId],
   )
 
   const handleAnalyzeFromAction = useCallback((action: MappedAction & { row: number }) => {

@@ -171,6 +171,30 @@ export interface TaskSwitchPromptReference {
   forkMeta?: ForkMetaReference
 }
 
+export interface ForkInheritTaskStateReference {
+  sessionId: string
+  sourceParentSessionId: string
+  directory?: string
+}
+
+export async function inheritForkTaskState(
+  ref: ForkInheritTaskStateReference,
+): Promise<{ ok: boolean; inherited?: boolean; error?: string }> {
+  const res = await fetch(`${BASE}/fork-inherit-task-state`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ref),
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`memory-worker /fork-inherit-task-state failed: ${res.status} ${text}`)
+  }
+  return parseMemoryWorkerJson<{ ok: boolean; inherited?: boolean; error?: string }>(
+    text,
+    '/fork-inherit-task-state',
+  )
+}
+
 export async function notifyTaskSwitchPrompt(
   ref: TaskSwitchPromptReference,
 ): Promise<MemoryWorkerIngestResult> {
