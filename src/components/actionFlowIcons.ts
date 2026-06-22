@@ -1,11 +1,11 @@
 import type { ActionType } from '../types/opencode'
 
-/** 设计稿中的深色统一为 currentColor，由外层 g 的 style color 控制 */
+/** Design dark fills use currentColor; outer g style color controls tint */
 function normalizeIconColors(svg: string): string {
   return svg.replace(/#2B2B2B/gi, 'currentColor').replace(/#1E1E1E/gi, 'currentColor')
 }
 
-/** 同一文档内多次克隆 SVG 时，为 id / url(#id) 加前缀避免冲突 */
+/** When cloning SVG multiple times in one document, prefix id / url(#id) to avoid conflicts */
 export function prefixSvgIds(svg: string, prefix: string): string {
   const seen = new Set<string>()
   const idAttr = /\bid="([^"]+)"/g
@@ -94,7 +94,7 @@ const RAW: Record<ActionType, string> = {
 <path d="M8 13.25V15.25M4.5 15.25H11.5" stroke="#2B2B2B" stroke-linecap="round"/>
 </svg>`,
 
-  /** 与 Read 同图标色系：`skill_router` 归入读/取数一类 */
+  /** Same icon palette as Read: data-fetch tools */
   SkillRouter: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
 <rect x="0.5" y="1.25" width="15" height="12" rx="2.5" stroke="#2B2B2B"/>
 <path d="M5.5 7.38158L8 4.75L10.5 7.38158" stroke="#2B2B2B" stroke-linecap="round" stroke-linejoin="round"/>
@@ -145,9 +145,9 @@ export function getActionFlowIconSvg(type: ActionType): string {
 const ICON_BOX = 16
 
 /**
- * 将图标画在 (cx, cy) —— 与流程图 rect 的几何中心 (nx+w/2, ny+h/2) 对齐。
- * 用嵌套 svg 的 x/y/width/height 定位，避免 transform 连乘顺序在浏览器间不一致；
- * 并显式给出尺寸，避免未设宽高时嵌套 svg 落到默认 300×150 导致严重偏移。
+ * Draw the icon at (cx, cy) — aligned with flow rect geometric center (nx+w/2, ny+h/2).
+ * Position via nested svg x/y/width/height to avoid inconsistent transform multiply order across browsers;
+ * explicit dimensions avoid nested svg defaulting to 300×150 and severe offset.
  */
 export function appendActionFlowIcon(
   parent: SVGGElement,
@@ -174,7 +174,7 @@ export function appendActionFlowIcon(
 
   const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
   g.setAttribute('class', 'action-flow-action-icon')
-  /** 不抢命中：否则叠在 action rect 上时悬停落在图标区域，无 data-tooltip 属性 → tooltip 随机「失灵」 */
+  /** Do not steal hits: when stacked on action rect, hover on icon area lacks data-tooltip → tooltip appears broken */
   g.setAttribute('pointer-events', 'none')
   g.setAttribute('style', `color: ${iconColor}`)
   g.setAttribute('transform', `translate(${cx}, ${cy})`)

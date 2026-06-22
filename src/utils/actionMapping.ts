@@ -25,7 +25,7 @@ function estimateTokensFromStrings(...chunks: (string | undefined)[]): number {
   return Math.max(0, Math.round(n / 4))
 }
 
-/** 工具 `output` 有时是 JSON 对象；统一成可估算/可展示的字符串 */
+/** Normalize tool `output` when it is a JSON object into a string for sizing/display */
 function toolOutputOrErrorAsString(v: unknown): string {
   if (v == null) return ''
   if (typeof v === 'string') return v
@@ -60,7 +60,7 @@ function mapToolToActionType(tool: string): ActionType | null {
   if (isTodoWriteTool(tool) || t === 'todoread' || t === 'todo_read') return 'Plan'
   if (SUBAGENT_TOOLS.has(t)) return 'Subagent'
   if (['glob', 'grep', 'read'].includes(t)) return 'Read'
-  /** OpenCode / 插件可能注册为 `skill_router`、`SkillRouter`（归一化后为 skillrouter）等 */
+  /** OpenCode / plugins may register as `skill_router`, `SkillRouter` (normalized to skillrouter), etc. */
   if (t === 'skill_router' || t === 'skillrouter') return 'SkillRouter'
   if (['write', 'edit', 'multiedit', 'patch'].includes(t)) return 'Write'
   if (t === 'bash' || t === 'shell') return 'Shell'
@@ -73,7 +73,7 @@ function durationForReasoning(part: { time?: { start?: number; end?: number }; t
   const { start, end } = part.time ?? {}
   if (typeof start === 'number' && typeof end === 'number' && end >= start) {
     if (end > start) return Math.max(10, end - start)
-    /** 常见：流式里 start/end 未区分，同为瞬时点；不应回退到 token*40（会把 Think 拉成 30s 假时长） */
+    /** Common: streaming start/end are indistinguishable instant points; must not fall back to token*40 (would inflate Think to ~30s fake duration) */
     return 10
   }
   return Math.min(30_000, Math.max(0, estimateTokensFromStrings(part.text) * 40))
@@ -104,7 +104,7 @@ function durationForTool(part: ToolPart, message: OcMessage, nowMs: number): num
   return Math.max(10, 80 + estimateTokensFromStrings(out, inpStr) * 30)
 }
 
-/** 工具 wall-clock 区间，用于并行重叠判定（与 duration 语义一致） */
+/** Tool wall-clock interval for parallel overlap detection (same semantics as duration) */
 function toolWallClockWindow(
   part: ToolPart,
   message: OcMessage,
@@ -162,11 +162,11 @@ function outputRecordFromToolState(output: unknown): Record<string, unknown> | n
 }
 
 /**
- * 统一提取 task/subagent 的子会话 id。
- * 兼容 running/completed 两阶段里可能出现的字段：
+ * Extract child session id for task/subagent uniformly.
+ * Compatible with fields that may appear in running/completed phases:
  * - state.metadata.sessionId / sessionID / task_id
- * - state.output 文本中的 task_id: xxx
- * - state.output JSON 的 metadata.sessionId / sessionId
+ * - task_id: xxx in state.output text
+ * - metadata.sessionId / sessionId in state.output JSON
  */
 export function extractChildSessionIdFromToolPart(part: ToolPart): string | undefined {
   const input = part.state?.input ?? {}
@@ -218,11 +218,11 @@ export function isSubagentToolName(tool: string): boolean {
 }
 
 /**
- * 每个 agent 进程占两条横轨：
- * - layer 0：kernel（思考、回复、todowrite/Plan、压缩等，不碰外部资源）
- * - layer 1：外部资源（读盘、网络、shell、task 父级 rect、question 等）
+ * Each agent process occupies two horizontal tracks:
+ * - layer 0: kernel (think, reply, todowrite/Plan, compaction, etc. — no external resources)
+ * - layer 1: external resources (disk read, network, shell, task parent rect, question, etc.)
  *
- * 不同 session = 不同进程：在垂直方向向下堆叠，用 `processBand` 区分（0=主会话，1=第一个子会话…）。
+ * Different session = different process: stacked vertically, distinguished by `processBand` (0=main session, 1=first child session, …).
  * `row = processBand * ROWS_PER_PROCESS + layer`
  */
 export const ROWS_PER_PROCESS = 2
@@ -245,23 +245,23 @@ function actionRowForBand(processBand: number, actionType: ActionType): number {
 }
 
 /**
- * 将单个 session 的消息映射为动作。
- * 关键约束：一个 session 固定占两行（LLM 内 + 外部资源），不因 task 嵌套临时改带。
- * `bandStart`：该 session 在全局垂直布局中的进程带索引（0=父会话，1..N=子会话）。
+ * Map a single session's messages to actions.
+ * Key constraint: one session always uses two rows (LLM inner + external resources), never retargeted for task nesting.
+ * `bandStart`: process-band index for this session in the global vertical layout (0=parent session, 1..N=child sessions).
  */
 
 export type TaskChildDescriptor = {
   callID: string
   childSessionID: string
-  /** 所属 assistant 消息 id（与并行判定 message 边界一致） */
+  /** Owning assistant message id (same boundary as parallel detection by message) */
   messageId: string
-  /** 与父段 `buildMappedActionsFromMessages` 中该 task part 的 sortTime 对齐 */
+  /** Aligned with that task part's sortTime in parent `buildMappedActionsFromMessages` */
   anchorSortTime: number
   description?: string
 }
 
 /**
- * 从父会话消息中收集「已能解析出子 session」的 task/subagent 工具（去重 callID+child）。
+ * Collect task/subagent tools from parent session messages that already resolve a child session (dedupe callID+child).
  */
 export function collectTaskChildDescriptors(messages: OcMessage[]): TaskChildDescriptor[] {
   const out: TaskChildDescriptor[] = []
@@ -294,7 +294,7 @@ export function collectTaskChildDescriptors(messages: OcMessage[]): TaskChildDes
 }
 
 /**
- * 将子会话 GET /message 的结果映射到独立进程带（`sessionBandIndex`：第 1 个子会话通常为 1，第 2 个为 2…）。
+ * Map GET /message results for a child session onto an independent process band (`sessionBandIndex`: 1st child usually 1, 2nd 2, …).
  */
 export function buildChildSessionBranchActions(
   childMessages: OcMessage[],
@@ -302,7 +302,7 @@ export function buildChildSessionBranchActions(
     branchChildSessionID: string
     parentTaskCallID: string
     anchorSortTime: number
-    /** 该子会话在垂直堆叠中的进程带序号（与主会话 0 区分） */
+    /** Process-band index for vertical stacking (distinct from main session 0) */
     sessionBandIndex: number
     nowMs?: number
   },
@@ -539,7 +539,7 @@ export function firstFlowAnchorKeyForSubtaskSegment(
   return actionKey(firstVisual)
 }
 
-/** 基于消息序列判定失效工具：若某 tool 仍 pending/running，但后续 assistant 消息已开始，则视为该 call 不会再回流结果。 */
+/** Mark stale tools from message sequence: if a tool is still pending/running but a later assistant message has started, treat the call as never returning a result. */
 export function collectStaleToolCallIDs(messages: OcMessage[]): Set<string> {
   const stale = new Set<string>()
   const assistantIndices: number[] = []
@@ -600,7 +600,7 @@ function safeDetail(raw: unknown): string {
   }
 }
 
-/** 合并 part 与 SSE 动作，按时间排序；SSE 项保持 row=1（无子任务上下文） */
+/** Merge part and SSE actions, sorted by time; SSE items keep row=1 (no subtask context) */
 export function mergeActions(
   fromMessages: (MappedAction & { row: number })[],
   fromSse: (MappedAction & { row: number })[]
@@ -608,7 +608,7 @@ export function mergeActions(
   return [...fromMessages, ...fromSse].sort((a, b) => a.sortTime - b.sortTime)
 }
 
-/** call_id 仅末尾不同 → 去掉最后一段 `_suffix` 作为 stem */
+/** When call_ids differ only in the trailing suffix, strip the last `_suffix` segment as the stem */
 export function callIdStem(callID: string): string {
   const i = callID.lastIndexOf('_')
   return i >= 0 ? callID.slice(0, i) : callID
@@ -623,17 +623,17 @@ function windowsOverlap(
 
 export type ParallelCallInfo = { parallelGroupId: string; parallelLaneIndex: number }
 
-/** 并行分桶：同消息内的 subagent/task 不按 call_id stem 分组（每次 launch 都是新 call_id） */
+/** Parallel bucketing: subagent/task within the same message are not grouped by call_id stem (each launch gets a new call_id) */
 function parallelCompareBucketKey(messageId: string, stem: string, isSubagentTool: boolean): string {
   if (isSubagentTool) return `${messageId}:::__subagent_task__`
   return `${messageId}:::${stem}`
 }
 
 /**
- * 同一 assistant 消息内、wall-clock 重叠 → 判为并行：
- * - 普通工具：call_id stem 相同（如 `read_1` / `read_2`）
- * - task/subagent：同一条消息里多次 launch、区间重叠即并行（call_id 彼此独立）
- * 返回 callID → 组 id + lane（按 start 升序 0..n-1）。
+ * Within the same assistant message, overlapping wall-clock intervals → parallel:
+ * - ordinary tools: same call_id stem (e.g. `read_1` / `read_2`)
+ * - task/subagent: multiple launches in one message with overlapping intervals (call_ids are independent)
+ * Returns callID → group id + lane (0..n-1 by ascending start).
  */
 export function detectParallelCallMapping(messages: OcMessage[], nowMs: number): Map<string, ParallelCallInfo> {
   const out = new Map<string, ParallelCallInfo>()
@@ -717,7 +717,7 @@ export function detectParallelCallMapping(messages: OcMessage[], nowMs: number):
   return out
 }
 
-/** 将并行组 id / lane 写入 mapped action（子会话动作按 parentTaskCallID 继承） */
+/** Write parallel group id / lane onto mapped actions (child-session actions inherit via parentTaskCallID) */
 export function applyParallelLayoutFromCalls(
   actions: (MappedAction & { row: number })[],
   parallelByCallId: Map<string, ParallelCallInfo>
@@ -732,8 +732,8 @@ export function applyParallelLayoutFromCalls(
 }
 
 /**
- * 每个子会话独占一个进程带索引（用于 `row` / 内核+工具双层）；
- * 并行子智能体在 SVG 里各占一条泳道（`session:task:<callID>`），按 parallelLaneIndex 上下堆叠，不共用 band。
+ * Each child session gets its own process-band index (for `row` / kernel+tool dual layer);
+ * parallel sub-agents each get an SVG swimlane (`session:task:<callID>`), stacked by parallelLaneIndex, not sharing a band.
  */
 export function buildChildSessionBandMap(
   descriptors: TaskChildDescriptor[],

@@ -272,7 +272,7 @@ export default function MessageInput({
               onChange={(e) => onComposerModelRefChange?.(e.target.value)}
               disabled={disabled || !onComposerModelRefChange || composerModelsLoading}
               title={composerModelsError ?? undefined}
-              aria-label="模型"
+              aria-label="Model"
               style={{
                 flex: 1,
                 minWidth: 0,
@@ -284,7 +284,7 @@ export default function MessageInput({
                 color: '#333',
               }}
             >
-              <option value="">{composerModelsLoading ? '加载模型…' : '默认模型'}</option>
+              <option value="">{composerModelsLoading ? 'Loading models…' : 'Default model'}</option>
               {groupedModelOptions.map((group) => (
                 <optgroup key={group.providerName} label={group.providerName}>
                   {group.options.map((o) => (
@@ -331,7 +331,7 @@ export default function MessageInput({
 
       {composerModelsError && (
         <div style={{ marginTop: 6, fontSize: 10, color: '#C62828', lineHeight: 1.4 }}>
-          无法拉取模型列表：{composerModelsError}
+          Failed to load model list: {composerModelsError}
         </div>
       )}
 

@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import type { ProxyOptions } from 'vite'
 
-/** OpenCode REST/SSE 路径 — 由 Vite dev server 转发到 OpenCode */
+/** OpenCode REST/SSE paths — proxied by Vite dev server to OpenCode */
 const OPENCODE_PROXY_PREFIXES = [
   '/session',
   '/project',
@@ -37,7 +37,7 @@ function opencodeProxyRules(target: string, env: Record<string, string>): Record
             proxyReq.setHeader('Authorization', authHeader)
           })
         }
-        // 避免上游 401 把 WWW-Authenticate 传回浏览器，触发系统登录对话框
+        // Strip upstream WWW-Authenticate on 401 to avoid browser login dialog
         proxy.on('proxyRes', (proxyRes) => {
           delete proxyRes.headers['www-authenticate']
           delete proxyRes.headers['WWW-Authenticate']

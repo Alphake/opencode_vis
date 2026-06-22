@@ -1,6 +1,6 @@
 import { Fragment, type RefObject, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Tooltip } from 'react-tooltip'
-import type { MappedAction, OcMessage } from '../types/opencode'
+import type { MappedAction, OcMessage, OcMessagePart } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
 import SubtaskCard from './SubtaskCard'
@@ -59,7 +59,7 @@ function summarizeTaskText(text: string, maxLen = 120): string {
 function userMessageText(message: OcMessage | undefined): string {
   if (!message) return ''
   return message.parts
-    .filter((part): part is { type: 'text'; text: string } => part.type === 'text' && typeof part.text === 'string')
+    .filter((part): part is Extract<OcMessagePart, { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
     .join('\n')
 }
@@ -71,9 +71,9 @@ function firstUserMessageIndex(subtask: AssistantSubtask): number | null {
 }
 
 function distillChannelLabel(channel: string | undefined, source: string | undefined): string {
-  if (channel === 'feedback' || source === 'feedback_distill') return '用户 Feedback'
-  if (channel === 'manual' || source === 'manual_edit') return '手动编辑'
-  return '任务切换 · Pipeline'
+  if (channel === 'feedback' || source === 'feedback_distill') return 'User Feedback'
+  if (channel === 'manual' || source === 'manual_edit') return 'Manual Edit'
+  return 'Task Switch · Pipeline'
 }
 
 function operationBadgeStyle(operation: string | undefined): { bg: string; color: string; border: string } {
@@ -123,7 +123,7 @@ function historyEntryBodyText(entry: SkillDistillHistoryEntry): string {
   const rationale = entry.rationale?.trim() || ''
   const summary = entry.summary?.trim() || ''
   if (rationale && summary && rationale !== summary) return rationale
-  return rationale || summary || 'Skill 变更记录'
+  return rationale || summary || 'Skill change record'
 }
 
 interface SubtaskDebugPanelProps {
@@ -176,7 +176,6 @@ export default function SubtaskDebugPanel({
   const [legendExpanded, setLegendExpanded] = useState(false)
   const [skillsByTaskId, setSkillsByTaskId] = useState<Record<string, TaskSkillRecord[]>>({})
   const [skillStatusByTaskId, setSkillStatusByTaskId] = useState<Record<string, string>>({})
-  const [skillWriteRootByTaskId, setSkillWriteRootByTaskId] = useState<Record<string, string>>({})
   const [skillDiscoveredCountByTaskId, setSkillDiscoveredCountByTaskId] = useState<Record<string, number>>({})
   const [skillLoadingByTaskId, setSkillLoadingByTaskId] = useState<Record<string, boolean>>({})
   const [skillErrorByTaskId, setSkillErrorByTaskId] = useState<Record<string, string>>({})
@@ -219,7 +218,6 @@ export default function SubtaskDebugPanel({
   const activeTaskId = activeDisplayTask?.id ?? ''
   const activeSkills = activeTaskId ? skillsByTaskId[activeTaskId] ?? [] : []
   const activeSkillStatus = activeTaskId ? skillStatusByTaskId[activeTaskId] ?? 'none' : 'none'
-  const activeSkillWriteRoot = activeTaskId ? skillWriteRootByTaskId[activeTaskId] ?? '' : ''
   const activeSkillDiscoveredCount = activeTaskId ? skillDiscoveredCountByTaskId[activeTaskId] ?? 0 : 0
   const activeSkillLoading = activeTaskId ? Boolean(skillLoadingByTaskId[activeTaskId]) : false
   const activeSkillError = activeTaskId ? skillErrorByTaskId[activeTaskId] : undefined
@@ -265,7 +263,6 @@ export default function SubtaskDebugPanel({
         if (cancelled) return
         setSkillsByTaskId((prev) => ({ ...prev, [activeTaskId]: result.skills ?? [] }))
         setSkillStatusByTaskId((prev) => ({ ...prev, [activeTaskId]: result.status || 'none' }))
-        setSkillWriteRootByTaskId((prev) => ({ ...prev, [activeTaskId]: result.skillWriteRoot || '' }))
         setSkillDiscoveredCountByTaskId((prev) => ({ ...prev, [activeTaskId]: result.discoveredCount ?? 0 }))
       })
       .catch((err: unknown) => {
@@ -692,7 +689,6 @@ export default function SubtaskDebugPanel({
       .then((result) => {
         setSkillsByTaskId((prev) => ({ ...prev, [taskId]: result.skills ?? (result.skill ? [result.skill] : []) }))
         setSkillStatusByTaskId((prev) => ({ ...prev, [taskId]: result.status || 'ready' }))
-        setSkillWriteRootByTaskId((prev) => ({ ...prev, [taskId]: result.skillWriteRoot || prev[taskId] || '' }))
         setSkillDiscoveredCountByTaskId((prev) => ({ ...prev, [taskId]: result.discoveredCount ?? prev[taskId] ?? 0 }))
       })
       .catch((err: unknown) => {
@@ -1714,7 +1710,7 @@ export default function SubtaskDebugPanel({
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                     <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>SKILL.md</div>
                     {skillMdEditing ? (
-                      <span style={{ fontSize: 9, color: '#185EA8', fontWeight: 700 }}>编辑中</span>
+                      <span style={{ fontSize: 9, color: '#185EA8', fontWeight: 700 }}>Editing</span>
                     ) : null}
                   </div>
                   <div style={{ display: 'flex', gap: 6, flex: '0 0 auto', alignItems: 'center' }}>
@@ -1734,7 +1730,7 @@ export default function SubtaskDebugPanel({
                             cursor: skillMdSaving ? 'not-allowed' : 'pointer',
                           }}
                         >
-                          取消
+                          Cancel
                         </button>
                         <button
                           type="button"
@@ -1760,7 +1756,7 @@ export default function SubtaskDebugPanel({
                                 : 'pointer',
                           }}
                         >
-                          {skillMdSaving ? '保存中…' : '保存'}
+                          {skillMdSaving ? 'Saving…' : 'Save'}
                         </button>
                       </>
                     ) : (
@@ -1782,7 +1778,7 @@ export default function SubtaskDebugPanel({
                               : 'pointer',
                         }}
                       >
-                        编辑
+                        Edit
                       </button>
                     )}
                   </div>
@@ -1842,7 +1838,7 @@ export default function SubtaskDebugPanel({
                             enterSkillMdEdit()
                           }
                         }}
-                        title="点击编辑 SKILL.md"
+                        title="Click to edit SKILL.md"
                         style={{
                           flex: 1,
                           minHeight: 0,
@@ -1905,7 +1901,7 @@ export default function SubtaskDebugPanel({
                 }}
               >
                 <div>
-                  <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>Distill 历史</div>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>Distill History</div>
                 </div>
 
                   <div
@@ -1975,7 +1971,7 @@ export default function SubtaskDebugPanel({
                           </div>
 
                           {entry.taskLabel ? (
-                            <div style={{ fontSize: 9, color: '#667085' }}>任务：{entry.taskLabel}</div>
+                            <div style={{ fontSize: 9, color: '#667085' }}>Task: {entry.taskLabel}</div>
                           ) : null}
 
                           {entry.channel === 'feedback' && entry.userComment?.trim() ? (
@@ -1990,7 +1986,7 @@ export default function SubtaskDebugPanel({
                                 border: '1px solid #FEDF89',
                               }}
                             >
-                              用户说：{entry.userComment.trim()}
+                              User said: {entry.userComment.trim()}
                             </div>
                           ) : null}
 
@@ -2008,7 +2004,7 @@ export default function SubtaskDebugPanel({
 
                           {(entry.changes ?? []).length > 0 && entry.channel === 'task_switch' ? (
                             <div style={{ fontSize: 9, color: '#667085', lineHeight: 1.45 }}>
-                              改动：{(entry.changes ?? [])
+                              Changed: {(entry.changes ?? [])
                                 .slice(0, 2)
                                 .map((change) => change.path)
                                 .join('、')}
@@ -2031,7 +2027,7 @@ export default function SubtaskDebugPanel({
                                 cursor: 'pointer',
                               }}
                             >
-                              {anchorIndex !== null ? `查看 Panel #${anchorIndex + 1}` : '查看来源 Task'}
+                              {anchorIndex !== null ? `View Panel #${anchorIndex + 1}` : 'View Source Task'}
                             </button>
                           ) : null}
                         </div>

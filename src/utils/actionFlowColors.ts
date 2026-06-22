@@ -9,7 +9,7 @@ import {
 
 const LONG_RUNNING_MS = 60_000
 
-/** 从 ActionFlowVisualization 抽出，treemap 内 mini block 共用同一套着色 */
+/** Extracted from ActionFlowVisualization; treemap mini blocks share the same coloring */
 export function statusColors(status: ActionStatus): { fill: string; stroke: string; icon: string } {
   const { completed, running, red, pending } = actionFlowPalette
   switch (status) {
@@ -57,10 +57,10 @@ export function buildTokenColorScale(actions: MappedAction[]): d3.ScaleSequentia
 }
 
 /**
- * 与 ActionFlowVisualization 中 rect 着色一致：
- * - ghost / ghostError：灰 / 红
- * - type 模式：`typePaletteId` 对应调色盘
- * - 否则 status / tokens（子会话不再单独紫色）
+ * Matches rect coloring in ActionFlowVisualization:
+ * - ghost / ghostError: gray / red
+ * - type mode: palette for `typePaletteId`
+ * - otherwise status / tokens (child sessions no longer get separate purple)
  */
 export function resolveActionBlockColors(
   act: MappedAction,
@@ -71,8 +71,8 @@ export function resolveActionBlockColors(
   const isGhost = act.forkGhost === true
 
   /**
-   * 状态优先级最高：error / pending 永远覆盖 tokens / type / ghost。
-   * 这样在高风险状态下不会被“语义色”稀释。
+   * Status wins: error / pending always override tokens / type / ghost,
+   * so high-risk states are not diluted by semantic colors.
    */
   if (act.status === 'error') {
     const err = statusColors('error')

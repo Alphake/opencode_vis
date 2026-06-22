@@ -1,9 +1,9 @@
 import type { OcSseActionEvent } from '../types/opencode'
 
 /**
- * 从 `/global/event` 的单条事件上解析 sessionID（兼容 payload.properties / 顶层字段）。
- * 用于 `message.part.delta` 等对高频事件做按会话的节流刷新。
- * OpenCode 常见形态：`{ directory, payload: { type, sessionID, ... } }` 或扁平字段。
+ * Parse sessionID from a single `/global/event` payload (supports payload.properties / top-level fields).
+ * Used to throttle per-session refresh for high-frequency events like `message.part.delta`.
+ * Common OpenCode shapes: `{ directory, payload: { type, sessionID, ... } }` or flat fields.
  */
 export function sseSessionIdFromEvent(raw: unknown): string | undefined {
   if (!raw || typeof raw !== 'object') return undefined
@@ -25,7 +25,7 @@ export function parseActionRelatedSseEvent(raw: unknown): OcSseActionEvent | nul
   const o = raw as Record<string, unknown>
   const payload = (o.payload as Record<string, unknown> | undefined) ?? o
   const type = (payload.type as string) ?? (o.type as string)
-  /** 与 OpenCode Bus 对齐：权限常见为 permission.asked；部分版本/插件为 permission.updated */
+  /** Aligned with OpenCode Bus: permissions are often permission.asked; some versions/plugins use permission.updated */
   const isPermission =
     type === 'permission.asked' || type === 'permission.updated'
   const isCompaction = type === 'session.compacted'

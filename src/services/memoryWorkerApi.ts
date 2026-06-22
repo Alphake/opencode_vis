@@ -2,7 +2,7 @@ import type { IngestTracePayload } from '../types/trace'
 
 function resolveMemoryWorkerBase(): string {
   const raw = import.meta.env.VITE_MEMORY_WORKER_BASE
-  // 空字符串或未配置 = 同源 /ingest-trace，由 Vite 代理到 memory-worker（plugin 模式）
+  // Empty string or unset = same-origin /ingest-trace, proxied by Vite to memory-worker (plugin mode)
   if (raw === undefined || raw === '') return ''
   if (typeof raw === 'string') return raw.trim().replace(/\/$/, '')
   return ''

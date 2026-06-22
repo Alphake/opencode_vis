@@ -8,7 +8,7 @@ const fontSans =
 
 const ANCHOR_GAP = 4
 const VIEW_PAD = 8
-/** 预估菜单尺寸（用于视口夹紧；与下方 padding 略放大一致） */
+/** Estimated menu size (for viewport clamping; slightly larger than padding below) */
 const MENU_EST_W = 220
 const MENU_EST_H = 100
 
@@ -71,7 +71,7 @@ function rectsOverlap(
   return !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom)
 }
 
-/** 优先紧贴 action 右下角；仅在贴边或遮挡时平移 */
+/** Prefer flush to action bottom-right; shift only when clipped or overlapping */
 function clampMenuPosition(
   anchor: DOMRect,
   vw: number,

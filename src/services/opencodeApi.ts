@@ -6,14 +6,14 @@ import type {
 } from '../types/opencode'
 
 /**
- * OpenCode HTTP base URL — 由 `vite.config.ts` 在构建时注入：
- * `VITE_OPENCODE_BASE` → 否则 `OPENCODE_BASE` → 否则默认端口。
+ * OpenCode HTTP base URL — injected at build time by `vite.config.ts`:
+ * `VITE_OPENCODE_BASE` → else `OPENCODE_BASE` → else default port.
  *
- * 配置 `.env.local` 时任意使用 `VITE_OPENCODE_BASE` 或 `OPENCODE_BASE`（与 memory-worker 对齐），二者不一致时以 `VITE_OPENCODE_BASE` 为准。
+ * In `.env.local`, either `VITE_OPENCODE_BASE` or `OPENCODE_BASE` may be set (aligned with memory-worker); when both differ, `VITE_OPENCODE_BASE` wins.
  */
 function resolveOpencodeBase(): string {
   if (typeof __OPENCODE_HTTP_BASE__ !== 'undefined') {
-    // 空字符串表示同源 + Vite 代理（plugin 模式）
+    // Empty string means same-origin + Vite proxy (plugin mode)
     return __OPENCODE_HTTP_BASE__.replace(/\/$/, '')
   }
   return 'http://127.0.0.1:4096'
@@ -21,7 +21,7 @@ function resolveOpencodeBase(): string {
 
 const BASE = resolveOpencodeBase()
 
-/** 防止 OpenCode 请求永久挂起导致前端一直 loading；≤0 表示不启用超时 */
+/** Prevent OpenCode requests from hanging forever and leaving the UI loading; ≤0 disables timeout */
 export function opencodeFetchTimeoutMs(): number {
   const raw = import.meta.env.VITE_OPENCODE_FETCH_TIMEOUT_MS
   if (typeof raw !== 'string') return 45_000
@@ -32,8 +32,8 @@ export function opencodeFetchTimeoutMs(): number {
 }
 
 /**
- * 为 fetch 附加超时信号（可与外部 AbortSignal 合并）。
- * 非常老的浏览器若无 AbortSignal.timeout 则退化为不设超时。
+ * Attach a timeout signal to fetch (may be merged with an external AbortSignal).
+ * On very old browsers without AbortSignal.timeout, falls back to no timeout.
  */
 function fetchSignal(existing?: AbortSignal): AbortSignal | undefined {
   const ms = opencodeFetchTimeoutMs()

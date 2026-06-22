@@ -92,7 +92,7 @@ MW_CORS_ORIGINS = [x.strip() for x in (os.environ.get("MW_CORS_ORIGINS") or "htt
 MW_ANALYZER_SESSION_ATTEMPTS = max(1, int(os.environ.get("MW_ANALYZER_SESSION_ATTEMPTS") or "5"))
 INGEST_DEDUP_FAILED_COOLDOWN_SEC = max(60, int(os.environ.get("INGEST_DEDUP_FAILED_COOLDOWN_SEC") or "600"))
 
-# OpenCode HTTP 超时（代码内常量，不走 env）
+# OpenCode HTTP timeouts (internal constants, not from env)
 MW_OPENCODE_HTTP_TIMEOUT_SEC = 60
 MW_OPENCODE_MESSAGE_TIMEOUT_SEC = 180
 MW_ANALYZER_WAIT_PER_ATTEMPT_SEC = 180
@@ -146,13 +146,13 @@ def ensure_prompt_files() -> None:
     if not analyzer.exists():
         analyzer.write_text(
             (
-                "你是 SkillAnalyzer（Judge）。请根据 trace 与 pool_summary 输出唯一 JSON，禁止任何解释性文字。\n\n"
-                "要求：\n"
-                "1) operation 只能是 CREATE / UPDATE / NONE\n"
-                "2) NONE: skill_name='' 且 source_skill_absolute_path=''\n"
-                "3) UPDATE: source_skill_absolute_path 必须非空且来自 pool_summary\n"
-                "4) guide 要包含 folders、file_guidance、skill_md、trace_anchors\n\n"
-                "输出 schema：SkillJudgeEnvelope v2.0。\n\n"
+                "You are SkillAnalyzer (Judge). From trace and pool_summary, output a single JSON object only; no explanatory prose.\n\n"
+                "Requirements:\n"
+                "1) operation must be CREATE / UPDATE / NONE only\n"
+                "2) NONE: skill_name='' and source_skill_absolute_path=''\n"
+                "3) UPDATE: source_skill_absolute_path must be non-empty and from pool_summary\n"
+                "4) guide must include folders, file_guidance, skill_md, trace_anchors\n\n"
+                "Output schema: SkillJudgeEnvelope v2.0.\n\n"
                 "trace:\n{{TRACE_JSON}}\n\n"
                 "pool_summary:\n{{POOL_SUMMARY_JSON}}\n"
             ),
@@ -162,12 +162,12 @@ def ensure_prompt_files() -> None:
     if not switcher.exists():
         switcher.write_text(
             (
-                "你是 TaskSwitchJudge。只根据用户输入判断任务是否从上一段切换到当前输入。\n\n"
-                "输入 JSON 包含 previous_user_prompts（上次提取以来已累积的用户输入，旧→新）"
-                "和 current_user_prompt（本轮用户输入）。不要参考 agent 执行信息。\n\n"
-                "判断 task_switched=true 的情况：当前输入开启了新的目标/交付物/问题域，"
-                "而不是对上一任务的补充、纠错、继续执行、验证或格式调整。\n\n"
-                "只输出 JSON 对象：\n"
+                "You are TaskSwitchJudge. From user input alone, decide whether the task switched from the previous segment to the current input.\n\n"
+                "The input JSON contains previous_user_prompts (accumulated user input since last extraction, old→new) "
+                "and current_user_prompt (this turn's user input). Do not use agent execution information.\n\n"
+                "Set task_switched=true when the current input starts a new goal, deliverable, or problem domain, "
+                "rather than a supplement, correction, continuation, verification, or format tweak to the prior task.\n\n"
+                "Output only a JSON object:\n"
                 "{\"task_switched\": boolean, \"confidence\": \"low|medium|high\", "
                 "\"reason\": \"string\", "
                 "\"previous_task\": {\"title\": \"string\", \"description\": \"string\"}, "
@@ -180,19 +180,19 @@ def ensure_prompt_files() -> None:
     if not feedback.exists():
         feedback.write_text(
             (
-                "你是 FeedbackSkillDistiller。你会收到一个任务片段、用户整体反馈、"
-                "以及用户针对一个或多个 trace panel 的局部反馈。\n\n"
-                "目标：把这些反馈沉淀为一个可复用 skill 草案，用于以后遇到相似任务/trace 模式时指导 agent 行动。\n\n"
-                "输入里的 feedbackContext.traceKind=\"feedback\" 表示这是 analyzer trace 的反馈蒸馏变体；"
-                "selectedPanels 内只包含用户勾选的 panel trace，不要分析未勾选的 panel。\n\n"
-                "要求：\n"
-                "1. 只输出 JSON，不要输出 Markdown、解释文字或代码围栏。\n"
-                "2. skill_name 使用 kebab-case，简短且稳定。\n"
-                "3. description 描述触发场景，不要只是复述任务 id。\n"
-                "4. steps 必须是可执行的行为规则。\n"
-                "5. trace_anchors 要引用输入里的 panel subtaskIndex/actionKey/messageId 等锚点，说明反馈来自哪里。\n"
-                "6. 如果信息不足以沉淀 skill，输出 operation=\"NONE\"，并在 rationale 说明原因。\n\n"
-                "输出 schema：\n"
+                "You are FeedbackSkillDistiller. You receive a task segment, overall user feedback, "
+                "and localized feedback on one or more trace panels.\n\n"
+                "Goal: distill this feedback into a reusable skill draft to guide the agent on similar task/trace patterns later.\n\n"
+                "When feedbackContext.traceKind=\"feedback\" in the input, this is a feedback-distillation variant of the analyzer trace; "
+                "selectedPanels contains only user-selected panel traces—do not analyze unselected panels.\n\n"
+                "Requirements:\n"
+                "1. Output JSON only; no Markdown, explanations, or code fences.\n"
+                "2. skill_name uses kebab-case; keep it short and stable.\n"
+                "3. description describes trigger scenarios; do not merely restate the task id.\n"
+                "4. steps must be executable behavioral rules.\n"
+                "5. trace_anchors should cite panel subtaskIndex/actionKey/messageId etc. from the input to show where feedback came from.\n"
+                "6. If information is insufficient to distill a skill, output operation=\"NONE\" and explain why in rationale.\n\n"
+                "Output schema:\n"
                 "{\n"
                 "  \"operation\": \"CREATE\" | \"UPDATE\" | \"NONE\",\n"
                 "  \"skill_name\": \"string\",\n"
@@ -218,26 +218,26 @@ def ensure_prompt_files() -> None:
     if not error_diagnosis.exists():
         error_diagnosis.write_text(
             (
-                "你是 VibeTrace Panel Analyzer。你会收到一个已经完成的 subtask trace。它可能成功，也可能包含失败 action。\n\n"
-                "目标：为这个 trace panel 生成一个极简解读。如果没有错误，只用一句话解释“为了什么、做了什么、最终得到什么”。"
-                "如果有错误，先给同样的一句话过程总结，再做错误纠错、错因分析和因果推理，说明哪里失败、根本原因是什么、为什么会出现这种错误，以及下一步如何修。\n\n"
-                "要求：\n"
-                "1. 只输出 JSON，不要输出 Markdown、解释文字或代码围栏。\n"
-                "2. summary 必须只有一句话，尽量短，格式接近“为了 X，执行了 Y，最终得到 Z”。\n"
-                "3. 必须严格根据 input.subtask.actions 和 input.errorActions 总结，不要编造 trace 中不存在的目标、结果、文件、网页或错误。\n"
-                "4. 说明整体步骤，但不要写成逐 action 流水账；要简洁、概括、可读。\n"
-                "5. JSON 字符串内部不要使用未转义的英文双引号；需要引用用户原话时改用中文书名号、单引号或省略引用。\n"
-                "6. 如果 input.hasError=false，rootCause、causalChain、evidence、fixSuggestion 必须为空字符串或空数组，confidence 根据 trace 信息完整度给出。\n"
-                "7. 如果 input.hasError=true，只能基于输入 trace 里的证据推理；证据不足时要明确写 confidence=\"low\"。\n"
-                "8. 有错误时要区分表层错误（例如工具报错文本）和根本原因（例如前置路径定位错误、遗漏验证、并发子任务失败）。\n"
-                "9. 因果链、证据和修复建议不是强制项；只有 trace 里有清楚证据时才填写，否则保持空数组或空字符串，避免冗长。\n\n"
-                "输出 schema：\n"
+                "You are VibeTrace Panel Analyzer. You receive a completed subtask trace. It may succeed or contain failed actions.\n\n"
+                "Goal: produce a minimal interpretation for this trace panel. If there is no error, explain in one sentence what it was for, what was done, and what was ultimately obtained. "
+                "If there is an error, give the same one-sentence process summary first, then error correction, cause analysis, and causal reasoning: where it failed, root cause, why the error occurred, and how to fix next.\n\n"
+                "Requirements:\n"
+                "1. Output JSON only; no Markdown, explanations, or code fences.\n"
+                "2. summary must be one sentence, as short as possible, in the form \"To X, performed Y, ultimately obtained Z\".\n"
+                "3. Summarize strictly from input.subtask.actions and input.errorActions; do not invent goals, results, files, pages, or errors not in the trace.\n"
+                "4. Describe overall steps without an action-by-action log; keep it concise, summarized, and readable.\n"
+                "5. Do not use unescaped ASCII double quotes inside JSON strings; when quoting the user, use guillemets, single quotes, or omit the quote.\n"
+                "6. If input.hasError=false, rootCause, causalChain, evidence, fixSuggestion must be empty string or empty array; confidence reflects trace completeness.\n"
+                "7. If input.hasError=true, reason only from evidence in the input trace; if evidence is insufficient, set confidence=\"low\".\n"
+                "8. When there is an error, distinguish surface error (e.g. tool error text) from root cause (e.g. wrong path, missing validation, concurrent subtask failure).\n"
+                "9. causalChain, evidence, and fixSuggestion are optional; fill only when the trace has clear evidence, otherwise keep empty arrays/strings to avoid verbosity.\n\n"
+                "Output schema:\n"
                 "{\n"
-                "  \"summary\": \"一句话说明这个 panel 为了什么做了什么最终得到什么\",\n"
-                "  \"rootCause\": \"无错误时为空字符串；有错误时写根本原因\",\n"
+                "  \"summary\": \"One sentence: what this panel was for, what it did, and what it produced\",\n"
+                "  \"rootCause\": \"Empty when no error; root cause when there is an error\",\n"
                 "  \"causalChain\": [],\n"
                 "  \"evidence\": [],\n"
-                "  \"fixSuggestion\": \"无错误时为空字符串；有错误时写下一步建议\",\n"
+                "  \"fixSuggestion\": \"Empty when no error; next-step suggestion when there is an error\",\n"
                 "  \"confidence\": \"high\" | \"medium\" | \"low\"\n"
                 "}\n\n"
                 "input:\n{{ERROR_DIAGNOSIS_INPUT_JSON}}\n"
@@ -247,10 +247,10 @@ def ensure_prompt_files() -> None:
     if not writer.exists():
         writer.write_text(
             (
-                "你是 SkillWriter。\n"
-                "- CREATE: 在 SKILL_WRITE_ROOT/<skill_name>/ 新建技能目录\n"
-                "- UPDATE: 先读取 source_skill_bundle 再改写\n"
-                "- NONE: 跳过\n"
+                "You are SkillWriter.\n"
+                "- CREATE: create a skill directory under SKILL_WRITE_ROOT/<skill_name>/\n"
+                "- UPDATE: read source_skill_bundle first, then rewrite\n"
+                "- NONE: skip\n"
             ),
             encoding="utf-8",
         )
@@ -1257,15 +1257,15 @@ def _summarize_file_guidance(file_guidance: Any) -> list[dict[str, str]]:
 def _one_line_change_summary(*, operation: str, rationale: str, changes: list[dict[str, str]]) -> str:
     op = str(operation or "UPDATE").upper()
     if op == "CREATE":
-        lead = "新增 skill"
+        lead = "Create skill"
     elif op == "DELETE":
-        lead = "删除 skill"
+        lead = "Delete skill"
     elif op == "NONE":
-        lead = "无需改动"
+        lead = "No changes needed"
     elif op == "MANUAL_EDIT":
-        lead = "手动编辑 SKILL.md"
+        lead = "Manual SKILL.md edit"
     else:
-        lead = "更新 skill"
+        lead = "Update skill"
     if changes:
         first = changes[0]
         path = str(first.get("path") or "SKILL.md")
@@ -1447,7 +1447,7 @@ def _synthesize_history_from_skill_record(skill: dict[str, Any], task: dict[str,
         entry["skillName"] = skill_name
         if not entry.get("rationale"):
             entry["rationale"] = str(skill.get("rationale") or "")
-        if not entry.get("summary") or entry.get("summary") == "更新 skill":
+        if not entry.get("summary") or entry.get("summary") == "Update skill":
             entry["summary"] = _one_line_change_summary(
                 operation=str(entry.get("operation") or skill.get("operation") or "UPDATE"),
                 rationale=str(entry.get("rationale") or ""),
@@ -1561,8 +1561,8 @@ def save_task_skill_md(payload: dict[str, Any]) -> dict[str, Any]:
         "source": "manual_edit",
         "channel": "manual",
         "operation": "MANUAL_EDIT",
-        "rationale": "用户在 Skill Panel 中直接编辑并保存 SKILL.md。",
-        "summary": "手动编辑 SKILL.md",
+        "rationale": "User directly edited and saved SKILL.md in the Skill Panel.",
+        "summary": "Manual SKILL.md edit",
         "changes": [{"path": "SKILL.md", "operation": "UPDATE", "reason": "manual edit", "summary": ""}],
         "traceAnchors": [],
         "createdAt": created_at,
@@ -2007,7 +2007,7 @@ def distill_feedback_skill(payload: dict[str, Any]) -> dict[str, Any]:
     target_dir = SKILL_WRITE_ROOT / safe_skill
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    description = str(analysis.get("description") or "基于用户对子任务轨迹的反馈重新沉淀的 skill。").strip()
+    description = str(analysis.get("description") or "Skill distilled from user feedback on subtask traces.").strip()
     rationale = str(analysis.get("rationale") or comment or "").strip()
     triggers = as_text_list(analysis.get("trigger_conditions"))
     steps = as_text_list(analysis.get("steps"))
@@ -2020,10 +2020,10 @@ def distill_feedback_skill(payload: dict[str, Any]) -> dict[str, Any]:
     skill_md = (
         f"---\nname: {safe_skill}\n"
         f"description: {description}\n---\n\n"
-        f"## 能力说明\n\n{description}\n\n"
-        f"## 使用方式\n\n{bullet_lines(triggers, '当遇到相似任务场景时使用本 skill。')}\n\n"
-        f"## 步骤流程\n\n{bullet_lines(steps)}\n\n"
-        f"## 注意事项 / 约束\n\n{bullet_lines(constraints)}\n"
+        f"## Capability\n\n{description}\n\n"
+        f"## Usage\n\n{bullet_lines(triggers, 'Use this skill when encountering similar task scenarios.')}\n\n"
+        f"## Steps\n\n{bullet_lines(steps)}\n\n"
+        f"## Cautions / constraints\n\n{bullet_lines(constraints)}\n"
     )
     skill_path = target_dir / "SKILL.md"
     skill_path.write_text(skill_md, encoding="utf-8")
@@ -3696,7 +3696,7 @@ def opencode_create_session(
                     directory=directory,
                 )
             return session
-        # fork 失败时回退 new session
+        # Fall back to new session when fork fails
     status, text = opencode_request("POST", "/session", {}, directory=directory)
     if status != 200:
         raise RuntimeError(f"create session failed: {status} {text}")
@@ -3961,17 +3961,17 @@ def build_mock_envelope(trace: dict[str, Any], pool_summary: dict[str, Any]) -> 
         operation = "UPDATE"
         skill_name = chosen.get("skill_name") or "mock-skill"
         source_path = chosen.get("source_skill_absolute_path") or ""
-        rationale = "命中现有 skill，先走 UPDATE。"
+        rationale = "Matched an existing skill; proceeding with UPDATE."
     else:
         operation = "CREATE"
         skill_name = "auto-generated-skill"
         source_path = ""
-        rationale = "未发现现有 skill，先 CREATE。"
+        rationale = "No existing skill found; proceeding with CREATE."
     if len(user_input.strip()) < 2:
         operation = "NONE"
         skill_name = ""
         source_path = ""
-        rationale = "输入信息不足，暂不生成。"
+        rationale = "Insufficient input; skipping generation."
     return {
         "schema_version": "2.0",
         "run_id": run_id,
@@ -3980,22 +3980,22 @@ def build_mock_envelope(trace: dict[str, Any], pool_summary: dict[str, Any]) -> 
         "source_skill_absolute_path": source_path,
         "rationale": rationale,
         "guide": {
-            "overall": "MVP mock envelope，后续替换为真实 analyzer 输出。",
+            "overall": "MVP mock envelope; replace with real analyzer output later.",
             "folders": {
-                "skill_root_layout": "保持标准目录结构",
+                "skill_root_layout": "Keep standard directory layout",
                 "scripts": "none",
                 "reference": "none",
                 "data": "none",
                 "other": "none",
             },
-            "file_guidance": [{"relative_path": "SKILL.md", "action": "update" if operation == "UPDATE" else "create", "guidance": "补全能力、使用方式、步骤、约束、checklist。"}],
+            "file_guidance": [{"relative_path": "SKILL.md", "action": "update" if operation == "UPDATE" else "create", "guidance": "Complete capability, usage, steps, constraints, and checklist."}],
             "skill_md": {
-                "frontmatter_description": "这个 skill 用于将 trace 分析结果转为可复用流程。",
-                "section_capability": "解释该 skill 的能力边界。",
-                "section_usage": "给出触发条件、输入输出。",
-                "section_steps": "列出分步执行方式。",
-                "section_cautions": "说明风险和失败兜底。",
-                "section_checklist": "给出交付校验清单。",
+                "frontmatter_description": "This skill turns trace analysis results into a reusable workflow.",
+                "section_capability": "Explain the skill's capability boundaries.",
+                "section_usage": "State trigger conditions, inputs, and outputs.",
+                "section_steps": "List step-by-step execution.",
+                "section_cautions": "Describe risks and failure fallbacks.",
+                "section_checklist": "Provide a delivery verification checklist.",
             },
             "trace_anchors": [{"turn_ref": str(turn.get("endAssistantMessageId") or ""), "quote_or_summary": user_input[:200]}],
         },
@@ -4049,9 +4049,9 @@ def build_skill_md_content(envelope: dict[str, Any], writer_prompt: str) -> str:
 
     frontmatter_raw = skill_md.get("frontmatter_description")
     if isinstance(frontmatter_raw, dict):
-        desc = str(frontmatter_raw.get("guidance") or "").strip() or "请补充该 skill 的场景与输入输出"
+        desc = str(frontmatter_raw.get("guidance") or "").strip() or "Add this skill's scenario, inputs, and outputs"
     else:
-        desc = normalize_section(frontmatter_raw, "请补充该 skill 的场景与输入输出")
+        desc = normalize_section(frontmatter_raw, "Add this skill's scenario, inputs, and outputs")
 
     def sec(title: str, value: Any) -> str:
         body = normalize_section(value, "none")
@@ -4059,11 +4059,11 @@ def build_skill_md_content(envelope: dict[str, Any], writer_prompt: str) -> str:
     return (
         f"---\nname: {skill_name}\ndescription: {desc}\n---\n\n"
         f"> generated by memory-worker python backend (MVP)\n\n"
-        f"{sec('能力说明', skill_md.get('section_capability'))}\n"
-        f"{sec('使用方式', skill_md.get('section_usage'))}\n"
-        f"{sec('步骤流程', skill_md.get('section_steps'))}\n"
-        f"{sec('注意事项 / 约束', skill_md.get('section_cautions'))}\n"
-        f"{sec('交付标准 / checklist', skill_md.get('section_checklist'))}\n"
+        f"{sec('Capability', skill_md.get('section_capability'))}\n"
+        f"{sec('Usage', skill_md.get('section_usage'))}\n"
+        f"{sec('Steps', skill_md.get('section_steps'))}\n"
+        f"{sec('Cautions / constraints', skill_md.get('section_cautions'))}\n"
+        f"{sec('Delivery checklist', skill_md.get('section_checklist'))}\n"
         "## Writer Prompt Snapshot\n\n```text\n"
         f"{writer_prompt}\n```\n"
     )
@@ -4165,8 +4165,8 @@ def run_writer(
         }
         writer_llm_prompt = (
             f"{writer_prompt}\n\n"
-            "现在开始执行真实改动。只能在 target_root 下操作。完成后输出约定 JSON。\n\n"
-            f"输入：\n{json.dumps(writer_input, ensure_ascii=False, indent=2)}"
+            "Execute the real changes now. Operate only under target_root. When done, output the agreed JSON.\n\n"
+            f"Input:\n{json.dumps(writer_input, ensure_ascii=False, indent=2)}"
         )
         try:
             llm_out = opencode_generate_text(

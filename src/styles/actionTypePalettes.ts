@@ -106,7 +106,7 @@ const CONTRAST: Record<ActionType, ActionTypeTriad> = {
   Subagent: { fill: '#FFEADA', stroke: '#C46D31', accent: '#7B4320' },
   Response: { fill: '#E6F6D8', stroke: '#5F9B35', accent: '#395E21' },
   Read: { fill: '#DCF6FB', stroke: '#2F9AB3', accent: '#1B5E6D' },
-  /** 与 Read 同色带：`skill_router` 等「取数」类工具 */
+  /** Same color band as Read: data-fetch tools */
   SkillRouter: { fill: '#DCF6FB', stroke: '#2F9AB3', accent: '#1B5E6D' },
   Write: { fill: '#EAF3FF', stroke: '#4E78C0', accent: '#2D4770' },
   Shell: { fill: '#EFEFF3', stroke: '#6A7082', accent: '#3F4450' },

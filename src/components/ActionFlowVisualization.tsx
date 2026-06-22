@@ -345,7 +345,7 @@ function buildFlowEndDiagnosisHtml(item: MemoryWorkerErrorDiagnosis | undefined,
   if (item.status === 'running') {
     return `<div style="border-top:1px solid #D0E2FF;margin-top:10px;padding-top:10px;">
 <div style="font-size:12px;font-weight:700;color:#1D4ED8;margin-bottom:4px;">Trace summary</div>
-<div style="font-size:11px;line-height:1.45;color:#374151;">正在分析本子 panel 轨迹…</div>
+<div style="font-size:11px;line-height:1.45;color:#374151;">Analyzing this panel trace…</div>
 </div>`
   }
   const hasError =
@@ -380,7 +380,7 @@ ${item.runDir ? `<div style="font-size:10px;line-height:1.4;color:#9A3412;margin
 function buildFlowEndPlaceholderHtml(esc: (s: string) => string): string {
   return `<div style="border-top:1px solid #E5E7EB;margin-top:10px;padding-top:10px;">
 <div style="font-size:12px;font-weight:700;color:#6B7280;margin-bottom:4px;">Trace summary</div>
-<div style="font-size:11px;line-height:1.45;color:#6B7280;">${esc('本轮 assistant 结束后会自动生成一句话总结；有错时附加错因分析。刷新页面后从本地缓存或 memory worker 恢复。')}</div>
+<div style="font-size:11px;line-height:1.45;color:#6B7280;">${esc('A one-line summary is generated automatically after this assistant turn completes; error diagnosis is appended when failures occur. Restored from local cache or memory worker after refresh.')}</div>
 </div>`
 }
 

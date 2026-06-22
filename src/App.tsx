@@ -541,7 +541,7 @@ function App() {
   const composerModelOptionsForUi = useMemo(() => {
     const t = composerModelRef.trim()
     if (!t || composerModelOptions.some((o) => o.ref === t)) return composerModelOptions
-    return [...composerModelOptions, { ref: t, label: `${t}（本地已保存）`, providerId: t.split('/')[0] || 'saved', providerName: '已保存' }].sort((a, b) =>
+    return [...composerModelOptions, { ref: t, label: `${t} (saved locally)`, providerId: t.split('/')[0] || 'saved', providerName: 'Saved' }].sort((a, b) =>
       a.ref.localeCompare(b.ref),
     )
   }, [composerModelOptions, composerModelRef])
@@ -766,7 +766,7 @@ function App() {
     if (!stopMessage) return
 
     const stopId = stopMessage.info.id
-    // stop 已出现 → 结束时间在 2 分钟内 且 未 claim → 才 ingest（见下方顺序）
+    // Ingest only when stop appeared, finish time within 2 minutes, and not yet claimed (see order below)
     if (!isAssistantStopWithinIngestWindow(stopMessage)) {
       const completedMs = getAssistantStopCompletedMs(stopMessage)
       console.info('[VibeTrace][trace] skip ingest — stop older than fresh window', {
@@ -852,7 +852,7 @@ function App() {
 
     return () => {
       window.clearTimeout(timer)
-      // SSE 可能在 debounce 内再次刷新 messages；若过早标记「已处理」会导致 timer 被取消且永不 ingest
+      // SSE may refresh messages inside debounce; marking "processed" too early cancels the timer and skips ingest forever
       if (!traceIngestDebounceStartedRef.current.has(traceKey)) {
         releaseTraceIngestClaim(sid, endAssistantMessageId)
       }
@@ -1960,7 +1960,7 @@ function App() {
               ) : null}
               {SHOW_COMPOSER_MODEL_UI && (
               <span
-                title="与左侧输入框「模型」选择同步"
+                title="Synced with the Model selector in the left input box"
                 style={{
                   fontSize: 11,
                   fontWeight: 400,
@@ -1971,10 +1971,10 @@ function App() {
                 }}
               >
                 {composerModelRef.trim()
-                  ? `模型 ${composerModelRef.trim()}`
+                  ? `Model ${composerModelRef.trim()}`
                   : envBootstrapModel
-                    ? `模型 ${envBootstrapModel}（.env）`
-                    : '模型：服务端默认'}
+                    ? `Model ${envBootstrapModel} (.env)`
+                    : 'Model: server default'}
               </span>
               )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

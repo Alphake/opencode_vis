@@ -6,13 +6,13 @@ import type {
   ToolPart,
 } from '../types/opencode'
 
-/** 从 tool part 的 state.input 解析 question 工具的题干与选项（与 GET /message 一致） */
+/** Parse question tool stem and options from tool part state.input (same as GET /message) */
 export function parseQuestionInputQuestions(input: Record<string, unknown> | undefined): OcQuestionInfo[] {
   if (!input || !Array.isArray(input.questions)) return []
   return input.questions as OcQuestionInfo[]
 }
 
-/** 当前会话消息里是否存在「待作答」且已带 input.questions 的 question 工具（用于内联 UI，避免只依赖 SSE） */
+/** Whether the current session has an open question tool with input.questions (for inline UI, not SSE-only) */
 export function messagesHaveOpenQuestionWithInput(messages: OcMessage[]): boolean {
   for (const m of messages) {
     if (m.info.role !== 'assistant') continue
@@ -37,8 +37,8 @@ function toolPartMatchesPending(
 }
 
 /**
- * 优先使用全局 SSE `question.asked` 写入的待答对象（含官方 `id` = request id），
- * 与当前 tool part 的 messageID/callID 对齐。比单独依赖 GET /question 更可靠。
+ * Prefer the pending object from global SSE `question.asked` (includes official `id` = request id),
+ * aligned with the tool part messageID/callID. More reliable than GET /question alone.
  */
 export function findRequestIdFromSsePending(
   pending: OcPendingQuestionRequest | null | undefined,
@@ -53,7 +53,7 @@ export function findRequestIdFromSsePending(
   return undefined
 }
 
-/** 供与 GET /question 列表匹配（兼容 messageId/callId 等字段名） */
+/** Match against GET /question list (supports messageId/callId field name variants) */
 export function findQuestionRequestIdForToolPart(
   list: OcPendingQuestionItem[],
   part: ToolPart,

@@ -530,7 +530,7 @@ export default function SubtaskCard({
               e.stopPropagation()
               onOpenFeedbackComment?.()
             }}
-            title={hasFeedbackComment ? '查看或修改这个 panel 的反馈' : '给这个 panel 写反馈'}
+            title={hasFeedbackComment ? 'View or edit feedback for this panel' : 'Write feedback for this panel'}
             style={{
               flex: '0 0 auto',
               border: hasFeedbackComment ? '1px solid #86B6FF' : '1px solid #D7E3F8',

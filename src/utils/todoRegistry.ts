@@ -2,7 +2,7 @@ import type { OcMessage, OcTodo } from '../types/opencode'
 import { isTodoWriteMessage, parseTodowriteTodosFromMessage } from './subtaskGrouping'
 import { normalizeTodoContent } from './subtaskLinkage'
 
-/** 会话内稳定 id（含 OpenCode 下发 id 或本地产 uuid） */
+/** Stable id within the session (OpenCode-provided id or locally generated uuid) */
 export type CanonicalTodo = OcTodo & { id: string }
 
 export interface TodoSnapshot {
@@ -11,11 +11,11 @@ export interface TodoSnapshot {
 }
 
 export interface SessionTodoModel {
-  /** messageIndex -> 该条 todowrite 之后的 canonical 列表 */
+  /** messageIndex -> canonical list after that todowrite */
   canonicalAtMessageIndex: Map<number, CanonicalTodo[]>
-  /** 与 API 对齐后的当前列表（全状态） */
+  /** Current list aligned with API (all statuses) */
   latestActive: CanonicalTodo[]
-  /** 曾出现且已完成的 id → 最新快照（用于历史区：仅展示已不在当前列表中的已完成项） */
+  /** id of completed items that appeared before → latest snapshot (history: only items no longer in current list) */
   completedArchive: Map<string, CanonicalTodo>
 }
 
@@ -53,10 +53,10 @@ function mergeCompletedArchive(archive: Map<string, CanonicalTodo>, list: Canoni
 }
 
 /**
- * 按会话消息时间顺序 + 最终 API 列表，为每条 todo 分配稳定 id，并维护「已完成」归档。
- * - 同一条目多次更新：优先用 API `id`；否则按与上一快照 **content** 相同视为同一条。
- * - 当前列表：`latestActive`
- * - 历史：仅保留 **已完成** 且 **当前 latestActive 中已不存在该 id** 的条目（避免与当前重复）。
+ * Assign stable ids per message order + final API list, and maintain a completed archive.
+ * - Repeated updates to one item: prefer API `id`; else same **content** as previous snapshot = same item.
+ * - Current list: `latestActive`
+ * - History: only **completed** items whose id is **no longer in latestActive** (avoid duplicating current).
  */
 export function buildSessionTodoModel(
   messages: OcMessage[],
@@ -101,12 +101,12 @@ export function buildSessionTodoModel(
   }
 }
 
-/** 供 UI：历史区只展示「已完成且已离开当前列表」的条目 */
+/** For UI: history shows only completed items that left the current list */
 export function archivedCompletedList(archive: Map<string, CanonicalTodo>): CanonicalTodo[] {
   return [...archive.values()].sort((a, b) => a.content.localeCompare(b.content, 'zh-CN'))
 }
 
-/** 供 UI：按 message 顺序的历次快照（含 id） */
+/** For UI: ordered snapshots by message (with ids) */
 export function snapshotsOrdered(model: SessionTodoModel): TodoSnapshot[] {
   const out: TodoSnapshot[] = []
   const indices = [...model.canonicalAtMessageIndex.keys()].sort((a, b) => a - b)
@@ -117,7 +117,7 @@ export function snapshotsOrdered(model: SessionTodoModel): TodoSnapshot[] {
   return out
 }
 
-/** 消息时间轴上最后一条 todowrite 对应的快照（视为当前「这一批」） */
+/** Snapshot for the last todowrite on the message timeline (treated as the current batch) */
 export function latestTodowriteSnapshotTodos(model: SessionTodoModel): CanonicalTodo[] | null {
   let bestIdx = -1
   let best: CanonicalTodo[] | null = null
@@ -131,17 +131,17 @@ export function latestTodowriteSnapshotTodos(model: SessionTodoModel): Canonical
 }
 
 export interface LatestTodowriteBatchProgress {
-  /** 本批快照里当前已完成的条数（对照 latestActive + 归档） */
+  /** Completed count in this batch snapshot (vs latestActive + archive) */
   completed: number
-  /** 本批快照总条数 */
+  /** Total items in this batch snapshot */
   total: number
-  /** 是否仍有未完成的本批条目（用于 UI 是否展示 completed/total） */
+  /** Whether this batch still has incomplete items (controls UI completed/total display) */
   ongoing: boolean
 }
 
 /**
- * 以**最近一次** todowrite 快照为「一批」，计算这批里已完成/总数，及是否仍在推进。
- * `archivedList` 须与面板历史区一致（通常为 `archivedCompletedList(completedArchive)`）。
+ * Treat the **most recent** todowrite snapshot as one batch; compute completed/total and whether work is ongoing.
+ * `archivedList` must match the panel history (usually `archivedCompletedList(completedArchive)`).
  */
 export function getLatestTodowriteBatchProgress(
   model: SessionTodoModel,

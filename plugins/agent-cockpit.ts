@@ -1,13 +1,13 @@
 /**
  * VibeTrace — OpenCode plugin
  *
- * OpenCode 启动 → server({ serverUrl })
- *   → 写 .env.local（Vite 代理 + 保留已有密码）
- *   → 启动 memory-worker (:8714)
- *   → 启动 Vite (:5173)
- *   → 自动打开浏览器
+ * On OpenCode startup → server({ serverUrl })
+ *   → write .env.local (Vite proxy + preserve existing password)
+ *   → start memory-worker (:8714)
+ *   → start Vite (:5173)
+ *   → open browser automatically
  *
- * 跨平台：Windows / macOS / Linux 自动识别（npm、python、open 浏览器命令）
+ * Cross-platform: Windows / macOS / Linux (npm, python, browser open command)
  */
 
 import { exec, spawn, type ChildProcess } from "node:child_process"
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-/** 项目根：plugins/ → 上一级；.opencode/plugins/ → 上两级 */
+/** Project root: plugins/ → parent; .opencode/plugins/ → grandparent */
 function resolveProjectRoot(pluginDir: string): string {
   const parent = path.resolve(pluginDir, "..")
   if (existsSync(path.join(parent, "package.json"))) return parent
@@ -40,7 +40,7 @@ function resolveNpm(): string {
   return isWin ? "npm.cmd" : "npm"
 }
 
-/** macOS/Linux 优先 python3；Windows 用 python；可用 PYTHON 环境变量覆盖 */
+/** Prefer python3 on macOS/Linux; python on Windows; override with PYTHON env var */
 function resolvePython(): string {
   if (process.env.PYTHON?.trim()) return process.env.PYTHON.trim()
   return isWin ? "python" : "python3"
@@ -76,8 +76,8 @@ function parseEnvFile(content: string): Record<string, string> {
 function formatEnvFile(mode: 'manual' | 'plugin', vars: Record<string, string>): string {
   const lines = [
     mode === 'plugin'
-      ? '# 由 OpenCode plugin 自动写入（桌面端打开项目时）；手动开发请 cp .env.example .env.local'
-      : '# 手动开发配置（opencode serve 默认 4096）；桌面端打开后 plugin 会覆盖端口/密码',
+      ? '# Written automatically by OpenCode plugin (desktop opens project); for manual dev: cp .env.example .env.local'
+      : '# Manual dev config (opencode serve default 4096); desktop plugin overwrites port/password when opened',
     "",
   ]
   for (const [k, v] of Object.entries(vars)) {
@@ -87,7 +87,7 @@ function formatEnvFile(mode: 'manual' | 'plugin', vars: Record<string, string>):
   return lines.join("\n")
 }
 
-/** 桌面端每次启动可能换新密码/端口；以 process.env 为准，覆盖 .env.local 里的旧值 */
+/** Desktop may rotate password/port on each launch; process.env wins over stale .env.local */
 function syncOpencodeAuthFromProcess(merged: Record<string, string>): void {
   const pwd = process.env.OPENCODE_SERVER_PASSWORD?.trim()
   if (pwd) {
@@ -163,7 +163,7 @@ async function ensureMemoryWorker(spawnEnv: Record<string, string> = {}): Promis
   try {
     const r = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
     if (r.ok) {
-      console.log(`[VibeTrace] memory-worker 重启以加载最新 .env.local → :${MEMORY_WORKER_PORT}`)
+      console.log(`[VibeTrace] restarting memory-worker to reload .env.local → :${MEMORY_WORKER_PORT}`)
       await killListenerOnPort(MEMORY_WORKER_PORT)
       await new Promise((resolve) => setTimeout(resolve, 800))
     }
@@ -196,7 +196,7 @@ async function ensureMemoryWorker(spawnEnv: Record<string, string> = {}): Promis
       }
     } catch { /* retry */ }
   }
-  console.warn(`[VibeTrace] memory-worker 未就绪。手动: npm run worker:py`)
+  console.warn(`[VibeTrace] memory-worker not ready. Manual: npm run worker:py`)
 }
 
 async function waitForPort(port: number, ms = 40_000): Promise<boolean> {
@@ -216,7 +216,7 @@ async function startDevServer(serverUrl: URL): Promise<void> {
   devStarted = true
 
   if (!existsSync(path.join(PROJECT_ROOT, "node_modules"))) {
-    console.error(`[VibeTrace] 请先安装依赖: cd "${PROJECT_ROOT}" && npm install`)
+    console.error(`[VibeTrace] Install dependencies first: cd "${PROJECT_ROOT}" && npm install`)
     return
   }
 
@@ -234,10 +234,10 @@ async function startDevServer(serverUrl: URL): Promise<void> {
     viteRunning = r.ok || r.status < 500
   } catch { /* not running */ }
 
-  // 桌面端每次端口/密码可能变化；旧 Vite 只在启动时读 .env → 必须重启，否则 401 弹登录框
+  // Desktop may change port/password; old Vite only reads .env at startup → must restart or 401 login dialog appears
   if (viteRunning) {
     console.log(
-      `[VibeTrace] 重启 Vite 以应用 .env.local（OpenCode → ${proxyTarget || "—"}）→ :${VITE_PORT}`,
+      `[VibeTrace] restarting Vite to apply .env.local (OpenCode → ${proxyTarget || "—"}) → :${VITE_PORT}`,
     )
     await killListenerOnPort(VITE_PORT)
     await new Promise((r) => setTimeout(r, 1000))
@@ -259,7 +259,7 @@ async function startDevServer(serverUrl: URL): Promise<void> {
     console.log(`[VibeTrace] ready → ${uiUrl}`)
     openBrowser(uiUrl)
   } else {
-    console.error(`[VibeTrace] Vite 未就绪。手动: cd "${PROJECT_ROOT}" && npm run dev`)
+    console.error(`[VibeTrace] Vite not ready. Manual: cd "${PROJECT_ROOT}" && npm run dev`)
   }
 }
 

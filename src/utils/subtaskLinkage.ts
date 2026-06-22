@@ -6,20 +6,21 @@ export function normalizeTodoContent(content: string): string {
 }
 
 /**
- * 子任务选中时：execution 且子任务上已有 **linkedTodoIds** 时，用 Todo 行高亮 + 连到 Todo 面板；否则（planning / wrap_up 或无 id）走消息高亮。
+ * When a subtask is selected: execution with **linkedTodoIds** → Todo row highlight + link to Todo panel;
+ * otherwise (planning / wrap_up or no id) → message highlight.
  */
 export function subtaskShouldUseTodoLink(st: AssistantSubtask): boolean {
   return st.phase === 'execution' && st.linkedTodoIds.length > 0
 }
 
-/** 与右侧子任务、连线绑定的 todo id 集合 */
+/** Todo id set bound to the right-side subtask and link lines */
 export function collectTodoLinkIdsForSubtask(st: AssistantSubtask): Set<string> {
   return new Set(st.linkedTodoIds)
 }
 
 /**
- * 在子任务中查找与当前待办匹配的段：有 id 时先 **linkedTodoIds**（本段新完成高亮），再 **todos** 快照；
- * 无 id 则按 **content**。从后往前取第一个命中。
+ * Find the subtask segment matching the current todo: with id, try **linkedTodoIds** (newly completed in segment) then **todos** snapshot;
+ * without id, match by **content**. Scan from end for first hit.
  */
 export function findSubtaskIndexForTodo(
   assistantSubtasks: AssistantSubtask[],
@@ -45,7 +46,7 @@ export function findSubtaskIndexForTodo(
 }
 
 /**
- * 高亮：本子任务全部 assistant 下标 + 若段首前一条为 user，则带上该 user（本轮提问）。
+ * Highlight: all assistant indices in this subtask + if the message before the segment start is user, include it (this turn's prompt).
  */
 export function buildMessageHighlightSet(
   subtask: AssistantSubtask,

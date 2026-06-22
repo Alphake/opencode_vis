@@ -112,6 +112,9 @@ def _json_string(v: Any) -> str:
         return str(v)
 
 
+_LEGACY_CN_USER_INPUT = "\u3010\u7528\u6237\u8f93\u5165\u3010"
+
+
 def _strip_harness_guidance(text: str) -> str:
     if not text:
         return text
@@ -119,14 +122,17 @@ def _strip_harness_guidance(text: str) -> str:
     markers = [
         "\n\n---\nUser input\n",
         "\n---\nUser input\n",
-        "\n\n---\n【用户输入】\n",
-        "\n---\n【用户输入】\n",
+        f"\n\n---\n{_LEGACY_CN_USER_INPUT}\n",
+        f"\n---\n{_LEGACY_CN_USER_INPUT}\n",
     ]
     for marker in markers:
         idx = normalized.find(marker)
         if idx >= 0:
             return normalized[idx + len(marker) :].lstrip()
-    m = re.search(r"\n---\s*\n(?:User input|【用户输入】)\s*\n", normalized)
+    m = re.search(
+        rf"\n---\s*\n(?:User input|{re.escape(_LEGACY_CN_USER_INPUT)})\s*\n",
+        normalized,
+    )
     if m:
         return normalized[m.end() :].lstrip()
     return text

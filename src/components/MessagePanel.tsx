@@ -54,13 +54,13 @@ interface MessagePanelProps {
   composerModelsLoading?: boolean
   composerModelsError?: string | null
   envBootstrapModel?: string | null
-  /** 首次拉取会话列表进行中（OpenCode 未响应时会长时间停留） */
+  /** Initial session list fetch in progress (may linger while OpenCode is unresponsive) */
   sessionsIndexingBusy?: boolean
-  /** 会话列表拉取失败（如 BASE 错误、网络、服务未启动） */
+  /** Session list fetch failed (e.g. BASE URL error, network, service not running) */
   sessionsBootstrapError?: string | null
-  /** 当前会话的 GET /message 失败 */
+  /** GET /message for the current session failed */
   sessionDataFetchError?: string | null
-  /** 重试加载会话列表 */
+  /** Retry loading the session list */
   onRetrySessionsBootstrap?: () => void
 }
 
@@ -185,7 +185,7 @@ export default function MessagePanel({
         >
           {sessionsBootstrapError ? (
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 600 }}>无法加载会话列表</span>
+              <span style={{ fontWeight: 600 }}>Failed to load session list</span>
               <span style={{ flex: '1 1 200px', minWidth: 0 }}>{sessionsBootstrapError}</span>
               {onRetrySessionsBootstrap ? (
                 <button
@@ -202,13 +202,13 @@ export default function MessagePanel({
                     cursor: 'pointer',
                   }}
                 >
-                  重试
+                  Retry
                 </button>
               ) : null}
             </div>
           ) : sessionDataFetchError ? (
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 600 }}>当前会话消息加载失败</span>
+              <span style={{ fontWeight: 600 }}>Failed to load messages for current session</span>
               <span style={{ flex: '1 1 200px', minWidth: 0 }}>{sessionDataFetchError}</span>
               <button
                 type="button"
@@ -224,14 +224,14 @@ export default function MessagePanel({
                   cursor: 'pointer',
                 }}
               >
-                重新拉取
+                Reload
               </button>
             </div>
           ) : (
             <span>
-              <span style={{ fontWeight: 600 }}>正在连接 OpenCode 并加载会话…</span>
+              <span style={{ fontWeight: 600 }}>Connecting to OpenCode and loading sessions…</span>
               <span style={{ color: '#64748b', marginLeft: 8 }}>
-                若一直停留，请确认服务已启动，且 Vite 环境变量中的 OpenCode 地址与浏览器可访问（含 CORS）。
+                If this persists, confirm the service is running and the OpenCode URL in Vite env is reachable from the browser (including CORS).
               </span>
             </span>
           )}
