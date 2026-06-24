@@ -991,6 +991,8 @@ export default function SubtaskDebugPanel({
                 si > 0 &&
                 currentUserIndex !== null &&
                 currentUserIndex !== previousUserIndex
+              const isLastVisibleSubtask = si === visibleSubtasks.length - 1
+              const isLiveTaskSegment = activeDisplayTask?.status === 'pending'
               const feedbackSelected = feedbackMode && selectedFeedbackIndexSet.has(sourceIndex)
               const hasPanelFeedback = Boolean(panelFeedbackByIndex[sourceIndex]?.trim())
 
@@ -1091,6 +1093,8 @@ export default function SubtaskDebugPanel({
                         isFeedbackSelected={feedbackSelected}
                         hasFeedbackComment={hasPanelFeedback}
                         onOpenFeedbackComment={() => openPanelFeedbackEditor(sourceIndex)}
+                        isLastVisibleSubtask={isLastVisibleSubtask}
+                        isLiveTaskSegment={isLiveTaskSegment}
                       />
                     </div>
                   </div>

@@ -18,6 +18,7 @@ export const STORAGE_KEYS = {
   manualDirectories: `${APP_STORAGE_NAMESPACE}.manual.directories.v1`,
   closedDirectories: `${APP_STORAGE_NAMESPACE}.closed.directories.v1`,
   composerModelRef: `${APP_STORAGE_NAMESPACE}.opencodeComposerModelRef`,
+  sidebarSessionListWidth: `${APP_STORAGE_NAMESPACE}.layout.sidebarSessionListWidth.v1`,
   subtaskPanelWidth: `${APP_STORAGE_NAMESPACE}.layout.subtaskPanelWidth.v1`,
   taskSegments: `${APP_STORAGE_NAMESPACE}.taskSegments.v1`,
   activeTaskSegments: `${APP_STORAGE_NAMESPACE}.activeTaskSegments.v1`,

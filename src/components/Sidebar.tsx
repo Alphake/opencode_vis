@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { OcSession } from '../types/opencode'
 import { folderDisplayName } from '../utils/sessionFolders'
 import { isMemoryWorkerInternalSession } from '../utils/memoryWorkerSessions'
@@ -21,6 +21,9 @@ interface SidebarProps {
   apiConnected: boolean
   onAddDirectory?: () => void
   onCloseDirectory?: (dir: string) => void
+  sessionListWidth?: number
+  isResizingSessionList?: boolean
+  onSessionListResizePointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void
 }
 
 const RAIL_WIDTH = 44
@@ -42,6 +45,9 @@ export default function Sidebar({
   apiConnected,
   onAddDirectory,
   onCloseDirectory,
+  sessionListWidth = 240,
+  isResizingSessionList = false,
+  onSessionListResizePointerDown,
 }: SidebarProps) {
   const [hoverSessionId, setHoverSessionId] = useState<string | null>(null)
   const [dirMenu, setDirMenu] = useState<DirMenu | null>(null)
@@ -192,13 +198,14 @@ export default function Sidebar({
       {/* Session list */}
       <div
         style={{
-          width: 240,
+          width: sessionListWidth,
           height: '100%',
           background: '#FFFFFF',
           borderRight: '1px solid #E8E8E8',
           display: 'flex',
           flexDirection: 'column',
           flexShrink: 0,
+          position: 'relative',
         }}
       >
         <div
@@ -391,6 +398,37 @@ export default function Sidebar({
             )})
           )}
         </div>
+        {onSessionListResizePointerDown ? (
+          <div
+            role="separator"
+            aria-label="Resize session history panel"
+            aria-orientation="vertical"
+            title="Drag to resize session history"
+            onPointerDown={onSessionListResizePointerDown}
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: -4,
+              bottom: 0,
+              width: 8,
+              cursor: 'col-resize',
+              zIndex: 5,
+              touchAction: 'none',
+              background: isResizingSessionList ? '#EEF3FF' : 'transparent',
+            }}
+          >
+            <div
+              style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                left: 3,
+                width: 1,
+                background: isResizingSessionList ? '#5A8FFF' : '#E1E1E1',
+              }}
+            />
+          </div>
+        ) : null}
       </div>
       {dirMenu && onCloseDirectory && (
         <div

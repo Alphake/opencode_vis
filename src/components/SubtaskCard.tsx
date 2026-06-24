@@ -31,6 +31,98 @@ const CARD_MIN_HEIGHT = 220
 const FLOW_VIEWPORT_MAX_HEIGHT = CARD_MIN_HEIGHT * 2
 const LONG_RUNNING_MS = 60_000
 
+function sanitizeSnapshotFilePart(value: string): string {
+  return value
+    .trim()
+    .split('')
+    .map((char) => (char.charCodeAt(0) < 32 || /[<>:"/\\|?*]/.test(char) ? '-' : char))
+    .join('')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 80)
+}
+
+function readSvgSize(svg: SVGSVGElement): { width: number; height: number } {
+  const attrWidth = Number(svg.getAttribute('width'))
+  const attrHeight = Number(svg.getAttribute('height'))
+  if (Number.isFinite(attrWidth) && attrWidth > 0 && Number.isFinite(attrHeight) && attrHeight > 0) {
+    return { width: attrWidth, height: attrHeight }
+  }
+  const box = svg.getBBox()
+  return { width: Math.ceil(box.width), height: Math.ceil(box.height) }
+}
+
+async function downloadSvgAsPng(svg: SVGSVGElement, filename: string): Promise<void> {
+  if (svg.childElementCount === 0) throw new Error('The action flow has not rendered yet.')
+
+  const { width, height } = readSvgSize(svg)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error('The action flow has an invalid size.')
+  }
+
+  const clone = svg.cloneNode(true) as SVGSVGElement
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  clone.setAttribute('width', String(width))
+  clone.setAttribute('height', String(height))
+  clone.setAttribute('viewBox', `0 0 ${width} ${height}`)
+
+  const background = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+  background.setAttribute('x', '0')
+  background.setAttribute('y', '0')
+  background.setAttribute('width', String(width))
+  background.setAttribute('height', String(height))
+  background.setAttribute('fill', '#FFFFFF')
+  clone.insertBefore(background, clone.firstChild)
+
+  const svgText = new XMLSerializer().serializeToString(clone)
+  const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' })
+  const svgUrl = URL.createObjectURL(svgBlob)
+
+  try {
+    const image = new Image()
+    image.decoding = 'async'
+    const imageLoaded = new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve()
+      image.onerror = () => reject(new Error('Failed to rasterize the action flow SVG.'))
+    })
+    image.src = svgUrl
+    await imageLoaded
+
+    const maxCanvasDimension = 8192
+    const deviceScale = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
+    const scale = Math.min(deviceScale, maxCanvasDimension / width, maxCanvasDimension / height)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.floor(width * scale))
+    canvas.height = Math.max(1, Math.floor(height * scale))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Canvas rendering is not available in this browser.')
+    ctx.fillStyle = '#FFFFFF'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+    const pngBlob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('Failed to encode the action flow PNG.'))
+      }, 'image/png')
+    })
+
+    const pngUrl = URL.createObjectURL(pngBlob)
+    try {
+      const link = document.createElement('a')
+      link.href = pngUrl
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+    } finally {
+      URL.revokeObjectURL(pngUrl)
+    }
+  } finally {
+    URL.revokeObjectURL(svgUrl)
+  }
+}
+
 interface SubtaskCardProps {
   subtask: AssistantSubtask
   messages: OcMessage[]
@@ -65,6 +157,10 @@ interface SubtaskCardProps {
   isFeedbackSelected?: boolean
   hasFeedbackComment?: boolean
   onOpenFeedbackComment?: () => void
+  /** Last subtask card in the active task-segment list — keeps the terminator hidden until the segment closes. */
+  isLastVisibleSubtask?: boolean
+  /** Active task tab is still accumulating turns (`pending`); the trailing panel stays open. */
+  isLiveTaskSegment?: boolean
 }
 
 type ColorByMode = 'tokens' | 'type'
@@ -142,10 +238,13 @@ export default function SubtaskCard({
   isFeedbackSelected = false,
   hasFeedbackComment = false,
   onOpenFeedbackComment,
+  isLastVisibleSubtask = false,
+  isLiveTaskSegment = true,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [filterMode, setFilterMode] = useState<FilterMode>('duration')
+  const [snapshotBusy, setSnapshotBusy] = useState(false)
   /** DOM anchor only — use outer wrapper for fork/scroll */
   const cardRef = useRef<HTMLDivElement | null>(null)
   const [childBranchActions, setChildBranchActions] = useState<(MappedAction & { row: number })[]>([])
@@ -357,6 +456,24 @@ export default function SubtaskCard({
     [segmentMessages, childBranchMessages],
   )
 
+  const handleDownloadSnapshot = useCallback(async () => {
+    const svg = cardRef.current?.querySelector<SVGSVGElement>('svg[data-action-flow-root="1"]')
+    if (!svg) {
+      window.alert('Snapshot failed: action flow SVG is not ready yet.')
+      return
+    }
+
+    const safeTitle = sanitizeSnapshotFilePart(m.title) || `panel-${displayIndex + 1}`
+    setSnapshotBusy(true)
+    try {
+      await downloadSvgAsPng(svg, `vibetrace-${displayIndex + 1}-${safeTitle}.png`)
+    } catch (err) {
+      window.alert(`Snapshot failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setSnapshotBusy(false)
+    }
+  }, [displayIndex, m.title])
+
   /**
    * After fork: one SVG merges shared pre-fork prefix + gray ghost after the anchor + the new branch.
    *
@@ -456,8 +573,15 @@ export default function SubtaskCard({
 
   const durationLabel = formatDurationMs(m.durationMs)
   const changesLabel = String(m.mutatedFileCount)
-  /** Hide the golden end capsule while tools are active so tasks don’t look “done” prematurely */
-  const showFlowEndNode = !hasActiveRunningAction && flowActions.length > 0
+  /**
+   * Terminator only when this panel’s trace is closed:
+   * - a later subtask panel exists below, or
+   * - the task segment was extracted (no longer live).
+   * Also hide while tools are still running.
+   */
+  const isPanelTraceClosed = !isLastVisibleSubtask || !isLiveTaskSegment
+  const showFlowEndNode =
+    isPanelTraceClosed && !hasActiveRunningAction && flowActions.length > 0
 
   /**
    * Stabilize `flowEndSummary` identity — inline object literals each render fooled ActionFlowVisualization’s first
@@ -523,31 +647,56 @@ export default function SubtaskCard({
         >
           {m.title}
         </h3>
-        {feedbackMode ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: '0 0 auto' }}>
           <button
             type="button"
+            disabled={snapshotBusy}
             onClick={(e) => {
               e.stopPropagation()
-              onOpenFeedbackComment?.()
+              void handleDownloadSnapshot()
             }}
-            title={hasFeedbackComment ? 'View or edit feedback for this panel' : 'Write feedback for this panel'}
+            title="Download this panel action flow as a PNG"
             style={{
               flex: '0 0 auto',
-              border: hasFeedbackComment ? '1px solid #86B6FF' : '1px solid #D7E3F8',
+              border: '1px solid #DADADA',
               borderRadius: 999,
-              background: isFeedbackSelected ? '#EDF5FF' : '#FFFFFF',
-              color: hasFeedbackComment ? '#185EA8' : '#44607C',
+              background: snapshotBusy ? '#F3F4F6' : '#FFFFFF',
+              color: snapshotBusy ? '#9A9A9A' : '#444',
               padding: '3px 8px',
               fontSize: 10,
               lineHeight: '14px',
               fontWeight: 650,
-              cursor: 'pointer',
-              boxShadow: hasFeedbackComment ? '0 1px 6px rgba(24, 94, 168, 0.12)' : 'none',
+              cursor: snapshotBusy ? 'wait' : 'pointer',
             }}
           >
-            {hasFeedbackComment ? 'Commented' : 'Comment'}
+            {snapshotBusy ? 'Saving' : 'Snapshot'}
           </button>
-        ) : null}
+          {feedbackMode ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onOpenFeedbackComment?.()
+              }}
+              title={hasFeedbackComment ? 'View or edit feedback for this panel' : 'Write feedback for this panel'}
+              style={{
+                flex: '0 0 auto',
+                border: hasFeedbackComment ? '1px solid #86B6FF' : '1px solid #D7E3F8',
+                borderRadius: 999,
+                background: isFeedbackSelected ? '#EDF5FF' : '#FFFFFF',
+                color: hasFeedbackComment ? '#185EA8' : '#44607C',
+                padding: '3px 8px',
+                fontSize: 10,
+                lineHeight: '14px',
+                fontWeight: 650,
+                cursor: 'pointer',
+                boxShadow: hasFeedbackComment ? '0 1px 6px rgba(24, 94, 168, 0.12)' : 'none',
+              }}
+            >
+              {hasFeedbackComment ? 'Commented' : 'Comment'}
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <div

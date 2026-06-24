@@ -700,10 +700,7 @@ function computeLayout(
   /**
    * Post-fork branch rail: advances east from the fork anchor (+ gap), independent from the trunk axis.
    * Branch x must settle before aligning child-session x to the trailing edge of the forked Subagent.
-   * - Shares the fork anchor’s starting x as post-anchor ghosts/new-branch divergence, vertically split into bands.
-   * - Fallback to trunk right edge when no explicit anchor exists or ghosts are absent.
    */
-  let forkBranchRight = MARGIN_LEFT
   if (hasNewBranchAction) {
     /** ① Resolve anchor’s right boundary on the trunk (anchors are historical rows with known root x). */
     let anchorRight: number | null = null
@@ -857,62 +854,6 @@ function computeLayout(
       const localX = slotKey ? (branchSlotStartX.get(slotKey) ?? 0) : 0
       actionXBySortedIndex.set(idx, forkBaseX + localX + (branchSlotOffsetByIndex.get(idx) ?? 0))
     }
-    const lastBranchGap = durationMode ? DUR_TAIL_PAD_PX : TIMELINE_STEP_GAP
-    forkBranchRight = forkBaseX + Math.max(0, branchCursor - lastBranchGap)
-
-    /**
-     * Dual-rail synchronization: ghosts advance on trunk slots while the fork rail uses branch slots — two independent cursors.
-     * Matching `TIMELINE_STEP_GAP` is not enough: differing `effectiveSpan` (duration or nested breadth) pushes ghost step k vs branch step k apart.
-     *
-     * Post-anchor unify: zip ghost-root slots with branch slots in order of appearance, force shared width = max(ghostSpan_k, branchSpan_k),
-     * advance east from `forkBaseX`, rewriting `actionXBySortedIndex` for both rails. Absolute child-session x recomputes later from parent anchors.
-     */
-    const ghostRootSlots: { slotKey: string; firstSortTime: number }[] = []
-    for (let s = 0; s < nextRootSlot; s++) {
-      const slotKey = `root:${s}`
-      const indices = rootSlotIndices.get(slotKey) ?? []
-      if (indices.length === 0) continue
-      if (indices.every((idx) => sorted[idx]!.forkGhost === true)) {
-        let firstT = Infinity
-        for (const idx of indices) {
-          const t = sorted[idx]!.sortTime
-          if (t < firstT) firstT = t
-        }
-        ghostRootSlots.push({ slotKey, firstSortTime: firstT })
-      }
-    }
-    ghostRootSlots.sort((p, q) => p.firstSortTime - q.firstSortTime)
-
-    const stepCount = Math.max(ghostRootSlots.length, nextBranchSlot)
-    if (stepCount > 0) {
-      let unifiedCursor = 0
-      for (let k = 0; k < stepCount; k++) {
-        let span = MIN_W
-        if (k < ghostRootSlots.length) {
-          span = Math.max(span, rootSlotEffectiveSpan.get(ghostRootSlots[k]!.slotKey) ?? MIN_W)
-        }
-        if (k < nextBranchSlot) {
-          span = Math.max(span, branchSlotEffectiveSpan.get(`branch:${k}`) ?? MIN_W)
-        }
-        const stepX = forkBaseX + unifiedCursor
-        if (k < ghostRootSlots.length) {
-          const slotKey = ghostRootSlots[k]!.slotKey
-          const indices = rootSlotIndices.get(slotKey) ?? []
-          for (const idx of indices) {
-            actionXBySortedIndex.set(idx, stepX + (rootSlotOffsetByIndex.get(idx) ?? 0))
-          }
-        }
-        if (k < nextBranchSlot) {
-          const slotKey = `branch:${k}`
-          const indices = branchSlotIndices.get(slotKey) ?? []
-          for (const idx of indices) {
-            actionXBySortedIndex.set(idx, stepX + (branchSlotOffsetByIndex.get(idx) ?? 0))
-          }
-        }
-        unifiedCursor += span + TIMELINE_STEP_GAP
-      }
-      forkBranchRight = forkBaseX + Math.max(0, unifiedCursor - TIMELINE_STEP_GAP)
-    }
   }
 
   /**
@@ -948,7 +889,7 @@ function computeLayout(
   /**
    * Terminator x placement per fork rail:
    *  - Main: trunk cursor reaches the farthest legacy action (nested child timelines included).
-   *  - `fork-new-branch`: branch cursor + slack (`forkBranchRight` already nests forked Subagent spans).
+   *  - `fork-new-branch`: trailing edge of the new branch’s rightmost action.
    */
   let historicalRightmost = rootCursor - TIMELINE_STEP_GAP
   for (let i = 0; i < sorted.length; i++) {
@@ -966,9 +907,8 @@ function computeLayout(
     if (x == null) return maxR
     return Math.max(maxR, x + blockWidth(durationMode, a.durationMs))
   }, MARGIN_LEFT)
-  const endXForkBranch = hasNewBranchAction
-    ? (durationMode ? branchRightmost + TIMELINE_STEP_GAP : forkBranchRight + TIMELINE_STEP_GAP)
-    : endXMain
+  /** Fork terminator follows the new branch’s trailing action — not the legacy rail’s x. */
+  const endXForkBranch = hasNewBranchAction ? branchRightmost + TIMELINE_STEP_GAP : endXMain
 
   const sessionTopY = new Map<string, number>()
   let sessionY = TOP_PAD

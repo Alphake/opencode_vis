@@ -113,6 +113,9 @@ const DEBUG_VERBOSE_LOGS =
 /** If SSE lags after send, poll GET /message until an assistant message appears (streaming / long runs) */
 const POLL_ASSISTANT_INTERVAL_MS = 2000
 const POLL_ASSISTANT_MAX_ROUNDS = 90
+const SIDEBAR_SESSION_LIST_DEFAULT_WIDTH = 240
+const SIDEBAR_SESSION_LIST_MIN_WIDTH = 180
+const SIDEBAR_SESSION_LIST_MAX_WIDTH = 420
 const MESSAGE_PANEL_MIN_WIDTH = 420
 const SUBTASK_PANEL_DEFAULT_WIDTH = 630
 const SUBTASK_PANEL_MIN_WIDTH = 420
@@ -173,6 +176,17 @@ function loadSubtaskPanelWidthFromLs(): number {
     return clampNumber(n, SUBTASK_PANEL_MIN_WIDTH, SUBTASK_PANEL_MAX_WIDTH)
   } catch {
     return SUBTASK_PANEL_DEFAULT_WIDTH
+  }
+}
+
+function loadSidebarSessionListWidthFromLs(): number {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEYS.sidebarSessionListWidth)
+    const n = raw ? Number(raw) : NaN
+    if (!Number.isFinite(n)) return SIDEBAR_SESSION_LIST_DEFAULT_WIDTH
+    return clampNumber(n, SIDEBAR_SESSION_LIST_MIN_WIDTH, SIDEBAR_SESSION_LIST_MAX_WIDTH)
+  } catch {
+    return SIDEBAR_SESSION_LIST_DEFAULT_WIDTH
   }
 }
 
@@ -443,6 +457,8 @@ function App() {
   const messageScrollRef = useRef<HTMLDivElement>(null)
   const todoPanelScrollRef = useRef<HTMLDivElement>(null)
   const subtaskScrollRef = useRef<HTMLDivElement>(null)
+  const [sidebarSessionListWidth, setSidebarSessionListWidth] = useState(() => loadSidebarSessionListWidthFromLs())
+  const [isResizingSidebarSessionList, setIsResizingSidebarSessionList] = useState(false)
   const [subtaskPanelWidth, setSubtaskPanelWidth] = useState(() => loadSubtaskPanelWidthFromLs())
   const [isResizingSubtaskPanel, setIsResizingSubtaskPanel] = useState(false)
   const selectedSessionIdRef = useRef(selectedSessionId)
@@ -468,6 +484,70 @@ function App() {
     window.addEventListener('resize', clampToAvailableWidth)
     return () => window.removeEventListener('resize', clampToAvailableWidth)
   }, [getSubtaskPanelWidthBounds])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEYS.sidebarSessionListWidth,
+        String(Math.round(sidebarSessionListWidth)),
+      )
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarSessionListWidth])
+
+  const handleSidebarSessionListResizePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+
+      const startX = event.clientX
+      const startWidth = sidebarSessionListWidth
+      let latestWidth = clampNumber(
+        startWidth,
+        SIDEBAR_SESSION_LIST_MIN_WIDTH,
+        SIDEBAR_SESSION_LIST_MAX_WIDTH,
+      )
+      const previousCursor = document.body.style.cursor
+      const previousUserSelect = document.body.style.userSelect
+
+      setIsResizingSidebarSessionList(true)
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+
+      const notifyLayoutChanged = () => {
+        window.dispatchEvent(new Event('resize'))
+      }
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        latestWidth = clampNumber(
+          startWidth + (moveEvent.clientX - startX),
+          SIDEBAR_SESSION_LIST_MIN_WIDTH,
+          SIDEBAR_SESSION_LIST_MAX_WIDTH,
+        )
+        setSidebarSessionListWidth(latestWidth)
+        notifyLayoutChanged()
+      }
+      const stopResize = () => {
+        setIsResizingSidebarSessionList(false)
+        document.body.style.cursor = previousCursor
+        document.body.style.userSelect = previousUserSelect
+        window.removeEventListener('pointermove', handlePointerMove)
+        window.removeEventListener('pointerup', stopResize)
+        window.removeEventListener('pointercancel', stopResize)
+        try {
+          window.localStorage.setItem(STORAGE_KEYS.sidebarSessionListWidth, String(Math.round(latestWidth)))
+        } catch {
+          /* ignore */
+        }
+        notifyLayoutChanged()
+      }
+
+      window.addEventListener('pointermove', handlePointerMove)
+      window.addEventListener('pointerup', stopResize)
+      window.addEventListener('pointercancel', stopResize)
+    },
+    [sidebarSessionListWidth],
+  )
 
   useEffect(() => {
     try {
@@ -1816,6 +1896,9 @@ function App() {
         apiConnected={apiConnected}
         onAddDirectory={handleAddDirectory}
         onCloseDirectory={handleCloseDirectory}
+        sessionListWidth={sidebarSessionListWidth}
+        isResizingSessionList={isResizingSidebarSessionList}
+        onSessionListResizePointerDown={handleSidebarSessionListResizePointerDown}
       />
 
       {/* Center + right columns share one positioned parent for connector lines */}
@@ -1828,7 +1911,7 @@ function App() {
           display: 'flex',
           flexDirection: 'row',
           position: 'relative',
-          cursor: isResizingSubtaskPanel ? 'col-resize' : undefined,
+          cursor: isResizingSubtaskPanel || isResizingSidebarSessionList ? 'col-resize' : undefined,
         }}
       >
         <div
@@ -1958,25 +2041,6 @@ function App() {
                   {compactionControlHint}
                 </span>
               ) : null}
-              {SHOW_COMPOSER_MODEL_UI && (
-              <span
-                title="Synced with the Model selector in the left input box"
-                style={{
-                  fontSize: 11,
-                  fontWeight: 400,
-                  color: '#737373',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {composerModelRef.trim()
-                  ? `Model ${composerModelRef.trim()}`
-                  : envBootstrapModel
-                    ? `Model ${envBootstrapModel} (.env)`
-                    : 'Model: server default'}
-              </span>
-              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <button
                   type="button"

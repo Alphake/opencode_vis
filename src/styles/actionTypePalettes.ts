@@ -1,4 +1,5 @@
 import * as d3 from 'd3'
+import { ACTION_TYPE_CATEGORY_INDEX } from '../config/actionCategories'
 import type { ActionType } from '../types/opencode'
 
 /** Matches `ActionType` union order — keeps D3 scheme lookups index-aligned */
@@ -48,38 +49,23 @@ export type ActionTypeTriad = { fill: string; stroke: string; accent: string }
  * Pastel 7 uses the literal fill/icon strings below — no d3 pass, no alpha, no `triadFromD3`.
  * `stroke` / `accent` equal the icon color (ActionFlow block stroke matches the icon).
  *
- * Grouping matches legacy `PAIRED_VIVID_7` / “vivid 7-group” (same hue bucket per action family):
- * | Group | action types |
- * |-------|--------------|
- * | 0 | Think, Plan |
- * | 1 | Clarify, Permission |
- * | 2 | Read, Shell, Search |
- * | 3 | Write, Response |
- * | 4 | Skill |
- * | 5 | Subagent |
- * | 6 | Compaction |
- * UserRequest is separate: white fill + neutral gray icon (outside Pastel 7).
+ * Grouping follows VibeTrace 7-category taxonomy — see `config/actionCategories.ts`.
+ * | Group | category | action types |
+ * |-------|----------|--------------|
+ * | 0 | Planning | Think, Plan |
+ * | 1 | Information acquisition | Read, Search |
+ * | 2 | Code modification | Write |
+ * | 3 | Communication | Response, Clarify, Permission |
+ * | 4 | Skill management | SkillRouter, Skill |
+ * | 5 | Execution | Shell, Subagent |
+ * | 6 | Context management | Compaction |
+ * UserRequest is separate: white fill + neutral gray icon (outside taxonomy).
  */
 const PASTEL7_FILL = ['#b3e2cd', '#fdcdac', '#cbd5e8', '#f4cae4', '#e6f5c9', '#fff2ae', '#f1e2cc'] as const
 const PASTEL7_ICON = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f', '#e5c494'] as const
 
-/** Group index 0..6; UserRequest uses -1 for standalone styling */
-const PASTEL7_GROUP_INDEX: Record<ActionType, number> = {
-  UserRequest: -1,
-  Think: 0,
-  Plan: 0,
-  Clarify: 1,
-  Permission: 1,
-  Read: 2,
-  SkillRouter: 2,
-  Shell: 2,
-  Search: 2,
-  Write: 4,
-  Response: 4,
-  Skill: 5,
-  Subagent: 3,
-  Compaction: 6,
-}
+/** Group index 0..6; UserRequest uses -1. Sourced from `ACTION_TYPE_CATEGORY_INDEX`. */
+const PASTEL7_GROUP_INDEX: Record<ActionType, number> = ACTION_TYPE_CATEGORY_INDEX
 
 function buildPastelPaired7(): Record<ActionType, ActionTypeTriad> {
   const out = {} as Record<ActionType, ActionTypeTriad>
