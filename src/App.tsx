@@ -1179,8 +1179,8 @@ function App() {
   )
 
   const archivedForPanel = useMemo(
-    () => archivedCompletedList(sessionTodoModel.completedArchive),
-    [sessionTodoModel.completedArchive],
+    () => archivedCompletedList(sessionTodoModel.completedArchive, selectedSessionId),
+    [sessionTodoModel.completedArchive, selectedSessionId],
   )
 
   const latestTodowriteBatchProgress = useMemo(

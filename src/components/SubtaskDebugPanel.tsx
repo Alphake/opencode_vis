@@ -27,6 +27,7 @@ import {
   buildCompactMappedActionTooltipHtml,
   mergeMessagesForActionTooltipLookup,
 } from '../utils/actionTooltipMapping'
+import { useTooltipTranslate } from '../hooks/useTooltipTranslate'
 import { stripHarnessGuidanceForDisplay } from '../config/harnessGuidance'
 
 export type SubtaskTaskTab = {
@@ -197,6 +198,18 @@ export default function SubtaskDebugPanel({
   const [draftPanelFeedback, setDraftPanelFeedback] = useState('')
   const actionTypePaletteId: ActionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID
   const [childSessionMessages, setChildSessionMessages] = useState<Record<string, OcMessage[]>>({})
+  const diagnoses = useMemo(
+    () => Object.values(errorDiagnosisBySubtaskId).filter(Boolean),
+    [errorDiagnosisBySubtaskId],
+  )
+  const extraMessagesForTranslate = useMemo(
+    () => Object.values(childSessionMessages).flat(),
+    [childSessionMessages],
+  )
+  const { translate: tooltipTranslate } = useTooltipTranslate(sessionId, messages, {
+    extraMessages: extraMessagesForTranslate,
+    diagnoses,
+  })
   const summaryViewportRef = useRef<HTMLDivElement | null>(null)
   const [summaryViewportSize, setSummaryViewportSize] = useState({ width: 0, height: 0 })
   const displayTaskTabs =
@@ -586,6 +599,7 @@ export default function SubtaskDebugPanel({
                           action,
                           tooltipMessages,
                           formatSummaryTooltipDuration,
+                          { translate: tooltipTranslate },
                         )
                         return (
                           <span
@@ -1095,6 +1109,8 @@ export default function SubtaskDebugPanel({
                         onOpenFeedbackComment={() => openPanelFeedbackEditor(sourceIndex)}
                         isLastVisibleSubtask={isLastVisibleSubtask}
                         isLiveTaskSegment={isLiveTaskSegment}
+                        sessionId={sessionId}
+                        tooltipTranslate={tooltipTranslate}
                       />
                     </div>
                   </div>

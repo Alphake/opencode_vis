@@ -4,6 +4,8 @@ import type {
   OcMessage,
   OcPendingQuestionItem,
 } from '../types/opencode'
+import { applySessionDemoOverlay } from '../caseStudy/applySessionDemoOverlay'
+import { isCaseStudyDemoEnabled } from '../caseStudy'
 
 /**
  * OpenCode HTTP base URL — injected at build time by `vite.config.ts`:
@@ -242,7 +244,9 @@ export async function getTodos(sessionId: string, directory?: string): Promise<O
     signal: fetchSignal(),
   })
   if (!res.ok) throw new Error(`Failed to fetch todos: ${res.status}`)
-  return res.json()
+  const todos = (await res.json()) as OcTodo[]
+  if (!isCaseStudyDemoEnabled()) return todos
+  return applySessionDemoOverlay(sessionId, [], todos).todos
 }
 
 export async function getMessages(sessionId: string, _reason?: string, directory?: string): Promise<OcMessage[]> {
@@ -252,7 +256,9 @@ export async function getMessages(sessionId: string, _reason?: string, directory
     signal: fetchSignal(),
   })
   if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`)
-  return res.json()
+  const messages = (await res.json()) as OcMessage[]
+  if (!isCaseStudyDemoEnabled()) return messages
+  return applySessionDemoOverlay(sessionId, messages, []).messages
 }
 
 /** One row for the composer dropdown (`ref` is always `providerID/modelID`). */

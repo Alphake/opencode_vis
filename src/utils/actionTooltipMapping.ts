@@ -3,6 +3,14 @@
  */
 
 import type { MappedAction, OcMessage, OcMessagePart, ToolPart } from '../types/opencode'
+import type { TooltipTranslateFn } from './tooltipTranslate'
+
+export type { TooltipTranslateFn } from './tooltipTranslate'
+
+function tt(translate: TooltipTranslateFn | undefined, text: string): string {
+  if (!translate || !text) return text
+  return translate(text)
+}
 
 /** @deprecated Prefer TooltipBodyLine + buildEnglishTooltipContent */
 export type TooltipKeyValue = {
@@ -434,23 +442,24 @@ function englishNonToolBody(part: OcMessagePart): TooltipBodyLine[] {
 
 export function buildEnglishTooltipContent(
   part: OcMessagePart,
-  ctx: { allMessages?: OcMessage[] } = {}
+  ctx: { allMessages?: OcMessage[]; translate?: TooltipTranslateFn } = {},
 ): EnglishTooltipContent {
   const primaryLabel = getPrimaryLabel(part)
   const statusLabel = getStatusLabel(part)
+  const translate = ctx.translate
+
+  const mapBody = (body: TooltipBodyLine[]): TooltipBodyLine[] =>
+    body.map((line) => {
+      if (line.kind === 'kv') return { ...line, value: tt(translate, line.value) }
+      if (line.kind === 'text' || line.kind === 'error') return { ...line, value: tt(translate, line.value) }
+      if (line.kind === 'about') return { ...line, headers: line.headers.map((h) => tt(translate, h)) }
+      return line
+    })
 
   if (part.type === 'tool') {
-    return {
-      primaryLabel,
-      statusLabel,
-      body: englishToolBody(part, ctx),
-    }
+    return { primaryLabel, statusLabel, body: mapBody(englishToolBody(part, ctx)) }
   }
-  return {
-    primaryLabel,
-    statusLabel,
-    body: englishNonToolBody(part),
-  }
+  return { primaryLabel, statusLabel, body: mapBody(englishNonToolBody(part)) }
 }
 
 export function formatEnglishTooltipContentHtml(content: EnglishTooltipContent, escapeHtml: (s: string) => string): string {
@@ -538,9 +547,12 @@ export function buildCompactMappedActionTooltipHtml(
   act: MappedAction & { row: number },
   tooltipMessages: OcMessage[] | undefined,
   formatDurationMs: (ms: number) => string,
+  options?: { translate?: TooltipTranslateFn },
 ): string {
+  const translate = options?.translate
+
   if (act.actionType === 'UserRequest') {
-    const text = act.detail?.trim() || '(empty)'
+    const text = tt(translate, act.detail?.trim() || '(empty)')
     return `<div class="action-tip-root action-tip-root--compact"><div class="action-tip-compact-main"><div class="action-tip-compact-head"><strong>${escapeForActionTooltip(
       'user request',
     )}</strong></div><div class="action-tip-compact-lines"><div class="action-tip-compact-line">${escapeForActionTooltip(
@@ -552,7 +564,7 @@ export function buildCompactMappedActionTooltipHtml(
   if (tooltipMessages?.length) {
     const part = resolvePartForAction(tooltipMessages, act)
     if (part) {
-      const kv = buildEnglishTooltipContent(part, { allMessages: tooltipMessages })
+      const kv = buildEnglishTooltipContent(part, { allMessages: tooltipMessages, translate })
       const lines = kv.body.flatMap((row) => {
         if (row.kind === 'kv') return [`${row.key}: ${row.value}`]
         if (row.kind === 'error') return [row.value]
@@ -571,8 +583,8 @@ export function buildCompactMappedActionTooltipHtml(
     }
   }
   if (!main) {
-    const d = act.detail?.trim() ?? ''
-    const err = act.errorMessage?.trim() ?? ''
+    const d = tt(translate, act.detail?.trim() ?? '')
+    const err = tt(translate, act.errorMessage?.trim() ?? '')
     const snippet = d || err
     const detailLine = snippet
       ? `<div class="action-tip-compact-lines"><div class="action-tip-compact-line">${escapeForActionTooltip(

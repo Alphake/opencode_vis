@@ -14,6 +14,8 @@ import {
 } from '../utils/actionMapping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
 import { mergeMessagesForActionTooltipLookup } from '../utils/actionTooltipMapping'
+import type { TooltipTranslateFn } from '../utils/tooltipTranslate'
+import { collectTooltipTranslatableStrings, prewarmTooltipTranslations } from '../utils/tooltipTranslate'
 import ActionFlowVisualization from './ActionFlowVisualization'
 import {
   type ActionTypePaletteId,
@@ -161,6 +163,8 @@ interface SubtaskCardProps {
   isLastVisibleSubtask?: boolean
   /** Active task tab is still accumulating turns (`pending`); the trailing panel stays open. */
   isLiveTaskSegment?: boolean
+  sessionId?: string
+  tooltipTranslate?: TooltipTranslateFn
 }
 
 type ColorByMode = 'tokens' | 'type'
@@ -240,6 +244,8 @@ export default function SubtaskCard({
   onOpenFeedbackComment,
   isLastVisibleSubtask = false,
   isLiveTaskSegment = true,
+  sessionId,
+  tooltipTranslate,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
@@ -348,6 +354,14 @@ export default function SubtaskCard({
     }, 3200)
     return () => window.clearInterval(id)
   }, [hasRunningTaskWithChild, loadChildBranches])
+
+  useEffect(() => {
+    if (!sessionId || !tooltipTranslate) return
+    void prewarmTooltipTranslations(
+      sessionId,
+      collectTooltipTranslatableStrings([...segmentMessages, ...childBranchMessages]),
+    )
+  }, [sessionId, tooltipTranslate, segmentMessages, childBranchMessages])
 
   const flowActions = useMemo(() => {
     const merged = [...parentFlowActions, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
@@ -1028,6 +1042,7 @@ export default function SubtaskCard({
               showFlowEndNode={showFlowEndNode}
               flowEndSummary={flowEndSummary}
               viewportMaxHeight={FLOW_VIEWPORT_MAX_HEIGHT}
+              tooltipTranslate={tooltipTranslate}
             />
           )
         })()}

@@ -4,6 +4,7 @@ import { Tooltip } from 'react-tooltip'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
 import { buildCompactMappedActionTooltipHtml } from '../utils/actionTooltipMapping'
+import type { TooltipTranslateFn } from '../utils/tooltipTranslate'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import {
   type ActionTypePaletteId,
@@ -1299,6 +1300,7 @@ interface Props {
   forkAnchorActionKey?: string | null
   /** Palette id when `colorMode === 'type'` */
   actionTypePaletteId?: ActionTypePaletteId
+  tooltipTranslate?: TooltipTranslateFn
 }
 
 export default function ActionFlowVisualization({
@@ -1323,6 +1325,7 @@ export default function ActionFlowVisualization({
   onSelectAction,
   forkAnchorActionKey = null,
   actionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID,
+  tooltipTranslate,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -1824,7 +1827,9 @@ export default function ActionFlowVisualization({
          */
         .attr('pointer-events', 'all')
         .attr('data-tooltip-id', tooltipId)
-        .attr('data-tooltip-html', buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs))
+        .attr('data-tooltip-html', buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs, {
+          translate: tooltipTranslate,
+        }))
         .attr('data-tooltip-place', 'top')
       if (onSelectAction) {
         actionTarget.on('click', (ev: MouseEvent) => {
@@ -2188,6 +2193,7 @@ export default function ActionFlowVisualization({
     embedded,
     viewportMaxHeight,
     forkAnchorActionKey,
+    tooltipTranslate,
   ])
 
   /**
