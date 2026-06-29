@@ -157,9 +157,7 @@ def _get_message_finish(message: dict[str, Any]) -> str | None:
 def is_assistant_stop_message(message: dict[str, Any]) -> bool:
     if _info(message).get("role") != "assistant":
         return False
-    if _get_message_finish(message) == "stop":
-        return True
-    return any(p.get("type") == "step-finish" and p.get("reason") == "stop" for p in _parts(message))
+    return (_get_message_finish(message) or "").strip().lower() == "stop"
 
 
 def find_assistant_stop_turn_end_ids(messages: list[dict[str, Any]]) -> list[str]:

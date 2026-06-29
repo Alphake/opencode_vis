@@ -44,6 +44,7 @@ import {
   archivedCompletedList,
   buildSessionTodoModel,
   getLatestTodowriteBatchProgress,
+  latestActiveForMessagePanel,
 } from './utils/todoRegistry'
 import { SHOW_COMPOSER_MODEL_UI } from './config/featureFlags'
 import { STORAGE_KEYS, MAIN_COLUMN_BOTTOM_INSET_PX } from './config/storageKeys'
@@ -56,7 +57,7 @@ import {
   type ForkPanelSnapshotBundle,
 } from './utils/forkPanelSnapshot'
 import {
-  findLatestAssistantStopMessage,
+  findRecentAssistantStopMessages,
   getAssistantStopCompletedMs,
   isAssistantStopWithinIngestWindow,
   TRACE_INGEST_FRESH_WINDOW_MS,
@@ -69,6 +70,8 @@ import {
 } from './utils/traceIngestClaim'
 import { fetchPanelAnalysisForSession, fetchTaskSegmentsForSession, inheritForkTaskState, ingestTraceReference, notifyTaskSwitchPrompt, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult } from './services/memoryWorkerApi'
 import { mergePanelAnalysisItemsIntoBucket } from './utils/panelAnalysisStorage'
+import { buildFlowEndSummary } from './utils/flowEndSummary'
+import { buildSubtaskCardMetrics } from './utils/subtaskMetrics'
 import {
   cloneTaskSegmentTabs,
   mergeTaskSegmentTabs,
@@ -712,6 +715,17 @@ function App() {
           cached: item.cached,
         })),
       })
+      if (diagnosisItems.some((item) => item.status === 'running')) {
+        for (const delayMs of [2500, 8000]) {
+          window.setTimeout(() => {
+            void fetchPanelAnalysisForSession(sessionId)
+              .then((batch) => {
+                if (batch.items?.length) mergePanelAnalysisItems(sessionId, batch.items)
+              })
+              .catch((err) => console.warn('[VibeTrace][panel-analysis refresh failed]', err))
+          }, delayMs)
+        }
+      }
     }
     const nextTabs: TaskSegmentTab[] = []
     const taskSwitchRunDir = result.taskSwitch?.runDir
@@ -761,6 +775,24 @@ function App() {
       scheduleMwInternalSessionRefresh(refreshSessions)
     }
   }, [taskSegmentManuallySelectedBySessionId, mergePanelAnalysisItems, refreshSessions])
+
+  const refreshTaskSegmentsFromWorker = useCallback(async (sessionId: string) => {
+    const batch = await fetchTaskSegmentsForSession(sessionId)
+    const workerTabs = taskSegmentTabsFromWorkerBatch(batch.tabs ?? [])
+    if (workerTabs.length === 0) return
+    setTaskSegmentsBySessionId((prev) => {
+      const existing = prev[sessionId] ?? []
+      const merged = mergeTaskSegmentTabs(existing, workerTabs)
+      return { ...prev, [sessionId]: merged }
+    })
+    const preferred = workerTabs.find((tab) => tab.status === 'pending') ?? workerTabs[workerTabs.length - 1]
+    if (preferred) {
+      setActiveTaskSegmentBySessionId((prev) => {
+        if (taskSegmentManuallySelectedBySessionId[sessionId] && prev[sessionId]) return prev
+        return { ...prev, [sessionId]: preferred.id }
+      })
+    }
+  }, [taskSegmentManuallySelectedBySessionId])
 
   useEffect(() => {
     if (!selectedSessionId) return
@@ -842,99 +874,105 @@ function App() {
       })
       return
     }
-    const stopMessage = findLatestAssistantStopMessage(messages)
-    if (!stopMessage) return
+    const stopMessages = findRecentAssistantStopMessages(messages)
+    if (stopMessages.length === 0) return
 
-    const stopId = stopMessage.info.id
-    // Ingest only when stop appeared, finish time within 2 minutes, and not yet claimed (see order below)
-    if (!isAssistantStopWithinIngestWindow(stopMessage)) {
-      const completedMs = getAssistantStopCompletedMs(stopMessage)
-      console.info('[VibeTrace][trace] skip ingest — stop older than fresh window', {
+    const timers: Array<{ timer: number; sid: string; endAssistantMessageId: string; traceKey: string }> = []
+    for (const stopMessage of stopMessages) {
+      const stopId = stopMessage.info.id
+      if (!isAssistantStopWithinIngestWindow(stopMessage)) {
+        const completedMs = getAssistantStopCompletedMs(stopMessage)
+        console.info('[VibeTrace][trace] skip ingest — stop older than fresh window', {
+          sessionID: selectedSessionId,
+          stopId,
+          completedMs,
+          ageSec: completedMs != null ? Math.round((Date.now() - completedMs) / 1000) : null,
+          windowSec: TRACE_INGEST_FRESH_WINDOW_MS / 1000,
+        })
+        continue
+      }
+
+      const traceKey = `${selectedSessionId}:${stopId}`
+      if (processedTraceTurnKeysRef.current.has(traceKey)) continue
+      if (traceIngestDebounceStartedRef.current.has(traceKey)) continue
+      if (hasTraceIngestClaim(selectedSessionId, stopId)) {
+        console.info('[VibeTrace][trace] skip ingest — already processed (claim lock)', { traceKey })
+        continue
+      }
+      if (!tryClaimTraceIngest(selectedSessionId, stopId)) {
+        console.info('[VibeTrace][trace] skip ingest — claim race lost', { traceKey })
+        continue
+      }
+      console.info('[VibeTrace][trace] scheduling ingest — fresh stop, claimed', {
         sessionID: selectedSessionId,
         stopId,
-        completedMs,
-        ageSec: completedMs != null ? Math.round((Date.now() - completedMs) / 1000) : null,
         windowSec: TRACE_INGEST_FRESH_WINDOW_MS / 1000,
       })
-      return
-    }
 
-    const traceKey = `${selectedSessionId}:${stopId}`
-    if (processedTraceTurnKeysRef.current.has(traceKey)) return
-    if (traceIngestDebounceStartedRef.current.has(traceKey)) return
-    if (hasTraceIngestClaim(selectedSessionId, stopId)) {
-      console.info('[VibeTrace][trace] skip ingest — already processed (claim lock)', { traceKey })
-      return
-    }
-    if (!tryClaimTraceIngest(selectedSessionId, stopId)) {
-      console.info('[VibeTrace][trace] skip ingest — claim race lost', { traceKey })
-      return
-    }
-    console.info('[VibeTrace][trace] scheduling ingest — fresh stop, claimed', {
-      sessionID: selectedSessionId,
-      stopId,
-      windowSec: TRACE_INGEST_FRESH_WINDOW_MS / 1000,
-    })
-
-    const sid = selectedSessionId
-    const endAssistantMessageId = stopId
-    const timer = window.setTimeout(() => {
-      traceIngestDebounceStartedRef.current.add(traceKey)
-      void (async () => {
-        const session = sessionsRef.current.find((s) => s.id === sid)
-        const dir = session?.directory
-        try {
-          if (selectedSessionIdRef.current !== sid) {
+      const sid = selectedSessionId
+      const endAssistantMessageId = stopId
+      const timer = window.setTimeout(() => {
+        traceIngestDebounceStartedRef.current.add(traceKey)
+        void (async () => {
+          const session = sessionsRef.current.find((s) => s.id === sid)
+          const dir = session?.directory
+          try {
+            if (selectedSessionIdRef.current !== sid) {
+              releaseTraceIngestClaim(sid, endAssistantMessageId)
+              traceIngestDebounceStartedRef.current.delete(traceKey)
+              return
+            }
+            const forkMeta = resolveForkIngestMeta(sid, sessionsRef.current)
+            const maxTurns = traceSessionTurnLimit()
+            console.info('[VibeTrace][trace] posting /ingest-trace reference', {
+              sessionID: sid,
+              endAssistantMessageId,
+              maxTurns,
+              forkMetaAttached: Boolean(forkMeta),
+            })
+            const ingestResult = await ingestTraceReference({
+              sessionId: sid,
+              endAssistantMessageId,
+              directory: dir,
+              maxTurns,
+              parentSessionID: sid,
+              forkMeta: forkMeta ?? undefined,
+            })
+            applyMemoryWorkerTaskSegments(sid, ingestResult)
+            const diagnosisBatch = ingestResult.errorDiagnosis
+            if (ingestResult.duplicate) {
+              processedTraceTurnKeysRef.current.add(traceKey)
+              console.info('[VibeTrace][memory-worker ingest duplicate skipped]', ingestResult)
+            } else if (ingestResult.ok === false && !diagnosisBatch) {
+              releaseTraceIngestClaim(sid, endAssistantMessageId)
+              traceIngestDebounceStartedRef.current.delete(traceKey)
+              console.warn('[VibeTrace][memory-worker ingest incomplete]', ingestResult.error ?? ingestResult)
+            } else {
+              processedTraceTurnKeysRef.current.add(traceKey)
+              registerMemoryWorkerInternalSessionIds(collectInternalSessionIdsFromIngest(ingestResult))
+              scheduleMwInternalSessionRefresh(refreshSessions)
+              console.info('[VibeTrace][memory-worker ingest ok]', {
+                runId: ingestResult.runId,
+                runDir: ingestResult.runDir,
+              })
+            }
+          } catch (e) {
             releaseTraceIngestClaim(sid, endAssistantMessageId)
             traceIngestDebounceStartedRef.current.delete(traceKey)
-            return
+            console.warn('[VibeTrace][memory-worker ingest failed]', e)
           }
-          const forkMeta = resolveForkIngestMeta(sid, sessionsRef.current)
-          const maxTurns = traceSessionTurnLimit()
-          console.info('[VibeTrace][trace] posting /ingest-trace reference', {
-            sessionID: sid,
-            endAssistantMessageId,
-            maxTurns,
-            forkMetaAttached: Boolean(forkMeta),
-          })
-          const ingestResult = await ingestTraceReference({
-            sessionId: sid,
-            endAssistantMessageId,
-            directory: dir,
-            maxTurns,
-            parentSessionID: sid,
-            forkMeta: forkMeta ?? undefined,
-          })
-          applyMemoryWorkerTaskSegments(sid, ingestResult)
-          if (ingestResult.duplicate) {
-            processedTraceTurnKeysRef.current.add(traceKey)
-            console.info('[VibeTrace][memory-worker ingest duplicate skipped]', ingestResult)
-          } else if (ingestResult.ok === false) {
-            processedTraceTurnKeysRef.current.add(traceKey)
-            traceIngestDebounceStartedRef.current.delete(traceKey)
-            console.warn('[VibeTrace][memory-worker ingest failed]', ingestResult.error ?? ingestResult)
-          } else {
-            processedTraceTurnKeysRef.current.add(traceKey)
-            registerMemoryWorkerInternalSessionIds(collectInternalSessionIdsFromIngest(ingestResult))
-            scheduleMwInternalSessionRefresh(refreshSessions)
-            console.info('[VibeTrace][memory-worker ingest ok]', {
-              runId: ingestResult.runId,
-              runDir: ingestResult.runDir,
-            })
-          }
-        } catch (e) {
-          releaseTraceIngestClaim(sid, endAssistantMessageId)
-          traceIngestDebounceStartedRef.current.delete(traceKey)
-          console.warn('[VibeTrace][memory-worker ingest failed]', e)
-        }
-      })()
-    }, TRACE_EXTRACTION_DEBOUNCE_MS)
+        })()
+      }, TRACE_EXTRACTION_DEBOUNCE_MS)
+      timers.push({ timer, sid, endAssistantMessageId, traceKey })
+    }
 
     return () => {
-      window.clearTimeout(timer)
-      // SSE may refresh messages inside debounce; marking "processed" too early cancels the timer and skips ingest forever
-      if (!traceIngestDebounceStartedRef.current.has(traceKey)) {
-        releaseTraceIngestClaim(sid, endAssistantMessageId)
+      for (const { timer, sid, endAssistantMessageId, traceKey } of timers) {
+        window.clearTimeout(timer)
+        // SSE may refresh messages inside debounce; marking "processed" too early cancels the timer and skips ingest forever
+        if (!traceIngestDebounceStartedRef.current.has(traceKey)) {
+          releaseTraceIngestClaim(sid, endAssistantMessageId)
+        }
       }
     }
   }, [messages, selectedSessionId, sessions, loading, applyMemoryWorkerTaskSegments, refreshSessions])
@@ -1178,6 +1216,11 @@ function App() {
     [messages, todos, todosSnapshotAtMessageIndex],
   )
 
+  const latestActiveForPanel = useMemo(
+    () => latestActiveForMessagePanel(sessionTodoModel, selectedSessionId),
+    [sessionTodoModel, selectedSessionId],
+  )
+
   const archivedForPanel = useMemo(
     () => archivedCompletedList(sessionTodoModel.completedArchive, selectedSessionId),
     [sessionTodoModel.completedArchive, selectedSessionId],
@@ -1240,18 +1283,30 @@ function App() {
 
   const visibleSubtasksForTaskSegment = useMemo(() => {
     if (!activeTaskSegment) return visibleSubtasks
-    const startIndex = messages.findIndex((m) => m.info.id === activeTaskSegment.fromStartUserMessageId)
-    if (startIndex < 0) return visibleSubtasks
+    const activeSegmentIndex = taskSegmentsForActiveSession.findIndex((tab) => tab.id === activeTaskSegment.id)
+    const previousEndIndex =
+      activeSegmentIndex > 0
+        ? taskSegmentsForActiveSession
+            .slice(0, activeSegmentIndex)
+            .reduce((latest, tab) => {
+              const idx = messages.findIndex((m) => m.info.id === tab.toEndAssistantMessageId)
+              return idx >= 0 ? Math.max(latest, idx) : latest
+            }, -1)
+        : -1
+    const rawStartIndex = messages.findIndex((m) => m.info.id === activeTaskSegment.fromStartUserMessageId)
+    const startIndex = previousEndIndex >= 0 ? Math.max(rawStartIndex, previousEndIndex + 1) : rawStartIndex
+    if (startIndex < 0) return []
     const endIndex =
       activeTaskSegment.status === 'pending'
         ? Number.POSITIVE_INFINITY
         : messages.findIndex((m) => m.info.id === activeTaskSegment.toEndAssistantMessageId)
-    if (endIndex < 0) return visibleSubtasks
+    if (endIndex < 0) return []
     return visibleSubtasks.filter(({ subtask }) => {
-      const indices = [...(subtask.userMessageIndices ?? []), ...(subtask.assistantMessageIndices ?? [])]
-      return indices.some((idx) => idx >= startIndex && idx <= endIndex)
+      const assistantIndices = subtask.assistantMessageIndices ?? []
+      if (assistantIndices.length === 0) return false
+      return assistantIndices.every((idx) => idx >= startIndex && idx <= endIndex)
     })
-  }, [activeTaskSegment, messages, visibleSubtasks])
+  }, [activeTaskSegment, messages, taskSegmentsForActiveSession, visibleSubtasks])
 
   /** Execution-phase cards: highlight Todo rows via linked ids */
   const linkedTodoIds = useMemo(() => {
@@ -1536,7 +1591,14 @@ function App() {
           parentSessionID: sid,
           forkMeta: resolveForkIngestMeta(sid, sessionsRef.current) ?? undefined,
         })
-          .then((result) => applyMemoryWorkerTaskSegments(sid, result))
+          .then((result) => {
+            applyMemoryWorkerTaskSegments(sid, result)
+            window.setTimeout(() => {
+              void refreshTaskSegmentsFromWorker(sid).catch((err) =>
+                console.warn('[VibeTrace][task-segments prompt refresh failed]', err),
+              )
+            }, 1800)
+          })
           .catch((err) => console.warn('[VibeTrace][task-switch prompt failed]', err))
         scheduleMwInternalSessionRefresh(refreshSessions)
         await sendMessage(sid, text, dir, { imageParts: images, model: composerModelRef.trim() || undefined })
@@ -1556,7 +1618,7 @@ function App() {
         setWaitingForAssistantReply(false)
       }
     })()
-  }, [selectedSessionId, sessions, composerModelRef, applyMemoryWorkerTaskSegments, refreshSessions])
+  }, [selectedSessionId, sessions, composerModelRef, applyMemoryWorkerTaskSegments, refreshSessions, refreshTaskSegmentsFromWorker])
 
   const handleAbortMessage = useCallback(async () => {
     if (!selectedSessionId) return
@@ -1737,6 +1799,17 @@ function App() {
         let bundle: ForkPanelSnapshotBundle | null = null
         if (forkCtx) {
           try {
+            const originPair =
+              visibleSubtasks.find(({ subtask }) => subtask.subtask_id === forkCtx.subtaskId) ??
+              visibleSubtasks.find(({ sourceIndex }) => sourceIndex === forkCtx.subtaskDisplayIndex)
+            const originFlowEndSummary = originPair
+              ? buildFlowEndSummary(
+                  buildSubtaskCardMetrics(originPair.subtask, messages, originPair.sourceIndex, {
+                    nowMs: Date.now(),
+                  }),
+                  panelAnalysisBySessionId[targetSessionId]?.[forkCtx.subtaskId],
+                )
+              : undefined
             bundle = await buildForkPanelSnapshotBundle({
               messages,
               visibleSubtasks,
@@ -1745,6 +1818,7 @@ function App() {
               forkAnchorPartId: action.partId,
               sourceParentSessionId: targetSessionId,
               forkCtx,
+              originFlowEndSummary,
             })
           } catch {
             /* snapshot optional */
@@ -1821,7 +1895,14 @@ function App() {
                 parentSessionID: forked.id,
                 forkMeta: forkMetaForWorker,
               })
-                .then((result) => applyMemoryWorkerTaskSegments(forked.id, result))
+                .then((result) => {
+                  applyMemoryWorkerTaskSegments(forked.id, result)
+                  window.setTimeout(() => {
+                    void refreshTaskSegmentsFromWorker(forked.id).catch((err) =>
+                      console.warn('[VibeTrace][fork task-segments prompt refresh failed]', err),
+                    )
+                  }, 1800)
+                })
                 .catch((err) => console.warn('[VibeTrace][fork task-switch prompt failed]', err))
               await sendMessage(forked.id, guidedUserText, forked.directory, {
                 model: composerModelRef.trim() || undefined,
@@ -1861,7 +1942,7 @@ function App() {
         setForkBusy(false)
       }
     },
-    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks, refreshSessions, composerModelRef, applyMemoryWorkerTaskSegments, taskSegmentsBySessionId, activeTaskSegmentBySessionId, taskSegmentManuallySelectedBySessionId],
+    [selectedSessionId, sessions, activeSessionDirectory, messages, visibleSubtasks, panelAnalysisBySessionId, refreshSessions, composerModelRef, applyMemoryWorkerTaskSegments, refreshTaskSegmentsFromWorker, taskSegmentsBySessionId, activeTaskSegmentBySessionId, taskSegmentManuallySelectedBySessionId],
   )
 
   const handleAnalyzeFromAction = useCallback((action: MappedAction & { row: number }) => {
@@ -1934,7 +2015,7 @@ function App() {
           >
             <MessagePanel
               messages={messages}
-              latestTodos={sessionTodoModel.latestActive}
+              latestTodos={latestActiveForPanel}
               archivedTodos={archivedForPanel}
               latestTodowriteBatchProgress={latestTodowriteBatchProgress}
               loading={loading}

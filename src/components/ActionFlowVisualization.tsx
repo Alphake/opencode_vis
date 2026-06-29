@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useId, useMemo, useState } from 'react'
 import * as d3 from 'd3'
+import { flip, offset, shift } from '@floating-ui/dom'
 import { Tooltip } from 'react-tooltip'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
@@ -14,6 +15,26 @@ import { effectiveStatusColors, resolveActionBlockColors, statusColors } from '.
 import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './ActionFlowContextMenu'
 import { actionKey } from '../utils/actionKey'
+
+/** Prefer below anchors so tooltips do not cover SubtaskCard title rows above the flow. */
+const ACTION_FLOW_TOOLTIP_PLACE = 'bottom'
+const ACTION_FLOW_TOOLTIP_MIDDLEWARES = [
+  offset(10),
+  flip({
+    fallbackPlacements: [
+      'bottom',
+      'bottom-start',
+      'bottom-end',
+      'right',
+      'right-start',
+      'right-end',
+      'left',
+      'left-start',
+      'left-end',
+    ],
+  }),
+  shift({ padding: 8 }),
+]
 
 type FlowNode =
   | { kind: 'end'; row: number; sessionRegion: 'main' | 'fork-new-branch' }
@@ -330,18 +351,27 @@ export type FlowEndSummary = {
   errorDiagnosis?: MemoryWorkerErrorDiagnosis
 }
 
-function flowEndDiagnosisList(items: string[] | undefined, esc: (s: string) => string): string {
+function flowEndDiagnosisList(
+  items: string[] | undefined,
+  esc: (s: string) => string,
+  translate?: TooltipTranslateFn,
+): string {
   const values = (items ?? []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 4)
   if (values.length === 0) return ''
   return values
-    .map(
-      (x) =>
-        `<div style="font-size:11px;line-height:1.45;color:#4B5563;margin-top:3px;">• ${esc(x)}</div>`,
-    )
+    .map((x) => {
+      const text = translate ? translate(x) : x
+      return `<div style="font-size:11px;line-height:1.45;color:#4B5563;margin-top:3px;">• ${esc(text)}</div>`
+    })
     .join('')
 }
 
-function buildFlowEndDiagnosisHtml(item: MemoryWorkerErrorDiagnosis | undefined, esc: (s: string) => string): string {
+function buildFlowEndDiagnosisHtml(
+  item: MemoryWorkerErrorDiagnosis | undefined,
+  esc: (s: string) => string,
+  translate?: TooltipTranslateFn,
+): string {
+  const t = (s: string) => esc(translate ? translate(s) : s)
   if (!item) return ''
   if (item.status === 'running') {
     return `<div style="border-top:1px solid #D0E2FF;margin-top:10px;padding-top:10px;">
@@ -355,25 +385,25 @@ function buildFlowEndDiagnosisHtml(item: MemoryWorkerErrorDiagnosis | undefined,
   if (item.status === 'failed') {
     return `<div style="border-top:1px solid #F1D0BC;margin-top:10px;padding-top:10px;">
 <div style="font-size:12px;font-weight:700;color:#B42318;margin-bottom:4px;">Trace summary</div>
-<div style="font-size:11px;line-height:1.45;color:#7A2E0E;">Panel analysis failed${item.error ? ` · ${esc(String(item.error))}` : ''}</div>
+<div style="font-size:11px;line-height:1.45;color:#7A2E0E;">Panel analysis failed${item.error ? ` · ${t(String(item.error))}` : ''}</div>
 ${item.runDir ? `<div style="font-size:10px;line-height:1.4;color:#9A3412;margin-top:5px;">Log · ${esc(item.runDir)}</div>` : ''}
 </div>`
   }
   const d = item.diagnosis
   if (!d) return ''
   const confidence = d.confidence ? String(d.confidence) : 'unknown'
-  const causal = flowEndDiagnosisList(d.causalChain, esc)
-  const evidence = flowEndDiagnosisList(d.evidence, esc)
+  const causal = flowEndDiagnosisList(d.causalChain, esc, translate)
+  const evidence = flowEndDiagnosisList(d.evidence, esc, translate)
   const borderColor = hasError ? '#F1D0BC' : '#D0E2FF'
   const headingColor = hasError ? '#B45309' : '#1D4ED8'
   const bodyColor = hasError ? '#7A2E0E' : '#374151'
   return `<div style="border-top:1px solid ${borderColor};margin-top:10px;padding-top:10px;">
 <div style="font-size:12px;font-weight:700;color:${headingColor};margin-bottom:4px;">Trace summary · ${esc(confidence)}</div>
-${d.summary ? `<div style="font-size:11px;line-height:1.45;color:#24292f;margin-bottom:6px;">${esc(String(d.summary))}</div>` : ''}
-${hasError && d.rootCause ? `<div style="font-size:11px;line-height:1.45;color:${bodyColor};"><strong>Root cause</strong> · ${esc(String(d.rootCause))}</div>` : ''}
+${d.summary ? `<div style="font-size:11px;line-height:1.45;color:#24292f;margin-bottom:6px;">${t(String(d.summary))}</div>` : ''}
+${hasError && d.rootCause ? `<div style="font-size:11px;line-height:1.45;color:${bodyColor};"><strong>Root cause</strong> · ${t(String(d.rootCause))}</div>` : ''}
 ${hasError && causal ? `<div style="font-size:11px;font-weight:650;color:${bodyColor};margin-top:7px;">Causal chain</div>${causal}` : ''}
 ${hasError && evidence ? `<div style="font-size:11px;font-weight:650;color:${bodyColor};margin-top:7px;">Evidence</div>${evidence}` : ''}
-${hasError && d.fixSuggestion ? `<div style="font-size:11px;line-height:1.45;color:#24292f;margin-top:7px;"><strong>Fix</strong> · ${esc(String(d.fixSuggestion))}</div>` : ''}
+${hasError && d.fixSuggestion ? `<div style="font-size:11px;line-height:1.45;color:#24292f;margin-top:7px;"><strong>Fix</strong> · ${t(String(d.fixSuggestion))}</div>` : ''}
 ${item.runDir ? `<div style="font-size:10px;line-height:1.4;color:#9A3412;margin-top:7px;">Log · ${esc(item.runDir)}</div>` : ''}
 </div>`
 }
@@ -385,9 +415,9 @@ function buildFlowEndPlaceholderHtml(esc: (s: string) => string): string {
 </div>`
 }
 
-function buildFlowEndTooltipHtml(s: FlowEndSummary): string {
+function buildFlowEndTooltipHtml(s: FlowEndSummary, translate?: TooltipTranslateFn): string {
   const esc = escapeHtml
-  const diagnosis = buildFlowEndDiagnosisHtml(s.errorDiagnosis, esc)
+  const diagnosis = buildFlowEndDiagnosisHtml(s.errorDiagnosis, esc, translate)
   const body = diagnosis || buildFlowEndPlaceholderHtml(esc)
 
   return `<div class="action-tip-root action-tip-root--compact" style="text-align:left;max-width:min(440px,92vw);">
@@ -400,10 +430,14 @@ function computeLayout(
   durationMode: boolean,
   layoutOpts?: {
     includeEndNode?: boolean
+    includeGhostEndNode?: boolean
+    includeForkBranchEndNode?: boolean
     forkAnchorActionKey?: string | null
   }
 ) {
   const includeEndNode = layoutOpts?.includeEndNode !== false
+  const includeGhostEndNode = layoutOpts?.includeGhostEndNode ?? includeEndNode
+  const includeForkBranchEndNode = layoutOpts?.includeForkBranchEndNode ?? includeEndNode
   const forkAnchorActionKey = layoutOpts?.forkAnchorActionKey ?? null
   const sorted = [...actions].sort((a, b) => a.sortTime - b.sortTime)
 
@@ -432,11 +466,15 @@ function computeLayout(
    * End nodes carry `sessionRegion` so layout can place x/y deterministically.
    */
   const seq: FlowNode[] = sorted.map(a => ({ ...a, kind: 'action' as const }))
-  if (includeEndNode) {
-    seq.push({ kind: 'end', row: 1, sessionRegion: 'main' })
-    if (hasNewBranchAction) {
+  if (hasNewBranchAction) {
+    if (includeGhostEndNode) {
+      seq.push({ kind: 'end', row: 1, sessionRegion: 'main' })
+    }
+    if (includeForkBranchEndNode) {
       seq.push({ kind: 'end', row: 1, sessionRegion: 'fork-new-branch' })
     }
+  } else if (includeEndNode) {
+    seq.push({ kind: 'end', row: 1, sessionRegion: 'main' })
   }
   const childKeys = [...sessionKeySet].filter(
     (k) => k !== 'session:main' && k !== 'session:fork-new-branch',
@@ -962,9 +1000,16 @@ function computeLayout(
     const w = blockWidth(durationMode, a.durationMs)
     return Math.max(maxR, x + w)
   }, MARGIN_LEFT)
-  const totalTimelineRight = includeEndNode
-    ? Math.max(maxActionRight, endXMain + MIN_W, endXForkBranch + MIN_W)
-    : maxActionRight
+  const hasMainEnd = hasNewBranchAction ? includeGhostEndNode : includeEndNode
+  const hasForkEnd = hasNewBranchAction && includeForkBranchEndNode
+  const totalTimelineRight =
+    hasMainEnd || hasForkEnd
+      ? Math.max(
+          maxActionRight,
+          hasMainEnd ? endXMain + MIN_W : maxActionRight,
+          hasForkEnd ? endXForkBranch + MIN_W : maxActionRight,
+        )
+      : maxActionRight
   const totalW = Math.max(totalTimelineRight + MARGIN_LEFT, 360)
   return { layout, totalW, totalH }
 }
@@ -1274,8 +1319,14 @@ interface Props {
    * Defaults to true.
    */
   showFlowEndNode?: boolean
+  /** Fork-compare: show legacy ghost rail terminator even while the new branch is still running. */
+  showGhostEndNode?: boolean
+  /** Fork-compare: show new-branch terminator (defaults to `showFlowEndNode`). */
+  showForkBranchEndNode?: boolean
   /** Hover HTML for the terminator; pair with `showFlowEndNode`. */
   flowEndSummary?: FlowEndSummary
+  /** Fork-compare ghost rail: tooltip for the muted legacy terminator. */
+  ghostFlowEndSummary?: FlowEndSummary | null
   /** Drop inner chrome when embedded inside split containers */
   embedded?: boolean
   /** Cap scroll area height (px) for stacked lanes */
@@ -1315,7 +1366,10 @@ export default function ActionFlowVisualization({
   onAnalyzeFromAction,
   mockBranchForkActionIndex,
   showFlowEndNode = true,
+  showGhostEndNode,
+  showForkBranchEndNode,
   flowEndSummary,
+  ghostFlowEndSummary = null,
   embedded = false,
   viewportMaxHeight,
   hideScrollbar = false,
@@ -1344,13 +1398,18 @@ export default function ActionFlowVisualization({
   useEffect(() => {
     setTooltipMounted(true)
   }, [])
+  const layoutEndOpts = useMemo(
+    () => ({
+      includeEndNode: showFlowEndNode,
+      includeGhostEndNode: showGhostEndNode ?? showFlowEndNode,
+      includeForkBranchEndNode: showForkBranchEndNode ?? showFlowEndNode,
+      forkAnchorActionKey,
+    }),
+    [showFlowEndNode, showGhostEndNode, showForkBranchEndNode, forkAnchorActionKey],
+  )
   const layoutEstimate = useMemo(
-    () =>
-      computeLayout(actions, durationMode, {
-        includeEndNode: showFlowEndNode,
-        forkAnchorActionKey,
-      }),
-    [actions, durationMode, showFlowEndNode, forkAnchorActionKey]
+    () => computeLayout(actions, durationMode, layoutEndOpts),
+    [actions, durationMode, layoutEndOpts],
   )
   useEffect(() => {
     const el = scrollRef.current
@@ -1371,10 +1430,7 @@ export default function ActionFlowVisualization({
     const maxTok = Math.max(1, ...actions.map(a => a.tokenEstimate))
     const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxTok])
 
-    const { layout, totalW, totalH } = computeLayout(actions, durationMode, {
-      includeEndNode: showFlowEndNode,
-      forkAnchorActionKey,
-    })
+    const { layout, totalW, totalH } = computeLayout(actions, durationMode, layoutEndOpts)
     /** Fork compare when any forked-branch action appears (tasks included). Cannot rely solely on `session:fork-new-branch` because forked Subagents still key child sessions differently. */
     const hasForkNewBranchInLayout = layout.some(
       (item) =>
@@ -1740,13 +1796,14 @@ export default function ActionFlowVisualization({
       if (node.kind === 'end') {
         /**
          * Ghost terminator (`sessionRegion='main'` with active fork rails) renders neutral grey;
-         * forked / baseline ends keep `palette.end` yellow. Omit summary tooltip on ghosts (current-session data mismatch).
+         * forked / baseline ends keep `palette.end` yellow.
          */
         const isGhostEnd =
           node.sessionRegion === 'main' && hasForkNewBranchInLayout
         const fill = isGhostEnd ? '#E8E8E8' : actionFlowPalette.end.fill
         const stroke = isGhostEnd ? '#BFBFBF' : actionFlowPalette.end.stroke
-        const endTip = !isGhostEnd && flowEndSummary ? buildFlowEndTooltipHtml(flowEndSummary) : ''
+        const endSummary = isGhostEnd ? ghostFlowEndSummary : flowEndSummary
+        const endTip = endSummary ? buildFlowEndTooltipHtml(endSummary, tooltipTranslate) : ''
         const circle = content
           .append('circle')
           .attr('cx', nx + w / 2)
@@ -1757,7 +1814,7 @@ export default function ActionFlowVisualization({
           .attr('stroke-width', 1.5)
           .style('cursor', endTip ? 'pointer' : 'default')
         if (endTip) {
-          circle.attr('data-tooltip-id', tooltipId).attr('data-tooltip-html', endTip).attr('data-tooltip-place', 'left')
+          circle.attr('data-tooltip-id', tooltipId).attr('data-tooltip-html', endTip).attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
         }
         return
       }
@@ -1830,7 +1887,7 @@ export default function ActionFlowVisualization({
         .attr('data-tooltip-html', buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs, {
           translate: tooltipTranslate,
         }))
-        .attr('data-tooltip-place', 'top')
+        .attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
       if (onSelectAction) {
         actionTarget.on('click', (ev: MouseEvent) => {
           ev.stopPropagation()
@@ -2189,10 +2246,13 @@ export default function ActionFlowVisualization({
     onForkFromAction,
     onAnalyzeFromAction,
     showFlowEndNode,
+    showGhostEndNode,
+    showForkBranchEndNode,
+    layoutEndOpts,
     flowEndSummary,
+    ghostFlowEndSummary,
     embedded,
     viewportMaxHeight,
-    forkAnchorActionKey,
     tooltipTranslate,
   ])
 
@@ -2358,6 +2418,8 @@ export default function ActionFlowVisualization({
           className="action-flow-react-tooltip"
           variant="light"
           positionStrategy="fixed"
+          place={ACTION_FLOW_TOOLTIP_PLACE}
+          middlewares={ACTION_FLOW_TOOLTIP_MIDDLEWARES}
           delayShow={150}
           delayHide={220}
           opacity={1}

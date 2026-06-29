@@ -1,4 +1,4 @@
-import type { OcMessage, OcMessagePart } from '../types/opencode'
+import type { OcMessage } from '../types/opencode'
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === 'object' ? (v as Record<string, unknown>) : null
@@ -19,25 +19,35 @@ function getMessageFinish(message: OcMessage): string | undefined {
   return candidates.find((x): x is string => Boolean(x))
 }
 
-function partIsStop(part: OcMessagePart): boolean {
-  return part.type === 'step-finish' && part.reason === 'stop'
+function isStopFinish(message: OcMessage): boolean {
+  return getMessageFinish(message)?.trim().toLowerCase() === 'stop'
 }
 
-function isAssistantStopMessage(message: OcMessage): boolean {
+function isAssistantTerminalMessage(message: OcMessage): boolean {
   if (message.info.role !== 'assistant') return false
-  if (getMessageFinish(message) === 'stop') return true
-  return message.parts.some(partIsStop)
+  return isStopFinish(message)
 }
 
 export function findLatestAssistantStopMessage(messages: OcMessage[]): OcMessage | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
-    if (msg && isAssistantStopMessage(msg)) return msg
+    if (msg && isAssistantTerminalMessage(msg)) return msg
   }
   return null
 }
 
-/** Auto-ingest only if the assistant stop finished within this window (2 minutes). */
+export function findRecentAssistantStopMessages(messages: OcMessage[], limit: number = 5): OcMessage[] {
+  const out: OcMessage[] = []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (!msg || !isAssistantTerminalMessage(msg)) continue
+    out.push(msg)
+    if (out.length >= limit) break
+  }
+  return out.reverse()
+}
+
+/** Auto-ingest only if the assistant turn finished within this window (2 minutes). */
 export const TRACE_INGEST_FRESH_WINDOW_MS = 2 * 60_000
 
 /** Normalize OpenCode timestamps (seconds or ms) to epoch ms. */
@@ -64,7 +74,8 @@ function readCompletedMs(message: OcMessage): number | null {
 
 /**
  * Whether this stop is recent enough to auto-ingest.
- * Uses completion time when present; if stop is visible but `completed` is not set yet (SSE lag), treat as fresh.
+ * A completed assistant turn is only a real turn boundary when `finish: "stop"` is present.
+ * Uses completion time only after that stop is visible; if `completed` is not set yet (SSE lag), treat as fresh.
  */
 export function isAssistantStopWithinIngestWindow(
   message: OcMessage,
@@ -75,7 +86,7 @@ export function isAssistantStopWithinIngestWindow(
   if (completedMs != null) {
     return nowMs - completedMs <= windowMs
   }
-  return isAssistantStopMessage(message)
+  return true
 }
 
 /** For debug logs: when the stop finished (ms), if known. */

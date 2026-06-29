@@ -623,16 +623,11 @@ function windowsOverlap(
 
 export type ParallelCallInfo = { parallelGroupId: string; parallelLaneIndex: number }
 
-/** Parallel bucketing: subagent/task within the same message are not grouped by call_id stem (each launch gets a new call_id) */
-function parallelCompareBucketKey(messageId: string, stem: string, isSubagentTool: boolean): string {
-  if (isSubagentTool) return `${messageId}:::__subagent_task__`
-  return `${messageId}:::${stem}`
-}
-
 /**
- * Within the same assistant message, overlapping wall-clock intervals → parallel:
- * - ordinary tools: same call_id stem (e.g. `read_1` / `read_2`)
- * - task/subagent: multiple launches in one message with overlapping intervals (call_ids are independent)
+ * EXPERIMENTAL (2026-06-29): relaxed parallel detection — bucket by assistant `messageId` only;
+ * no `callIdStem` gate. Overlapping wall-clock intervals within the same message → parallel.
+ * May revert; see `docs/deferred-backlog.md` §4.
+ *
  * Returns callID → group id + lane (0..n-1 by ascending start).
  */
 export function detectParallelCallMapping(messages: OcMessage[], nowMs: number): Map<string, ParallelCallInfo> {
@@ -640,8 +635,6 @@ export function detectParallelCallMapping(messages: OcMessage[], nowMs: number):
   type ToolMeta = {
     messageId: string
     callID: string
-    stem: string
-    isSubagentTool: boolean
     window: { startMs: number; endMs: number }
     startMs: number
   }
@@ -656,8 +649,6 @@ export function detectParallelCallMapping(messages: OcMessage[], nowMs: number):
       tools.push({
         messageId: mid,
         callID: part.callID,
-        stem: callIdStem(part.callID),
-        isSubagentTool: isSubagentToolName(part.tool),
         window: tw,
         startMs: tw.startMs,
       })
@@ -665,11 +656,10 @@ export function detectParallelCallMapping(messages: OcMessage[], nowMs: number):
   }
   const byKey = new Map<string, ToolMeta[]>()
   for (const t of tools) {
-    const key = parallelCompareBucketKey(t.messageId, t.stem, t.isSubagentTool)
-    let arr = byKey.get(key)
+    let arr = byKey.get(t.messageId)
     if (!arr) {
       arr = []
-      byKey.set(key, arr)
+      byKey.set(t.messageId, arr)
     }
     arr.push(t)
   }

@@ -17,8 +17,11 @@ export const HARNESS_GUIDANCE_ENABLED = true
  * Preamble prepended to every user turn (edit freely).
  * Keep a plan-then-execute shape so subtask / todo visualizations stay meaningful.
  */
-export const HARNESS_USER_GUIDANCE = `[Runtime policy — must follow]
-1) Before planning and execution, use the built-in \`skill\` tool when a matching skill applies to the current task.
+export const HARNESS_USER_GUIDANCE = `
+[Plan-first]
+Before answering the user, outline a concise plan, use the todowrite tool to maintain todos, then execute.
+[Runtime policy — must follow]
+1) Before planning and execution: call \`skill_router\` with the task as \`query\` to discover skill candidates; if hits look relevant, load the best match with the built-in \`skill\` tool (exact \`name\`). If \`skill_router\` is unavailable, scan skill folders (e.g. \`.opencode/skills\`, \`~/.claude/skills\`) and use \`skill\` when a match applies.
 2) Use todowrite during the planning phase (required).
 3) If todos already exist:
    - Keep completed items (do not delete or mark as incomplete)
@@ -26,8 +29,7 @@ export const HARNESS_USER_GUIDANCE = `[Runtime policy — must follow]
    - Only add or modify pending items related to the current task
 4) Before responding to the user, ensure todo statuses match actual execution results.
 
-[Plan-first]
-Before answering the user, outline a concise plan, use the todowrite tool to maintain todos, then execute.`
+`
 
 /** Separator between preamble and authentic user content — send + display parsers must agree. */
 export const HARNESS_USER_INPUT_MARKER = '\n\n---\nUser input\n'

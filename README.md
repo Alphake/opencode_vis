@@ -38,9 +38,9 @@ Beyond observation, VibeTrace supports interactive steering grounded in the live
 
 ## Installation & Running
 
-**Recommended:** use the VibeTrace plugin — no need to manually run `opencode serve`, `npm run dev`, or `npm run worker:py`.
+VibeTrace runs as three local processes: the **OpenCode HTTP server**, the **memory-worker** (Python), and the **Vite UI**. You start each one from the command line.
 
-You also need **Python 3** on your machine for the memory-worker (`python` on Windows, `python3` on macOS/Linux).
+**Prerequisites:** [OpenCode CLI](https://opencode.ai/download), **Node.js**, and **Python 3** (`python` on Windows, `python3` on macOS/Linux).
 
 ### 1. Install OpenCode
 
@@ -50,113 +50,125 @@ Follow the [upstream installation guide](https://opencode.ai/download), then ver
 opencode --version
 ```
 
-
-
-### 2. Clone this repository
+### 2. Clone and install dependencies
 
 ```bash
 git clone -b V1.5 https://github.com/idvxlab/VibeTrace.git
 cd VibeTrace
+npm install
 ```
 
-### 3. Copy environment file
+### 3. Configure environment
+
+Copy the template and keep **manual dev** defaults (OpenCode on port **4096**, no HTTP password):
 
 ```bash
 cp .env.example .env.local
 ```
 
-Most OpenCode connection settings are **written automatically by the plugin** (proxy target, port, desktop auth). You usually do not need to edit URLs by hand. Optional overrides: [`.env.example`](./.env.example).
+On Windows you can also reset to manual mode anytime:
 
-### 4. Install UI dependencies (one-time, required)
-
-```bash
-npm install
+```powershell
+npm run env:manual
 ```
 
-This step **cannot be skipped** for the first time. The plugin starts `npm run dev` and the Python worker for you, but it does **not** run `npm install` — if `node_modules/` is missing, OpenCode logs an error and VibeTrace will not start.
+Key settings in `.env.local` (see [`.env.example`](./.env.example) for the full list):
 
-### 5. Register the plugin (one-time)
+| Variable | Manual dev value | Purpose |
+| --- | --- | --- |
+| `VIBETRACE_OPENCODE_MODE` | `manual` | You start `opencode serve` yourself |
+| `OPENCODE_PROXY_TARGET` | `http://127.0.0.1:4096` | Vite dev proxy → OpenCode |
+| `OPENCODE_BASE` | `http://127.0.0.1:4096` | memory-worker → OpenCode |
+| `VITE_OPENCODE_BASE` | *(empty)* | Use Vite same-origin proxy (recommended) |
+| `VITE_MEMORY_WORKER_BASE` | *(empty)* | Worker API also proxied through Vite |
 
-Add the plugin file’s **absolute path** to your global OpenCode config:
+If `opencode serve` prints a port other than `4096`, update `OPENCODE_PROXY_TARGET` and `OPENCODE_BASE` to match. You can pin the port:
+
+```bash
+opencode serve --port 4096
+```
+
+Do **not** set `VITE_OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_PASSWORD` for a normal unsecured `opencode serve`.
+
+### 4. Start services (three terminals)
+
+Keep all three running while you use VibeTrace.
+
+**Terminal 1 — OpenCode (backend API)**
+
+```bash
+opencode serve
+```
+
+You should see something like:
+
+```text
+opencode server listening on http://127.0.0.1:4096
+```
+
+**Terminal 2 — memory-worker (trace ingest & panel analysis)**
+
+```bash
+npm run worker:py
+```
+
+Listens on **`http://127.0.0.1:8714`** by default. See [`docs/memory-worker.md`](./docs/memory-worker.md).
+
+**Terminal 3 — Vite UI**
+
+```bash
+npm run dev
+```
+
+Open **`http://127.0.0.1:5173`** in your browser.
+
+### Daily use
+
+1. Start **Terminal 1** (`opencode serve`), then **Terminal 2** (`npm run worker:py`), then **Terminal 3** (`npm run dev`).
+2. Use VibeTrace in the browser. Trace ingest and per-panel analysis run in the background via the worker.
+
+### Optional environment variables
+
+| Variable | When to set |
+| --- | --- |
+| `SKILL_WRITE_ROOT` | Where analyzed skills are written |
+| `VITE_OPENCODE_DEFAULT_MODEL` | Default model when sending from VibeTrace (`provider/model`) |
+| `VITE_TRACE_SESSION_TURN_LIMIT` | More history turns per ingest (default `5`) |
+| `PYTHON` | Non-default Python executable name |
+
+<details>
+<summary><strong>Appendix: OpenCode desktop plugin (optional, not required)</strong></summary>
+
+The repo includes `plugins/agent-cockpit.ts` for **internal / desktop convenience**: when registered in OpenCode, it can rewrite `.env.local`, start the memory-worker and Vite dev server, and open the browser automatically. **This is not the documented install path** — use the three-terminal flow above unless you maintain the plugin yourself.
+
+**One-time registration** — add the plugin file’s **absolute path** to your global OpenCode config:
 
 | OS | Global config path |
 | --- | --- |
 | **Windows** | `%APPDATA%\opencode\opencode.json` |
 | **macOS / Linux** | `~/.config/opencode/opencode.json` |
 
-**Windows example** (replace with your clone path):
-
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "D:/projects/VibeTrace/plugins/agent-cockpit.ts"
+    "/absolute/path/to/VibeTrace/plugins/agent-cockpit.ts"
   ]
 }
 ```
 
-**macOS / Linux example** (replace with your clone path):
+Point at **`plugins/agent-cockpit.ts`**, not the repo root. **Fully quit and restart OpenCode** after changing config.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    "/Users/you/projects/VibeTrace/plugins/agent-cockpit.ts"
-  ]
-}
-```
+With the plugin enabled, starting the **OpenCode desktop app** may:
 
-Point at **`plugins/agent-cockpit.ts`**, not the repo root. This works from any OpenCode workspace.
+- update `.env.local` with the desktop API port and auth
+- start memory-worker on **`http://127.0.0.1:8714`**
+- start Vite on **`http://127.0.0.1:5173`**
+- open the browser (unless `VIBETRACE_NO_BROWSER=1`)
 
-**Fully quit and restart OpenCode** after changing config.
+Plugin-related env vars: `VIBETRACE_NO_BROWSER`, `VIBETRACE_OPENCODE_MODE=plugin`. To return to manual dev, run `npm run env:manual` (Windows) or restore manual values from [`.env.example`](./.env.example).
 
-### 6. Launch
-
-1. Start the **OpenCode desktop app** 
-2. The plugin automatically:
-   - updates `.env.local` with the current OpenCode API address and auth
-   - starts the memory-worker on **`http://127.0.0.1:8714`**
-   - starts the Vite UI on **`http://127.0.0.1:5173`**
-   - opens your browser (unless `VIBETRACE_NO_BROWSER=1`)
-
-You should see log lines similar to:
-
-```txt
-[VibeTrace] OpenCode API → http://127.0.0.1:xxxx
-[VibeTrace] memory-worker ready
-[VibeTrace] ready → http://127.0.0.1:5173
-[VibeTrace] opening → http://127.0.0.1:5173
-```
-
-Open http://127.0.0.1:5173 manually if the browser does not open.
-
-### Daily use (plugin mode)
-
-1. Open **OpenCode** — that’s it.
-2. Use VibeTrace in the browser; trace ingest and panel analysis run in the background.
-
-
-Optional environment variables (plugin mode):
-
-| Variable | When to set |
-| --- | --- |
-| `SKILL_WRITE_ROOT` | Control where analyzed skills are written (background pipeline) |
-| `VITE_OPENCODE_DEFAULT_MODEL` | Default model when sending from VibeTrace (`provider/model`) |
-| `VITE_TRACE_SESSION_TURN_LIMIT` | More history turns per ingest (default `5`) |
-| `VIBETRACE_NO_BROWSER=1` | Do not auto-open the browser |
-| `PYTHON` | Non-default Python executable name |
-
----
-
-## Version
-
-**V1.5** — English UI, streamlined harness (built-in `skill` tool only; custom `skill_router` removed), and updated memory-worker prompts.
-
-Clone the release branch:
-
-```bash
-git clone -b V1.5 https://github.com/idvxlab/VibeTrace.git
-```
+</details>
 
 ---
 

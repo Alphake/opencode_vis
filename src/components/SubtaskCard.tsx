@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
+import { buildFlowEndSummary } from '../utils/flowEndSummary'
 import {
   applyParallelLayoutFromCalls,
   buildChildSessionBandMap,
@@ -159,10 +160,6 @@ interface SubtaskCardProps {
   isFeedbackSelected?: boolean
   hasFeedbackComment?: boolean
   onOpenFeedbackComment?: () => void
-  /** Last subtask card in the active task-segment list — keeps the terminator hidden until the segment closes. */
-  isLastVisibleSubtask?: boolean
-  /** Active task tab is still accumulating turns (`pending`); the trailing panel stays open. */
-  isLiveTaskSegment?: boolean
   sessionId?: string
   tooltipTranslate?: TooltipTranslateFn
 }
@@ -242,8 +239,6 @@ export default function SubtaskCard({
   isFeedbackSelected = false,
   hasFeedbackComment = false,
   onOpenFeedbackComment,
-  isLastVisibleSubtask = false,
-  isLiveTaskSegment = true,
   sessionId,
   tooltipTranslate,
 }: SubtaskCardProps) {
@@ -587,31 +582,15 @@ export default function SubtaskCard({
 
   const durationLabel = formatDurationMs(m.durationMs)
   const changesLabel = String(m.mutatedFileCount)
-  /**
-   * Terminator only when this panel’s trace is closed:
-   * - a later subtask panel exists below, or
-   * - the task segment was extracted (no longer live).
-   * Also hide while tools are still running.
-   */
-  const isPanelTraceClosed = !isLastVisibleSubtask || !isLiveTaskSegment
-  const showFlowEndNode =
-    isPanelTraceClosed && !hasActiveRunningAction && flowActions.length > 0
+  /** Hide the golden end circle while tools are active; show when this panel’s trace finishes. */
+  const showFlowEndNode = !hasActiveRunningAction && flowActions.length > 0
 
   /**
    * Stabilize `flowEndSummary` identity — inline object literals each render fooled ActionFlowVisualization’s first
    * `useLayoutEffect` into `selectAll('*').remove()`, wiping the SVG whenever clicks/`nowTick` fired.
    */
   const flowEndSummary = useMemo(
-    () => ({
-      readFileTotalCount: m.readFilesCount,
-      readFilePaths: m.readFilePaths,
-      globMatchFileCount: m.globMatchFileCount,
-      webSearchCount: m.webSearchCallCount,
-      webSearchQueries: m.webSearchQueries,
-      writeFileCount: m.mutatedFileCount,
-      changedFilePaths: m.mutatedFilePaths,
-      errorDiagnosis,
-    }),
+    () => buildFlowEndSummary(m, errorDiagnosis),
     [
       m.readFilesCount,
       m.readFilePaths,
@@ -621,8 +600,12 @@ export default function SubtaskCard({
       m.mutatedFileCount,
       m.mutatedFilePaths,
       errorDiagnosis,
+      m,
     ],
   )
+
+  /** Ghost rail terminator reuses the source-session summary captured at fork time. */
+  const ghostFlowEndSummary = forkPanelSnapshotBundle?.originFlowEndSummary ?? null
 
   /** Same memo trick for fork handler identity */
   const handleForkFromActionWrapped = useMemo(() => {
@@ -1023,6 +1006,8 @@ export default function SubtaskCard({
           const renderActions = useForkMerged ? forkMergedFlow!.merged : flowActions
           const renderTooltips = useForkMerged ? forkMergedFlow!.mergedTooltips : tooltipLookupMessages
           const forkAnchor = useForkMerged ? forkMergedFlow!.anchorActionKey : null
+          const hasGhostSuffix =
+            useForkMerged && renderActions.some((a) => a.forkGhost === true)
           return (
             <ActionFlowVisualization
               actions={renderActions}
@@ -1040,7 +1025,10 @@ export default function SubtaskCard({
               onForkFromAction={handleForkFromActionWrapped}
               onAnalyzeFromAction={onAnalyzeFromAction}
               showFlowEndNode={showFlowEndNode}
+              showGhostEndNode={hasGhostSuffix ? true : undefined}
+              showForkBranchEndNode={useForkMerged ? showFlowEndNode : undefined}
               flowEndSummary={flowEndSummary}
+              ghostFlowEndSummary={ghostFlowEndSummary}
               viewportMaxHeight={FLOW_VIEWPORT_MAX_HEIGHT}
               tooltipTranslate={tooltipTranslate}
             />

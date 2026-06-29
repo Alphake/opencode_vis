@@ -1,3 +1,4 @@
+import type { FlowEndSummary } from '../components/ActionFlowVisualization'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { AssistantSubtask } from './subtaskGrouping'
 import {
@@ -45,6 +46,8 @@ export type ForkPanelSnapshotBundle = {
   forkOriginSubtaskId: string
   forkOriginDisplayIndex: number
   snapshot: ForkPanelSubtaskSnapshot
+  /** Trace summary + metrics captured from the source session at fork time (ghost rail terminator). */
+  originFlowEndSummary?: FlowEndSummary
 }
 
 function storageKey(sessionId: string): string {
@@ -151,6 +154,7 @@ export async function buildForkPanelSnapshotBundle(opts: {
   forkAnchorPartId?: string
   sourceParentSessionId: string
   forkCtx: ForkFromActionContext
+  originFlowEndSummary?: FlowEndSummary
 }): Promise<ForkPanelSnapshotBundle> {
   const nowMs = Date.now()
   const pair =
@@ -183,5 +187,6 @@ export async function buildForkPanelSnapshotBundle(opts: {
     forkOriginSubtaskId: pair.subtask.subtask_id,
     forkOriginDisplayIndex: pair.sourceIndex,
     snapshot,
+    ...(opts.originFlowEndSummary ? { originFlowEndSummary: opts.originFlowEndSummary } : {}),
   }
 }

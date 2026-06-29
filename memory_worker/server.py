@@ -30,6 +30,7 @@ SKILL_HISTORY_INDEX_PATH = LOG_ROOT / "skill-history-index.json"
 TASK_SEGMENTS_INDEX_PATH = LOG_ROOT / "task-segments-index.json"
 ERROR_DIAGNOSIS_INDEX_PATH = LOG_ROOT / "error-diagnosis-index.json"
 INGEST_DEDUP_STALE_RUNNING_SEC = 900
+ERROR_DIAGNOSIS_RUNNING_STALE_SEC = 900
 _ingest_dedup_lock = threading.Lock()
 _task_switch_lock = threading.Lock()
 _task_segments_lock = threading.Lock()
@@ -782,7 +783,8 @@ def _task_segment_tab_record(
     title = str(segment.get("title") or "").strip()
     description = str(segment.get("description") or "").strip()
     summary = str(segment.get("summary") or "").strip()
-    if not title and not description:
+    provisional = bool(segment.get("provisional"))
+    if not title and not description and not provisional:
         summary = ""
     elif not summary:
         summary = _format_task_display_label(title=title, description=description)
@@ -798,6 +800,7 @@ def _task_segment_tab_record(
         "summary": summary,
         "taskSwitchRunDir": str(task_switch_run_dir or "").strip(),
         "pipelineRunDir": str(pipeline_run_dir or "").strip(),
+        "provisional": provisional,
     }
 
 
@@ -1003,6 +1006,9 @@ def _persist_task_segments(
                     continue
                 if task_id == pending_record["taskId"]:
                     continue
+                if str(task_id).startswith("task:pending:") or bool(tab.get("provisional")):
+                    del tabs_by_id[task_id]
+                    continue
                 if task_switched:
                     tabs_by_id[task_id] = {**tab, "status": "extracted"}
                 else:
@@ -1076,6 +1082,12 @@ def _task_segments_from_switch_state(session_id: str) -> list[dict[str, Any]]:
                 title=brief.get("title"),
                 description=brief.get("description"),
             )
+            if not segment.get("taskId") and isinstance(in_flight_turn, dict):
+                segment = _pending_task_segment_placeholder(
+                    in_flight_turn,
+                    title=brief.get("title"),
+                    description=brief.get("description"),
+                )
             record = _task_segment_tab_record(segment, status="pending", task_switch_run_dir=switch_run_dir)
             if record:
                 tabs_by_id[record["taskId"]] = record
@@ -2145,6 +2157,35 @@ def _task_segment_summary(
     }
 
 
+def _pending_task_segment_placeholder(
+    turn: dict[str, Any],
+    *,
+    title: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    user_input = str(turn.get("userInput") or "")
+    stable = hashlib.sha1(user_input.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    resolved_title = str(title or "").strip()
+    resolved_description = str(description or "").strip()
+    resolved_summary = _format_task_display_label(
+        title=resolved_title,
+        description=resolved_description,
+    )
+    if not resolved_summary:
+        resolved_summary = _summarize_user_input(user_input)
+    return {
+        "taskId": f"task:pending:{stable}",
+        "fromStartUserMessageId": "",
+        "fromEndAssistantMessageId": "",
+        "toEndAssistantMessageId": "",
+        "turnCount": 0,
+        "title": resolved_title,
+        "description": resolved_description,
+        "summary": resolved_summary,
+        "provisional": True,
+    }
+
+
 def _load_ingest_dedup_index() -> dict[str, Any]:
     if not INGEST_DEDUP_INDEX.exists():
         return {}
@@ -2429,6 +2470,20 @@ def _error_diagnosis_run_dir(
     )
 
 
+def _error_diagnosis_running_is_fresh(entry: dict[str, Any]) -> bool:
+    started = str(entry.get("startedAt") or "").strip()
+    if not started:
+        return False
+    try:
+        dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+    except Exception:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - dt).total_seconds()
+    return age < ERROR_DIAGNOSIS_RUNNING_STALE_SEC
+
+
 def _json_preview(value: Any, limit: int = 4000) -> Any:
     if isinstance(value, str):
         return value[:limit]
@@ -2575,7 +2630,7 @@ def run_error_diagnosis_for_trace(
             index = _load_error_diagnosis_index()
             diagnoses = index.setdefault("diagnoses", {})
             existing = diagnoses.get(dedup_key) if isinstance(diagnoses.get(dedup_key), dict) else None
-            if existing and existing.get("status") in {"running", "ok"}:
+            if existing:
                 items.append({**existing, "dedupKey": dedup_key, "cached": True})
                 continue
 
@@ -3236,6 +3291,12 @@ def _run_user_prompt_task_switch_worker(
         title=curr_brief.get("title"),
         description=curr_brief.get("description"),
     )
+    if not pending_segment.get("taskId"):
+        pending_segment = _pending_task_segment_placeholder(
+            current_turn,
+            title=curr_brief.get("title"),
+            description=curr_brief.get("description"),
+        )
     _persist_task_segments(
         session_id,
         directory_override,
@@ -3904,25 +3965,17 @@ def try_parse_json_value(raw_text: str) -> Any | None:
 
 
 def is_assistant_stop_message(message: dict[str, Any]) -> bool:
-    """Align with cockpit-ui `isAssistantStopMessage` (info.finish or step-finish reason=stop)."""
+    """A turn ends only when the assistant message explicitly has finish=stop."""
     info = message.get("info") or {}
     if info.get("role") != "assistant":
         return False
-    if info.get("finish") == "stop":
-        return True
     nested = message.get("message")
-    if isinstance(nested, dict) and nested.get("finish") == "stop":
-        return True
-    parts = message.get("parts")
-    if isinstance(parts, list):
-        for part in parts:
-            if (
-                isinstance(part, dict)
-                and part.get("type") == "step-finish"
-                and part.get("reason") == "stop"
-            ):
-                return True
-    return False
+    candidates = [
+        info.get("finish"),
+        nested.get("finish") if isinstance(nested, dict) else None,
+        message.get("finish"),
+    ]
+    return any(isinstance(x, str) and x.strip().lower() == "stop" for x in candidates)
 
 
 def wait_assistant_stop_message(

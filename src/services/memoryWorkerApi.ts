@@ -89,6 +89,7 @@ export interface MemoryWorkerTaskSegment {
   description?: string
   summary?: string
   nextPendingEndAssistantMessageId?: string
+  provisional?: boolean
 }
 
 export interface MemoryWorkerTaskSegmentTab extends MemoryWorkerTaskSegment {

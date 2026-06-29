@@ -14,6 +14,7 @@ export type TaskSegmentTab = {
   summary?: string
   taskSwitchRunDir?: string
   pipelineRunDir?: string
+  provisional?: boolean
 }
 
 export function taskSegmentId(status: TaskSegmentStatus, segment: MemoryWorkerTaskSegment): string {
@@ -25,7 +26,8 @@ export function taskSegmentFromWorker(
   segment: MemoryWorkerTaskSegment,
   meta?: Pick<TaskSegmentTab, 'taskSwitchRunDir' | 'pipelineRunDir'>,
 ): TaskSegmentTab | null {
-  if (!segment.fromStartUserMessageId || !segment.toEndAssistantMessageId) return null
+  const provisionalPending = status === 'pending' && Boolean(segment.provisional)
+  if (!provisionalPending && (!segment.fromStartUserMessageId || !segment.toEndAssistantMessageId)) return null
   return {
     id: taskSegmentId(status, segment),
     status,
@@ -36,6 +38,7 @@ export function taskSegmentFromWorker(
     title: segment.title?.trim() || undefined,
     description: segment.description?.trim() || undefined,
     summary: segment.summary?.trim() || undefined,
+    provisional: provisionalPending || undefined,
     ...meta,
   }
 }
@@ -51,6 +54,7 @@ export function taskSegmentTabFromWorkerRecord(tab: MemoryWorkerTaskSegmentTab):
     title: tab.title,
     description: tab.description,
     summary: tab.summary,
+    provisional: tab.provisional,
   }
   return taskSegmentFromWorker(status, segment, {
     taskSwitchRunDir: tab.taskSwitchRunDir,
@@ -88,6 +92,10 @@ export function mergeTaskSegmentTabs(
     if (tab.status === 'pending') {
       for (const [id, old] of byId) {
         if (old.status !== 'pending') continue
+        if (old.provisional || !old.fromStartUserMessageId || !old.toEndAssistantMessageId) {
+          byId.delete(id)
+          continue
+        }
         if (taskSwitched) {
           byId.set(id, { ...old, status: 'extracted' })
         } else {
