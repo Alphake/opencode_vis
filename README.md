@@ -60,45 +60,36 @@ npm install
 
 ### 3. Configure environment
 
-Copy the template and keep **manual dev** defaults (OpenCode on port **4096**, no HTTP password):
+Copy the environment template. The defaults work out of the box for a local OpenCode server on port **4096** with no HTTP password:
 
 ```bash
 cp .env.example .env.local
 ```
 
-On Windows you can also reset to manual mode anytime:
-
-```powershell
-npm run env:manual
-```
-
 Key settings in `.env.local` (see [`.env.example`](./.env.example) for the full list):
 
-| Variable | Manual dev value | Purpose |
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `VIBETRACE_OPENCODE_MODE` | `manual` | You start `opencode serve` yourself |
 | `OPENCODE_PROXY_TARGET` | `http://127.0.0.1:4096` | Vite dev proxy → OpenCode |
 | `OPENCODE_BASE` | `http://127.0.0.1:4096` | memory-worker → OpenCode |
 | `VITE_OPENCODE_BASE` | *(empty)* | Use Vite same-origin proxy (recommended) |
 | `VITE_MEMORY_WORKER_BASE` | *(empty)* | Worker API also proxied through Vite |
 
-If `opencode serve` prints a port other than `4096`, update `OPENCODE_PROXY_TARGET` and `OPENCODE_BASE` to match. You can pin the port:
-
-```bash
-opencode serve --port 4096
-```
+If you use a different OpenCode port, update `OPENCODE_PROXY_TARGET` and `OPENCODE_BASE` to match.
 
 Do **not** set `VITE_OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_PASSWORD` for a normal unsecured `opencode serve`.
 
 ### 4. Start services (three terminals)
 
-Keep all three running while you use VibeTrace.
+Run every command below from the **VibeTrace project root** (the directory where you ran `npm install`). Keep all three processes running while you use VibeTrace.
 
 **Terminal 1 — OpenCode (backend API)**
 
 ```bash
-opencode serve
+opencode serve --port 4096
 ```
+
+If your OpenCode install already listens on port **4096** by default, `opencode serve` alone is fine. Otherwise pass `--port 4096` so it matches `.env.local`.
 
 You should see something like:
 
@@ -108,6 +99,8 @@ opencode server listening on http://127.0.0.1:4096
 
 **Terminal 2 — memory-worker (trace ingest & panel analysis)**
 
+From the project root:
+
 ```bash
 npm run worker:py
 ```
@@ -115,6 +108,8 @@ npm run worker:py
 Listens on **`http://127.0.0.1:8714`** by default. See [`docs/memory-worker.md`](./docs/memory-worker.md).
 
 **Terminal 3 — Vite UI**
+
+From the project root:
 
 ```bash
 npm run dev
@@ -124,7 +119,7 @@ Open **`http://127.0.0.1:5173`** in your browser.
 
 ### Daily use
 
-1. Start **Terminal 1** (`opencode serve`), then **Terminal 2** (`npm run worker:py`), then **Terminal 3** (`npm run dev`).
+1. From the project root, start **Terminal 1** (`opencode serve --port 4096`), then **Terminal 2** (`npm run worker:py`), then **Terminal 3** (`npm run dev`).
 2. Use VibeTrace in the browser. Trace ingest and per-panel analysis run in the background via the worker.
 
 ### Optional environment variables
@@ -135,40 +130,6 @@ Open **`http://127.0.0.1:5173`** in your browser.
 | `VITE_OPENCODE_DEFAULT_MODEL` | Default model when sending from VibeTrace (`provider/model`) |
 | `VITE_TRACE_SESSION_TURN_LIMIT` | More history turns per ingest (default `5`) |
 | `PYTHON` | Non-default Python executable name |
-
-<details>
-<summary><strong>Appendix: OpenCode desktop plugin (optional, not required)</strong></summary>
-
-The repo includes `plugins/agent-cockpit.ts` for **internal / desktop convenience**: when registered in OpenCode, it can rewrite `.env.local`, start the memory-worker and Vite dev server, and open the browser automatically. **This is not the documented install path** — use the three-terminal flow above unless you maintain the plugin yourself.
-
-**One-time registration** — add the plugin file’s **absolute path** to your global OpenCode config:
-
-| OS | Global config path |
-| --- | --- |
-| **Windows** | `%APPDATA%\opencode\opencode.json` |
-| **macOS / Linux** | `~/.config/opencode/opencode.json` |
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    "/absolute/path/to/VibeTrace/plugins/agent-cockpit.ts"
-  ]
-}
-```
-
-Point at **`plugins/agent-cockpit.ts`**, not the repo root. **Fully quit and restart OpenCode** after changing config.
-
-With the plugin enabled, starting the **OpenCode desktop app** may:
-
-- update `.env.local` with the desktop API port and auth
-- start memory-worker on **`http://127.0.0.1:8714`**
-- start Vite on **`http://127.0.0.1:5173`**
-- open the browser (unless `VIBETRACE_NO_BROWSER=1`)
-
-Plugin-related env vars: `VIBETRACE_NO_BROWSER`, `VIBETRACE_OPENCODE_MODE=plugin`. To return to manual dev, run `npm run env:manual` (Windows) or restore manual values from [`.env.example`](./.env.example).
-
-</details>
 
 ---
 

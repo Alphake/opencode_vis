@@ -1,5 +1,5 @@
 import type { OcMessage, OcMessagePart, OcTodo, ToolPart } from '../types/opencode'
-import { getSessionDemoOverride } from './index'
+import { getSessionDemoOverride, isCaseStudyDemoEnabled } from './index'
 import type { SessionDemoOverlayResult, SessionDemoOverride } from './types'
 
 function todoSortKey(todo: OcTodo, orderPrefixes: string[] | undefined): number {
@@ -117,6 +117,7 @@ export function applySessionDemoOverlay(
 
 /** Custom sort for archived todo list when a demo override defines order. */
 export function compareTodosForDisplay(a: OcTodo, b: OcTodo, sessionId: string | undefined): number {
+  if (!isCaseStudyDemoEnabled()) return a.content.localeCompare(b.content, 'en')
   const override = sessionId ? getSessionDemoOverride(sessionId) : undefined
   const order = override?.todoOrderByIdPrefix
   if (order?.length) {
@@ -125,4 +126,11 @@ export function compareTodosForDisplay(a: OcTodo, b: OcTodo, sessionId: string |
     if (ka !== kb) return ka - kb
   }
   return a.content.localeCompare(b.content, 'en')
+}
+
+export function sortTodosForDisplay<T extends OcTodo>(todos: T[], sessionId: string | undefined): T[] {
+  if (!isCaseStudyDemoEnabled()) return todos
+  const override = sessionId ? getSessionDemoOverride(sessionId) : undefined
+  if (!override?.todoOrderByIdPrefix?.length) return todos
+  return [...todos].sort((a, b) => compareTodosForDisplay(a, b, sessionId))
 }
