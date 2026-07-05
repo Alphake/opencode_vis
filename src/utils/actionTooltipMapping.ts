@@ -4,6 +4,7 @@
 
 import type { MappedAction, OcMessage, OcMessagePart, ToolPart } from '../types/opencode'
 import type { TooltipTranslateFn } from './tooltipTranslate'
+import { isSubagentSeededUserRequest } from './actionMapping'
 
 export type { TooltipTranslateFn } from './tooltipTranslate'
 
@@ -553,8 +554,9 @@ export function buildCompactMappedActionTooltipHtml(
 
   if (act.actionType === 'UserRequest') {
     const text = tt(translate, act.detail?.trim() || '(empty)')
+    const label = isSubagentSeededUserRequest(act) ? 'sub-agent prompt' : 'user request'
     return `<div class="action-tip-root action-tip-root--compact"><div class="action-tip-compact-main"><div class="action-tip-compact-head"><strong>${escapeForActionTooltip(
-      'user request',
+      label,
     )}</strong></div><div class="action-tip-compact-lines"><div class="action-tip-compact-line">${escapeForActionTooltip(
       text,
     )}</div></div></div></div>`

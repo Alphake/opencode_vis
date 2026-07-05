@@ -6,6 +6,7 @@ import {
   DEFAULT_ACTION_TYPE_PALETTE_ID,
   getActionTypeTriad,
 } from '../styles/actionTypePalettes'
+import { isSubagentSeededUserRequest } from './actionMapping'
 
 const LONG_RUNNING_MS = 60_000
 
@@ -84,6 +85,12 @@ export function resolveActionBlockColors(
   }
   if (isGhost) {
     return { fill: '#E8E8E8', stroke: '#CFCFCF', iconFill: '#A0A0A0' }
+  }
+  /** Hollow UserRequest rings always use semantic type colors (gray vs Subagent), not status/token scales. */
+  if (act.actionType === 'UserRequest') {
+    const typeKey = isSubagentSeededUserRequest(act) ? 'Subagent' : 'UserRequest'
+    const tp = getActionTypeTriad(typePaletteId, typeKey)
+    return { fill: 'transparent', stroke: tp.stroke, iconFill: tp.accent }
   }
   if (colorMode === 'type') {
     const tp = getActionTypeTriad(typePaletteId, act.actionType)

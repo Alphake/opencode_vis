@@ -159,6 +159,7 @@ interface SubtaskCardProps {
   feedbackMode?: boolean
   isFeedbackSelected?: boolean
   hasFeedbackComment?: boolean
+  onToggleFeedbackSelection?: () => void
   onOpenFeedbackComment?: () => void
   sessionId?: string
   tooltipTranslate?: TooltipTranslateFn
@@ -238,6 +239,7 @@ export default function SubtaskCard({
   feedbackMode = false,
   isFeedbackSelected = false,
   hasFeedbackComment = false,
+  onToggleFeedbackSelection,
   onOpenFeedbackComment,
   sessionId,
   tooltipTranslate,
@@ -629,21 +631,59 @@ export default function SubtaskCard({
           flexShrink: 0,
         }}
       >
-        <h3
+        <div
           style={{
-            margin: 0,
-            fontWeight: 600,
-            fontSize: 13,
-            lineHeight: '18px',
-            color: '#2B2B2B',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
             minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
+            flex: 1,
           }}
         >
-          {m.title}
-        </h3>
+          {feedbackMode ? (
+            <label
+              onClick={(e) => e.stopPropagation()}
+              title={isFeedbackSelected ? 'Deselect panel' : 'Select panel for feedback trace'}
+              style={{
+                flex: '0 0 auto',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={isFeedbackSelected}
+                onChange={() => onToggleFeedbackSelection?.()}
+                aria-label={`Select panel for feedback trace`}
+                style={{
+                  width: 14,
+                  height: 14,
+                  margin: 0,
+                  accentColor: '#2F7DD1',
+                  cursor: 'pointer',
+                }}
+              />
+            </label>
+          ) : null}
+          <h3
+            style={{
+              margin: 0,
+              fontWeight: 600,
+              fontSize: 13,
+              lineHeight: '18px',
+              color: '#2B2B2B',
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              flex: 1,
+            }}
+          >
+            {m.title}
+          </h3>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: '0 0 auto' }}>
           <button
             type="button"

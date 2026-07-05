@@ -10,7 +10,7 @@ import {
   DEFAULT_ACTION_TYPE_PALETTE_ID,
   getActionTypeTriad,
 } from '../styles/actionTypePalettes'
-import { buildMappedActionsFromMessages, collectTaskChildDescriptors } from '../utils/actionMapping'
+import { buildMappedActionsFromMessages, collectTaskChildDescriptors, isSubagentSeededUserRequest } from '../utils/actionMapping'
 import { actionKey } from '../utils/actionKey'
 import { getMessages } from '../services/opencodeApi'
 import {
@@ -125,6 +125,17 @@ function historyEntryBodyText(entry: SkillDistillHistoryEntry): string {
   const summary = entry.summary?.trim() || ''
   if (rationale && summary && rationale !== summary) return rationale
   return rationale || summary || 'Skill change record'
+}
+
+function formatFeedbackScopeLabel(selectedIndices: number[], totalPanelCount: number): string {
+  if (selectedIndices.length === 0) return ''
+  if (totalPanelCount > 0 && selectedIndices.length === totalPanelCount) {
+    return totalPanelCount === 1 ? 'Panel #1' : `All ${totalPanelCount} panels`
+  }
+  if (selectedIndices.length === 1) {
+    return `Panel #${selectedIndices[0]! + 1}`
+  }
+  return `Panel ${selectedIndices.map((idx) => `#${idx + 1}`).join(', ')}`
 }
 
 interface SubtaskDebugPanelProps {
@@ -425,6 +436,14 @@ export default function SubtaskDebugPanel({
         .filter((item): item is NonNullable<typeof item> => item !== null),
     [selectedFeedbackSubtaskIndices, visibleSubtasks, panelFeedbackByIndex],
   )
+  const feedbackScopeLabel = useMemo(
+    () => formatFeedbackScopeLabel(selectedFeedbackSubtaskIndices, visibleSubtasks.length),
+    [selectedFeedbackSubtaskIndices, visibleSubtasks.length],
+  )
+  const panelsWithPanelComments = useMemo(
+    () => selectedFeedbackPanels.filter((panel) => Boolean(panel.comment)),
+    [selectedFeedbackPanels],
+  )
   const compactFeedbackMessagePart = (part: OcMessage['parts'][number]) => {
     if (part.type === 'text') {
       return { type: part.type, id: part.id, text: part.text.slice(0, 2400) }
@@ -522,6 +541,20 @@ export default function SubtaskDebugPanel({
         : [...prev, sourceIndex].sort((a, b) => a - b),
     )
   }
+  const enterFeedbackMode = () => {
+    setFeedbackMode(true)
+    setSelectedFeedbackSubtaskIndices(visibleSubtasks.map(({ sourceIndex }) => sourceIndex))
+  }
+  const hasSelectedFeedbackPanels = selectedFeedbackPanels.length > 0
+  const hasFeedbackComment = Boolean(
+    skillComment.trim() || panelsWithPanelComments.length > 0,
+  )
+  const canDistillFeedback = hasSelectedFeedbackPanels && hasFeedbackComment
+  const feedbackInputPlaceholder = !hasSelectedFeedbackPanels
+    ? 'Please select at least one panel'
+    : 'Describe your feedback on the selected execution trace — what worked, what failed, or what should change'
+  const distillButtonDisabled =
+    activeSkillLoading || !sessionId || !activeTaskId || !canDistillFeedback
   const openPanelFeedbackEditor = (sourceIndex: number) => {
     setFeedbackMode(true)
     setSelectedFeedbackSubtaskIndices((prev) =>
@@ -595,6 +628,12 @@ export default function SubtaskDebugPanel({
                     ) : (
                       row.actions.map((action) => {
                         const paletteTriad = getActionTypeTriad(actionTypePaletteId, action.actionType)
+                        const summaryFill =
+                          action.actionType === 'UserRequest'
+                            ? isSubagentSeededUserRequest(action)
+                              ? getActionTypeTriad(actionTypePaletteId, 'Subagent').fill
+                              : getActionTypeTriad(actionTypePaletteId, 'UserRequest').stroke
+                            : paletteTriad.fill
                         const tipHtml = buildCompactMappedActionTooltipHtml(
                           action,
                           tooltipMessages,
@@ -612,8 +651,7 @@ export default function SubtaskDebugPanel({
                               height: summaryLayout.blockHeight,
                               borderRadius: 0,
                               flexShrink: 0,
-                              background:
-                                action.actionType === 'UserRequest' ? '#8F8F8F' : paletteTriad.fill,
+                              background: summaryFill,
                               border: 'none',
                             }}
                           />
@@ -648,8 +686,9 @@ export default function SubtaskDebugPanel({
   const handleDistillSkill = () => {
     if (!activeDisplayTask || !sessionId || !activeTaskId) return
     if (selectedFeedbackPanels.length === 0) return
-    const taskId = activeTaskId
     const comment = skillComment.trim()
+    if (!comment && !selectedFeedbackPanels.some((panel) => panel.comment)) return
+    const taskId = activeTaskId
     const panelFeedback = selectedFeedbackPanels.map((panel) => ({
       subtaskIndex: panel.sourceIndex,
       visibleIndex: panel.visibleIndex,
@@ -1031,85 +1070,42 @@ export default function SubtaskDebugPanel({
                       <span style={{ height: 1, flex: 1, background: '#E0E0E0' }} />
                     </div>
                   ) : null}
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'stretch',
-                      gap: feedbackMode ? 8 : 0,
+                  <SubtaskCard
+                    subtask={st}
+                    messages={messages}
+                    displayIndex={si}
+                    cardIndex={sourceIndex}
+                    isLinked={feedbackSelected || (!feedbackMode && linkedSubtaskIndex === sourceIndex)}
+                    onSelectSubtask={() => {
+                      if (feedbackMode) {
+                        toggleFeedbackPanel(sourceIndex)
+                        return
+                      }
+                      onSelectSubtask(sourceIndex)
                     }}
-                  >
-                    {feedbackMode ? (
-                      <label
-                        onClick={(e) => e.stopPropagation()}
-                        title={feedbackSelected ? 'Deselect panel' : 'Select panel for feedback trace'}
-                        style={{
-                          flex: '0 0 auto',
-                          alignSelf: 'flex-start',
-                          marginTop: 14,
-                          width: 30,
-                          height: 30,
-                          borderRadius: 10,
-                          border: feedbackSelected ? '1px solid #7DB2F3' : '1px solid #D8E1EE',
-                          background: feedbackSelected ? '#EEF7FF' : '#FFFFFF',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          boxShadow: feedbackSelected ? '0 2px 10px rgba(24, 94, 168, 0.12)' : 'none',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={feedbackSelected}
-                          onChange={() => toggleFeedbackPanel(sourceIndex)}
-                          aria-label={`Select panel ${sourceIndex + 1} for feedback trace`}
-                          style={{
-                            width: 15,
-                            height: 15,
-                            accentColor: '#2F7DD1',
-                            cursor: 'pointer',
-                          }}
-                        />
-                      </label>
-                    ) : null}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <SubtaskCard
-                        subtask={st}
-                        messages={messages}
-                        displayIndex={si}
-                        cardIndex={sourceIndex}
-                        isLinked={feedbackSelected || (!feedbackMode && linkedSubtaskIndex === sourceIndex)}
-                        onSelectSubtask={() => {
-                          if (feedbackMode) {
-                            toggleFeedbackPanel(sourceIndex)
-                            return
-                          }
-                          onSelectSubtask(sourceIndex)
-                        }}
-                        onForkFromAction={onForkFromAction}
-                        onAnalyzeFromAction={onAnalyzeFromAction}
-                        sessionDirectory={sessionDirectory}
-                        forkPanelSnapshotBundle={forkPanelSnapshotBundle}
-                        selectedActionKey={
-                          selection && selection.subtaskIndex === sourceIndex ? selection.actionKey : null
-                        }
-                        otherSubtaskHasSelection={false}
-                        onSelectActionFromFlow={
-                          onSelectAction ? (key) => onSelectAction(sourceIndex, key) : undefined
-                        }
-                        colorBy={colorBy}
-                        onColorByChange={setColorBy}
-                        actionTypePaletteId={actionTypePaletteId}
-                        errorDiagnosis={errorDiagnosisBySubtaskId[st.subtask_id]}
-                        feedbackMode={feedbackMode}
-                        isFeedbackSelected={feedbackSelected}
-                        hasFeedbackComment={hasPanelFeedback}
-                        onOpenFeedbackComment={() => openPanelFeedbackEditor(sourceIndex)}
-                        sessionId={sessionId}
-                        tooltipTranslate={tooltipTranslate}
-                      />
-                    </div>
-                  </div>
+                    onForkFromAction={onForkFromAction}
+                    onAnalyzeFromAction={onAnalyzeFromAction}
+                    sessionDirectory={sessionDirectory}
+                    forkPanelSnapshotBundle={forkPanelSnapshotBundle}
+                    selectedActionKey={
+                      selection && selection.subtaskIndex === sourceIndex ? selection.actionKey : null
+                    }
+                    otherSubtaskHasSelection={false}
+                    onSelectActionFromFlow={
+                      onSelectAction ? (key) => onSelectAction(sourceIndex, key) : undefined
+                    }
+                    colorBy={colorBy}
+                    onColorByChange={setColorBy}
+                    actionTypePaletteId={actionTypePaletteId}
+                    errorDiagnosis={errorDiagnosisBySubtaskId[st.subtask_id]}
+                    feedbackMode={feedbackMode}
+                    isFeedbackSelected={feedbackSelected}
+                    hasFeedbackComment={hasPanelFeedback}
+                    onToggleFeedbackSelection={() => toggleFeedbackPanel(sourceIndex)}
+                    onOpenFeedbackComment={() => openPanelFeedbackEditor(sourceIndex)}
+                    sessionId={sessionId}
+                    tooltipTranslate={tooltipTranslate}
+                  />
                 </Fragment>
               )
             })
@@ -1279,64 +1275,79 @@ export default function SubtaskDebugPanel({
             <>
               <div
                 style={{
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: 6,
-                  minHeight: 26,
-                  alignItems: 'center',
-                }}
-              >
-                {selectedFeedbackPanels.length === 0 ? (
-                  <span style={{ fontSize: 10, color: '#B45309' }}>Select at least one panel above.</span>
-                ) : (
-                  selectedFeedbackPanels.map((panel) => (
-                    <button
-                      key={panel.sourceIndex}
-                      type="button"
-                      onClick={() => openPanelFeedbackEditor(panel.sourceIndex)}
-                      title={panel.comment || 'Add panel feedback'}
-                      style={{
-                        maxWidth: 220,
-                        border: panel.comment ? '1px solid #9AC2F8' : '1px solid #DADADA',
-                        borderRadius: 999,
-                        background: panel.comment ? '#F0F7FF' : '#FFFFFF',
-                        color: panel.comment ? '#185EA8' : '#666',
-                        padding: '4px 8px',
-                        fontSize: 10,
-                        lineHeight: '14px',
-                        cursor: 'pointer',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      Panel #{panel.sourceIndex + 1}
-                      {panel.comment ? ` · ${panel.comment}` : ' · no comment'}
-                    </button>
-                  ))
-                )}
-              </div>
-              <textarea
-                value={skillComment}
-                onChange={(e) => setSkillComment(e.target.value)}
-                placeholder="Overall feedback (optional)"
-                rows={2}
-                style={{
                   width: '100%',
-                  resize: 'vertical',
-                  minHeight: 42,
-                  maxHeight: 96,
                   boxSizing: 'border-box',
                   border: '1px solid #D8D8D8',
                   borderRadius: 7,
-                  padding: '6px 7px',
-                  fontSize: 10,
-                  lineHeight: 1.35,
-                  color: '#333',
-                  background: '#FFFFFF',
-                  fontFamily: 'inherit',
+                  overflow: 'hidden',
+                  background: hasSelectedFeedbackPanels ? '#FFFFFF' : '#F8F9FB',
                 }}
-              />
+              >
+                {hasSelectedFeedbackPanels ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '5px 7px',
+                      borderBottom: '1px solid #EEF2F6',
+                      background: '#F8FAFC',
+                    }}
+                  >
+                    <span style={{ fontSize: 9, color: '#64748B', lineHeight: '16px' }}>
+                      Selected:{' '}
+                      <span style={{ fontWeight: 650, color: '#334155' }}>{feedbackScopeLabel}</span>
+                    </span>
+                    {panelsWithPanelComments.map((panel) => (
+                      <button
+                        key={panel.sourceIndex}
+                        type="button"
+                        onClick={() => openPanelFeedbackEditor(panel.sourceIndex)}
+                        title={panel.comment}
+                        style={{
+                          border: '1px solid #9AC2F8',
+                          borderRadius: 999,
+                          background: '#F0F7FF',
+                          color: '#185EA8',
+                          padding: '2px 7px',
+                          fontSize: 9,
+                          lineHeight: '14px',
+                          fontWeight: 650,
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Panel #{panel.sourceIndex + 1} · note
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                <textarea
+                  value={skillComment}
+                  onChange={(e) => setSkillComment(e.target.value)}
+                  disabled={!hasSelectedFeedbackPanels}
+                  placeholder={feedbackInputPlaceholder}
+                  rows={2}
+                  style={{
+                    width: '100%',
+                    resize: 'vertical',
+                    minHeight: 42,
+                    maxHeight: 96,
+                    boxSizing: 'border-box',
+                    border: 'none',
+                    borderRadius: 0,
+                    padding: '6px 7px',
+                    fontSize: 10,
+                    lineHeight: 1.35,
+                    color: hasSelectedFeedbackPanels ? '#333' : '#9CA3AF',
+                    background: 'transparent',
+                    cursor: hasSelectedFeedbackPanels ? 'text' : 'not-allowed',
+                    fontFamily: 'inherit',
+                    outline: 'none',
+                  }}
+                />
+              </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
                 <button
                   type="button"
@@ -1363,28 +1374,19 @@ export default function SubtaskDebugPanel({
                 <button
                   type="button"
                   onClick={handleDistillSkill}
-                  disabled={activeSkillLoading || !sessionId || !activeTaskId || selectedFeedbackPanels.length === 0}
+                  disabled={distillButtonDisabled}
                   style={{
                     flex: 1,
                     minHeight: 36,
                     border: '1px solid #CFCFCF',
                     borderRadius: 9,
-                    background:
-                      activeSkillLoading || !sessionId || !activeTaskId || selectedFeedbackPanels.length === 0
-                        ? '#F0F0F0'
-                        : '#111827',
-                    color:
-                      activeSkillLoading || !sessionId || !activeTaskId || selectedFeedbackPanels.length === 0
-                        ? '#9A9A9A'
-                        : '#FFFFFF',
+                    background: distillButtonDisabled ? '#F0F0F0' : '#111827',
+                    color: distillButtonDisabled ? '#9A9A9A' : '#FFFFFF',
                     padding: '6px 10px',
                     fontSize: 13,
                     lineHeight: '22px',
                     fontWeight: 700,
-                    cursor:
-                      activeSkillLoading || !sessionId || !activeTaskId || selectedFeedbackPanels.length === 0
-                        ? 'not-allowed'
-                        : 'pointer',
+                    cursor: distillButtonDisabled ? 'not-allowed' : 'pointer',
                     whiteSpace: 'nowrap',
                   }}
                 >
@@ -1396,7 +1398,7 @@ export default function SubtaskDebugPanel({
             <div style={{ display: 'flex', justifyContent: 'stretch' }}>
               <button
                 type="button"
-                onClick={() => setFeedbackMode(true)}
+                onClick={enterFeedbackMode}
                 disabled={activeSkillLoading}
                 style={{
                   width: '100%',

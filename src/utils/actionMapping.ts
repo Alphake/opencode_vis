@@ -218,6 +218,15 @@ export function isSubagentToolName(tool: string): boolean {
 }
 
 /**
+ * Distinguish end-user input from the synthetic user turn seeded when a task/subagent child session starts.
+ * Child-session rows are tagged in `buildChildSessionBranchActions` (`source: 'child-session'`) even though
+ * the underlying OpenCode message still has `role: 'user'`.
+ */
+export function isSubagentSeededUserRequest(act: MappedAction): boolean {
+  return act.actionType === 'UserRequest' && act.source === 'child-session'
+}
+
+/**
  * Each agent process occupies two horizontal tracks:
  * - layer 0: kernel (think, reply, todowrite/Plan, compaction, etc. — no external resources)
  * - layer 1: external resources (disk read, network, shell, task parent rect, question, etc.)
