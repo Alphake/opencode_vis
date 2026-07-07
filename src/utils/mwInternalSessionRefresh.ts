@@ -1,4 +1,4 @@
-/** Poll OpenCode session list so background [mw-internal] pipelines show up in Sidebar during dev. */
+/** Poll OpenCode session list after memory_worker creates background pipeline sessions. */
 const POLL_MS = 12_000
 const POLL_WINDOW_MS = 3 * 60_000
 

@@ -4,6 +4,9 @@ import {
   getCurrentWorkspaceDirectory,
   getProjectDirectories,
   getSessions,
+  getSessionsForDirectory,
+  OPENCODE_SESSION_DIRECTORY_LIMIT,
+  OPENCODE_SESSION_RECENT_LIMIT,
   getTodos,
   getMessages,
   sendMessage,
@@ -21,6 +24,8 @@ import {
 import {
   normalizeSessionDirectory,
   uniqueDirectoriesFromSessions,
+  directoryKey,
+  sameDirectory,
 } from './utils/sessionFolders'
 import type { MappedAction, OcMessage, OcPendingQuestionRequest, OcTodo } from './types/opencode'
 import type { TurnTrace } from './types/trace'
@@ -74,7 +79,11 @@ import { buildFlowEndSummary } from './utils/flowEndSummary'
 import { buildSubtaskCardMetrics } from './utils/subtaskMetrics'
 import {
   cloneTaskSegmentTabs,
+  filterTaskTabsForFork,
   mergeTaskSegmentTabs,
+  reconcileTaskTabsWithMessages,
+  resolveTaskSegmentMessageRange,
+  sortTaskSegmentTabsByMessages,
   taskSegmentFromWorker,
   taskSegmentTabsFromWorkerBatch,
   type TaskSegmentTab,
@@ -82,6 +91,7 @@ import {
 import {
   collectInternalSessionIdsFromIngest,
   registerMemoryWorkerInternalSessionIds,
+  shouldHideSessionFromHistory,
   shouldSkipTraceIngestForSession,
 } from './utils/memoryWorkerSessions'
 import { scheduleMwInternalSessionRefresh } from './utils/mwInternalSessionRefresh'
@@ -201,16 +211,6 @@ function parseEnvDirectorySeeds(raw: unknown): string[] {
     .filter(Boolean)
 }
 
-function directoryKey(dir: string | undefined): string {
-  const n = normalizeSessionDirectory(dir)
-  if (!n) return ''
-  return /^[A-Za-z]:\//.test(n) ? n.toLowerCase() : n
-}
-
-function sameDirectory(a: string | undefined, b: string | undefined): boolean {
-  return directoryKey(a) === directoryKey(b)
-}
-
 function loadManualDirectories(): string[] {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEYS.manualDirectories)
@@ -238,6 +238,33 @@ function loadClosedDirectories(): string[] {
     return []
   }
 }
+
+function loadKnownDirectories(): string[] {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEYS.knownDirectories)
+    if (!raw) return []
+    const data = JSON.parse(raw)
+    if (!Array.isArray(data)) return []
+    return data
+      .map((v) => (typeof v === 'string' ? normalizeSessionDirectory(v) : ''))
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function mergeKnownDirectories(...lists: Array<string | undefined>[]): string[] {
+  const set = new Set<string>()
+  for (const list of lists) {
+    for (const raw of list) {
+      const dir = normalizeSessionDirectory(raw)
+      if (dir) set.add(dir)
+    }
+  }
+  return [...set]
+}
+
+const DIRECTORY_RAIL_ROOT_KEY = '\0root'
 
 function promptDirectoryPath(seed: string): string | null {
   const message =
@@ -284,19 +311,43 @@ async function fetchSessionsAcrossDirectories(seedDirs: Array<string | undefined
   const dedup = Array.from(
     new Set(
       seedDirs
-        .map((d) => (typeof d === 'string' ? d.trim() : ''))
+        .map((d) => (typeof d === 'string' ? normalizeSessionDirectory(d.trim()) : ''))
         .filter((d) => d.length > 0),
     ),
   )
-  const jobs = dedup.map(async (dir) => {
-    try {
-      return await getSessions({ directory: dir })
-    } catch {
-      return [] as OcSession[]
-    }
-  })
-  const lists = await Promise.all(jobs)
-  return mergeSessionsById(lists)
+  if (dedup.length === 0) return []
+
+  try {
+    const bulk = await getSessions({ limit: OPENCODE_SESSION_DIRECTORY_LIMIT })
+    const fromBulk = bulk.filter((s) => dedup.some((d) => sameDirectory(s.directory, d)))
+    const covered = new Set(
+      dedup.filter((d) => fromBulk.some((s) => sameDirectory(s.directory, d))),
+    )
+    const missing = dedup.filter((d) => !covered.has(d))
+    if (missing.length === 0) return fromBulk
+
+    const extras = await Promise.all(
+      missing.map(async (dir) => {
+        try {
+          return await getSessionsForDirectory(dir)
+        } catch {
+          return [] as OcSession[]
+        }
+      }),
+    )
+    return mergeSessionsById([fromBulk, ...extras])
+  } catch {
+    const lists = await Promise.all(
+      dedup.map(async (dir) => {
+        try {
+          return await getSessionsForDirectory(dir)
+        } catch {
+          return [] as OcSession[]
+        }
+      }),
+    )
+    return mergeSessionsById(lists)
+  }
 }
 
 function App() {
@@ -318,6 +369,9 @@ function App() {
   const [selectedDirectory, setSelectedDirectory] = useState<string>('')
   const [projectDirectories, setProjectDirectories] = useState<string[]>([])
   const [manualDirectories, setManualDirectories] = useState<string[]>(() => loadManualDirectories())
+  const [knownDirectories, setKnownDirectories] = useState<string[]>(() =>
+    mergeKnownDirectories(loadKnownDirectories(), loadManualDirectories()),
+  )
   const [closedDirectories, setClosedDirectories] = useState<string[]>(() => loadClosedDirectories())
   const [creatingSession, setCreatingSession] = useState(false)
   /** Pending question requests keyed by session (from SSE `question.asked`) */
@@ -365,24 +419,42 @@ function App() {
 
   const sessionsRef = useRef(sessions)
   sessionsRef.current = sessions
+  const knownDirectoriesRef = useRef(knownDirectories)
+  knownDirectoriesRef.current = knownDirectories
+  const selectedDirectoryRef = useRef(selectedDirectory)
+  selectedDirectoryRef.current = selectedDirectory
+  const initialSessionsLoadedRef = useRef(false)
 
   const refreshSessions = useCallback(
     async (extraDirectories?: Array<string | undefined>) => {
-      const base = await getSessions()
+      const base = await getSessions({ limit: OPENCODE_SESSION_RECENT_LIMIT })
       const discovered = await getProjectDirectories().catch(() => [] as string[])
       const current = await getCurrentWorkspaceDirectory().catch(() => null)
       const mergedDiscovered = Array.from(new Set([...discovered, ...(current ? [current] : [])]))
       setProjectDirectories(mergedDiscovered)
       const closed = new Set(closedDirectories)
-      const extra = await fetchSessionsAcrossDirectories([
-        ...envDirectorySeeds,
-        ...manualDirectories.filter((d) => !closed.has(d)),
-        ...(extraDirectories ?? []),
-        ...mergedDiscovered.filter((d) => !closed.has(normalizeSessionDirectory(d))),
-      ])
+      const activeDirectory = selectedDirectoryRef.current
+      const directorySeeds = mergeKnownDirectories(
+        knownDirectoriesRef.current,
+        envDirectorySeeds,
+        manualDirectories,
+        mergedDiscovered,
+        uniqueDirectoriesFromSessions(base),
+        extraDirectories ?? [],
+        activeDirectory ? [activeDirectory] : [],
+      ).filter((d) => !closed.has(d))
+      const extra = await fetchSessionsAcrossDirectories(directorySeeds)
       const merged = mergeSessionsById([base, extra]).filter(
         (s) => !closed.has(normalizeSessionDirectory(s.directory)),
       )
+      const nextKnown = mergeKnownDirectories(
+        knownDirectoriesRef.current,
+        uniqueDirectoriesFromSessions(merged),
+        mergedDiscovered,
+        manualDirectories,
+        envDirectorySeeds,
+      )
+      setKnownDirectories(nextKnown)
       setSessions(merged)
       setApiConnected(true)
       return merged
@@ -392,30 +464,39 @@ function App() {
 
   const directories = useMemo(() => {
     const fromSession = uniqueDirectoriesFromSessions(sessions)
+    const hasRootSessions = sessions.some((s) => !normalizeSessionDirectory(s.directory))
     const mergedRaw = [
       ...fromSession,
       ...projectDirectories.map((d) => normalizeSessionDirectory(d)),
       ...manualDirectories,
+      ...knownDirectories,
       selectedDirectory,
+      ...(hasRootSessions ? [''] : []),
     ]
     const map = new Map<string, string>()
     for (const dir of mergedRaw) {
-      const key = directoryKey(dir)
-      if (!key || map.has(key)) continue
-      map.set(key, normalizeSessionDirectory(dir))
+      const normalized = normalizeSessionDirectory(dir)
+      const key = normalized === '' ? DIRECTORY_RAIL_ROOT_KEY : directoryKey(normalized)
+      if (map.has(key)) continue
+      map.set(key, normalized)
     }
     const merged = [...map.values()]
       .filter((d) => d !== 'Unknown')
-      .filter((d) => d !== '')
       .filter((d) => !closedDirectories.includes(d))
     return merged.sort((a, b) => {
+      if (!a) return -1
+      if (!b) return 1
       return a.localeCompare(b, 'zh-CN')
     })
-  }, [sessions, projectDirectories, manualDirectories, selectedDirectory, closedDirectories])
+  }, [sessions, projectDirectories, manualDirectories, knownDirectories, selectedDirectory, closedDirectories])
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEYS.manualDirectories, JSON.stringify(manualDirectories))
   }, [manualDirectories])
+
+  useEffect(() => {
+    window.localStorage.setItem(STORAGE_KEYS.knownDirectories, JSON.stringify(knownDirectories))
+  }, [knownDirectories])
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEYS.closedDirectories, JSON.stringify(closedDirectories))
@@ -453,6 +534,7 @@ function App() {
   const sessionsInFolder = useMemo(() => {
     return sessions
       .filter(s => sameDirectory(s.directory, selectedDirectory))
+      .filter(s => !shouldHideSessionFromHistory(s.id, s))
       .sort((a, b) => b.time.updated - a.time.updated)
   }, [sessions, selectedDirectory])
 
@@ -776,14 +858,17 @@ function App() {
     }
   }, [taskSegmentManuallySelectedBySessionId, mergePanelAnalysisItems, refreshSessions])
 
-  const refreshTaskSegmentsFromWorker = useCallback(async (sessionId: string) => {
+  const refreshTaskSegmentsFromWorker = useCallback(async (sessionId: string, messagesForReconcile?: OcMessage[]) => {
     const batch = await fetchTaskSegmentsForSession(sessionId)
     const workerTabs = taskSegmentTabsFromWorkerBatch(batch.tabs ?? [])
     if (workerTabs.length === 0) return
     setTaskSegmentsBySessionId((prev) => {
       const existing = prev[sessionId] ?? []
       const merged = mergeTaskSegmentTabs(existing, workerTabs)
-      return { ...prev, [sessionId]: merged }
+      const reconciled = messagesForReconcile?.length
+        ? reconcileTaskTabsWithMessages(merged, messagesForReconcile)
+        : merged
+      return { ...prev, [sessionId]: reconciled }
     })
     const preferred = workerTabs.find((tab) => tab.status === 'pending') ?? workerTabs[workerTabs.length - 1]
     if (preferred) {
@@ -824,11 +909,15 @@ function App() {
     return () => window.removeEventListener('pointerdown', onPointerDown, true)
   }, [selection])
 
-  // Load sessions on mount
+  // Load sessions once on mount — do not re-run when refreshSessions identity changes (would reset workspace selection).
   useEffect(() => {
+    if (initialSessionsLoadedRef.current) return
+    initialSessionsLoadedRef.current = true
     refreshSessions()
       .then((data) => {
-        const sorted = [...data].sort((a, b) => b.time.updated - a.time.updated)
+        const sorted = [...data]
+          .filter((s) => !shouldHideSessionFromHistory(s.id, s))
+          .sort((a, b) => b.time.updated - a.time.updated)
         if (sorted.length > 0) {
           const first = sorted[0]!
           setSelectedSessionId(first.id)
@@ -838,25 +927,17 @@ function App() {
       .catch(() => setApiConnected(false))
   }, [refreshSessions])
 
-  /** If the active session disappears from the list, fall back to newest in folder or globally */
+  /** If the active session disappears or is hidden, fall back to newest visible session in folder. */
   useEffect(() => {
-    if (sessions.length === 0) return
-    if (selectedSessionId && sessions.some(s => s.id === selectedSessionId)) return
-
-    const inFolder = sessions
+    const visibleInFolder = sessions
       .filter(s => sameDirectory(s.directory, selectedDirectory))
+      .filter(s => !shouldHideSessionFromHistory(s.id, s))
       .sort((a, b) => b.time.updated - a.time.updated)
 
-    if (inFolder.length > 0) {
-      setSelectedSessionId(inFolder[0]!.id)
-      return
-    }
-    if (!selectedSessionId) return
+    if (visibleInFolder.length === 0) return
+    if (selectedSessionId && visibleInFolder.some(s => s.id === selectedSessionId)) return
 
-    const sorted = [...sessions].sort((a, b) => b.time.updated - a.time.updated)
-    const pick = sorted[0]!
-    setSelectedSessionId(pick.id)
-    setSelectedDirectory(normalizeSessionDirectory(pick.directory))
+    setSelectedSessionId(visibleInFolder[0]!.id)
   }, [sessions, selectedSessionId, selectedDirectory])
 
   useEffect(() => {
@@ -1126,7 +1207,8 @@ function App() {
         setTaskSegmentsBySessionId((prev) => {
           const existing = prev[sessionId] ?? []
           const merged = mergeTaskSegmentTabs(existing, workerTabs)
-          return { ...prev, [sessionId]: merged }
+          const reconciled = reconcileTaskTabsWithMessages(merged, msgs)
+          return { ...prev, [sessionId]: reconciled }
         })
         console.info('[VibeTrace][task-segments] hydrated from worker', {
           sessionId,
@@ -1258,12 +1340,7 @@ function App() {
   const taskSegmentsForActiveSession = useMemo(() => {
     if (!selectedSessionId) return []
     const tabs = taskSegmentsBySessionId[selectedSessionId] ?? []
-    return [...tabs].sort((a, b) => {
-      const ai = messages.findIndex((m) => m.info.id === a.fromStartUserMessageId)
-      const bi = messages.findIndex((m) => m.info.id === b.fromStartUserMessageId)
-      if (ai !== bi) return (ai < 0 ? Number.MAX_SAFE_INTEGER : ai) - (bi < 0 ? Number.MAX_SAFE_INTEGER : bi)
-      return a.id.localeCompare(b.id)
-    })
+    return sortTaskSegmentTabsByMessages(tabs, messages)
   }, [messages, selectedSessionId, taskSegmentsBySessionId])
 
   const activeTaskSegmentId = selectedSessionId ? activeTaskSegmentBySessionId[selectedSessionId] : undefined
@@ -1284,23 +1361,10 @@ function App() {
   const visibleSubtasksForTaskSegment = useMemo(() => {
     if (!activeTaskSegment) return visibleSubtasks
     const activeSegmentIndex = taskSegmentsForActiveSession.findIndex((tab) => tab.id === activeTaskSegment.id)
-    const previousEndIndex =
-      activeSegmentIndex > 0
-        ? taskSegmentsForActiveSession
-            .slice(0, activeSegmentIndex)
-            .reduce((latest, tab) => {
-              const idx = messages.findIndex((m) => m.info.id === tab.toEndAssistantMessageId)
-              return idx >= 0 ? Math.max(latest, idx) : latest
-            }, -1)
-        : -1
-    const rawStartIndex = messages.findIndex((m) => m.info.id === activeTaskSegment.fromStartUserMessageId)
-    const startIndex = previousEndIndex >= 0 ? Math.max(rawStartIndex, previousEndIndex + 1) : rawStartIndex
-    if (startIndex < 0) return []
-    const endIndex =
-      activeTaskSegment.status === 'pending'
-        ? Number.POSITIVE_INFINITY
-        : messages.findIndex((m) => m.info.id === activeTaskSegment.toEndAssistantMessageId)
-    if (endIndex < 0) return []
+    const priorTabs = activeSegmentIndex > 0 ? taskSegmentsForActiveSession.slice(0, activeSegmentIndex) : []
+    const range = resolveTaskSegmentMessageRange(activeTaskSegment, messages, priorTabs)
+    if (!range) return []
+    const { startIndex, endIndex } = range
     return visibleSubtasks.filter(({ subtask }) => {
       const assistantIndices = subtask.assistantMessageIndices ?? []
       if (assistantIndices.length === 0) return false
@@ -1641,29 +1705,23 @@ function App() {
 
   const handleSelectDirectory = useCallback(
     async (dir: string) => {
-      setSelectedDirectory(dir)
+      const normalized = normalizeSessionDirectory(dir)
+      selectedDirectoryRef.current = normalized
+      setSelectedDirectory(normalized)
       setSelectedSessionId('')
       setMessages([])
       setTodos([])
       setTodosSnapshotAtMessageIndex({})
 
-      const currentInFolder = sessions
-        .filter(s => sameDirectory(s.directory, dir))
-        .sort((a, b) => b.time.updated - a.time.updated)
-      if (currentInFolder.length > 0) {
-        setSelectedSessionId(currentInFolder[0]!.id)
-        return
-      }
-
-      const list = await refreshSessions([dir])
+      const list = await refreshSessions([normalized])
       const refreshedInFolder = list
-        .filter(s => sameDirectory(s.directory, dir))
+        .filter(s => sameDirectory(s.directory, normalized))
         .sort((a, b) => b.time.updated - a.time.updated)
       if (refreshedInFolder.length > 0) {
         setSelectedSessionId(refreshedInFolder[0]!.id)
       }
     },
-    [sessions, refreshSessions],
+    [refreshSessions],
   )
 
   const handleCreateSession = useCallback(async () => {
@@ -1687,6 +1745,7 @@ function App() {
     const dir = promptDirectoryPath(selectedDirectory || '')
     if (!dir) return
     setManualDirectories((prev) => (prev.includes(dir) ? prev : [...prev, dir]))
+    setKnownDirectories((prev) => mergeKnownDirectories(prev, [dir]))
     setClosedDirectories((prev) => prev.filter((d) => d !== dir))
     setSelectedDirectory(dir)
     setSelectedSessionId('')
@@ -1785,13 +1844,18 @@ function App() {
         selectedSessionId ?? undefined,
         targetSessionId,
       )
-      const inheritedTabs = tabsSourceId
+      const inheritedTabsRaw = tabsSourceId
         ? cloneTaskSegmentTabs(taskSegmentsBySessionId[tabsSourceId] ?? [])
         : []
       const inheritedActiveTabId = tabsSourceId ? activeTaskSegmentBySessionId[tabsSourceId] : undefined
       const inheritedManualSelection = tabsSourceId
         ? Boolean(taskSegmentManuallySelectedBySessionId[tabsSourceId])
         : false
+      const forkTabFilter = filterTaskTabsForFork(inheritedTabsRaw, messages, action.messageID, {
+        activeTabId: inheritedActiveTabId,
+      })
+      const inheritedTabs = forkTabFilter.tabs
+      const forkActiveTabId = forkTabFilter.activeTabId ?? inheritedActiveTabId
 
       setForkBusy(true)
       try {
@@ -1833,15 +1897,63 @@ function App() {
           saveForkPanelSnapshotBundle(forked.id, bundle)
         }
 
+        const inheritedTabsForWorker = inheritedTabs.map((tab) => {
+          const sourceTab =
+            inheritedTabsRaw.find(
+              (raw) =>
+                raw.fromStartUserMessageId === tab.fromStartUserMessageId &&
+                raw.fromEndAssistantMessageId === tab.fromEndAssistantMessageId,
+            ) ?? inheritedTabsRaw.find((raw) => raw.fromStartUserMessageId === tab.fromStartUserMessageId)
+          return {
+            taskId: tab.id,
+            status: tab.status,
+            fromStartUserMessageId: tab.fromStartUserMessageId,
+            fromEndAssistantMessageId: tab.fromEndAssistantMessageId,
+            toEndAssistantMessageId: tab.toEndAssistantMessageId,
+            turnCount: tab.turnCount,
+            title: tab.title,
+            description: tab.description,
+            summary: tab.summary,
+            taskSwitchRunDir: tab.taskSwitchRunDir,
+            pipelineRunDir: tab.pipelineRunDir,
+            provisional: tab.provisional,
+            sourceTaskId: sourceTab?.id,
+            sourceParentSessionId: targetSessionId,
+          }
+        })
+
+        const forkMetaForWorker = {
+          forkAnchorMessageId: action.messageID,
+          sourceParentSessionId: targetSessionId,
+          forkedSessionId: forked.id,
+          ...(action.partId ? { forkAnchorPartId: action.partId } : {}),
+        }
+
+        const list = await refreshSessions([forked.directory])
+        setSessions(list)
+        setApiConnected(true)
+        setSelectedDirectory(normalizeSessionDirectory(forked.directory))
+        setSelectedSessionId(forked.id)
+        const [forkMsgs, td] = await Promise.all([
+          getMessages(forked.id, 'after fork load session', forked.directory),
+          getTodos(forked.id, forked.directory),
+        ])
+        setMessages(forkMsgs)
+        setTodos(td)
+
         if (inheritedTabs.length > 0) {
+          const reconciledForkTabs = reconcileTaskTabsWithMessages(inheritedTabs, forkMsgs)
           setTaskSegmentsBySessionId((prev) => ({
             ...prev,
-            [forked.id]: inheritedTabs,
+            [forked.id]: reconciledForkTabs,
           }))
-          if (inheritedActiveTabId) {
+          const reconciledActive =
+            reconciledForkTabs.find((tab) => tab.id === forkActiveTabId)?.id ??
+            reconciledForkTabs[reconciledForkTabs.length - 1]?.id
+          if (reconciledActive) {
             setActiveTaskSegmentBySessionId((prev) => ({
               ...prev,
-              [forked.id]: inheritedActiveTabId,
+              [forked.id]: reconciledActive,
             }))
           }
           if (inheritedManualSelection) {
@@ -1853,34 +1965,26 @@ function App() {
           console.info('[VibeTrace][fork inherited task tabs]', {
             forkedSessionId: forked.id,
             sourceSessionId: tabsSourceId,
-            tabCount: inheritedTabs.length,
-            activeTabId: inheritedActiveTabId,
+            tabCount: reconciledForkTabs.length,
+            droppedTabCount: Math.max(0, inheritedTabsRaw.length - inheritedTabs.length),
+            activeTabId: reconciledActive,
+            forkAnchorMessageId: action.messageID,
           })
         }
 
-        const forkMetaForWorker = {
-          forkAnchorMessageId: action.messageID,
-          sourceParentSessionId: targetSessionId,
-          forkedSessionId: forked.id,
-          ...(action.partId ? { forkAnchorPartId: action.partId } : {}),
-        }
         void inheritForkTaskState({
           sessionId: forked.id,
           sourceParentSessionId: targetSessionId,
           directory: forked.directory,
-        }).catch((err) => console.warn('[VibeTrace][fork inherit task-switch state failed]', err))
-
-        const list = await refreshSessions([forked.directory])
-        setSessions(list)
-        setApiConnected(true)
-        setSelectedDirectory(normalizeSessionDirectory(forked.directory))
-        setSelectedSessionId(forked.id)
-        const [msgs, td] = await Promise.all([
-          getMessages(forked.id, 'after fork load session', forked.directory),
-          getTodos(forked.id, forked.directory),
-        ])
-        setMessages(msgs)
-        setTodos(td)
+          forkAnchorMessageId: action.messageID,
+          inheritedTabs: inheritedTabsForWorker,
+        })
+          .then(() =>
+            refreshTaskSegmentsFromWorker(forked.id, forkMsgs).catch((err) =>
+              console.warn('[VibeTrace][fork task-segments inherit refresh failed]', err),
+            ),
+          )
+          .catch((err) => console.warn('[VibeTrace][fork inherit task-switch state failed]', err))
 
         const userText = forkPrompt.trim()
         if (userText.length > 0) {
@@ -1898,7 +2002,7 @@ function App() {
                 .then((result) => {
                   applyMemoryWorkerTaskSegments(forked.id, result)
                   window.setTimeout(() => {
-                    void refreshTaskSegmentsFromWorker(forked.id).catch((err) =>
+                    void refreshTaskSegmentsFromWorker(forked.id, forkMsgs).catch((err) =>
                       console.warn('[VibeTrace][fork task-segments prompt refresh failed]', err),
                     )
                   }, 1800)

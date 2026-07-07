@@ -4,6 +4,16 @@ export function normalizeSessionDirectory(dir: string | undefined): string {
   return dir.replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
+export function directoryKey(dir: string | undefined): string {
+  const n = normalizeSessionDirectory(dir)
+  if (!n) return ''
+  return /^[A-Za-z]:\//.test(n) ? n.toLowerCase() : n
+}
+
+export function sameDirectory(a: string | undefined, b: string | undefined): boolean {
+  return directoryKey(a) === directoryKey(b)
+}
+
 export function folderDisplayName(normalizedDir: string): string {
   if (!normalizedDir) return 'Current workspace'
   const parts = normalizedDir.split('/').filter(Boolean)

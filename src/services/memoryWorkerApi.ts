@@ -234,6 +234,25 @@ export interface ForkInheritTaskStateReference {
   sessionId: string
   sourceParentSessionId: string
   directory?: string
+  forkAnchorMessageId?: string
+  /** Filtered task tabs to persist on the forked session (kept tabs only, origin tab truncated). */
+  inheritedTabs?: Array<{
+    taskId?: string
+    status?: 'pending' | 'extracted'
+    fromStartUserMessageId?: string
+    fromEndAssistantMessageId?: string
+    toEndAssistantMessageId?: string
+    turnCount?: number
+    title?: string
+    description?: string
+    summary?: string
+    taskSwitchRunDir?: string
+    pipelineRunDir?: string
+    provisional?: boolean
+    /** Parent tab taskId before truncation — used to copy skill index entries. */
+    sourceTaskId?: string
+    sourceParentSessionId?: string
+  }>
 }
 
 export async function inheritForkTaskState(

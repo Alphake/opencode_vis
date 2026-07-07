@@ -6,6 +6,7 @@ import type {
 } from '../types/opencode'
 import { applySessionDemoOverlay } from '../caseStudy/applySessionDemoOverlay'
 import { isCaseStudyDemoEnabled } from '../caseStudy'
+import { normalizeSessionDirectory, sameDirectory } from '../utils/sessionFolders'
 
 /**
  * OpenCode HTTP base URL — injected at build time by `vite.config.ts`:
@@ -116,14 +117,83 @@ function extractProjectDirectory(item: unknown): string | null {
 
 // ===== REST API =====
 
-export async function getSessions(options?: { directory?: string }): Promise<OcSession[]> {
-  const url = `${BASE}/session`
+/** Recent sessions for the global sidebar overview (OpenCode default is 100). */
+export const OPENCODE_SESSION_RECENT_LIMIT = 100
+
+/**
+ * Upper bound when loading full history for known / selected workspace directories.
+ * OpenCode accepts `?limit=`; values above the server total are capped server-side.
+ */
+export const OPENCODE_SESSION_DIRECTORY_LIMIT = 5000
+
+export type GetSessionsOptions = {
+  /** Sent as `x-opencode-directory` and, when `directoryQuery` is omitted, as `?directory=`. */
+  directory?: string
+  /** Explicit `?directory=` value (e.g. native Windows path while header uses forward slashes). */
+  directoryQuery?: string
+  limit?: number
+  /** When true, request root sessions only (`?roots=true`), matching OpenCode desktop. */
+  roots?: boolean
+}
+
+function buildSessionListUrl(options?: GetSessionsOptions): string {
+  const params = new URLSearchParams()
+  if (options?.limit != null && Number.isFinite(options.limit) && options.limit > 0) {
+    params.set('limit', String(Math.floor(options.limit)))
+  }
+  const directoryQuery = options?.directoryQuery ?? options?.directory
+  if (directoryQuery) {
+    params.set('directory', directoryQuery)
+  }
+  if (options?.roots) {
+    params.set('roots', 'true')
+  }
+  const qs = params.toString()
+  return `${BASE}/session${qs ? `?${qs}` : ''}`
+}
+
+export async function getSessions(options?: GetSessionsOptions): Promise<OcSession[]> {
+  const url = buildSessionListUrl(options)
   const res = await fetch(url, {
     headers: withDirectoryHeaders({}, options?.directory),
     signal: fetchSignal(),
   })
   if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.status}`)
   return res.json()
+}
+
+/**
+ * Load all sessions for one workspace directory. Tries OpenCode `?directory=` when supported;
+ * otherwise falls back to a high-limit global list filtered client-side (needed on some 1.4.x builds).
+ */
+export async function getSessionsForDirectory(
+  directory: string,
+  limit: number = OPENCODE_SESSION_DIRECTORY_LIMIT,
+): Promise<OcSession[]> {
+  const normalized = normalizeSessionDirectory(directory)
+  if (!normalized) return []
+
+  const queryVariants = Array.from(
+    new Set([normalized, normalized.replace(/\//g, '\\'), directory.trim()].filter(Boolean)),
+  )
+
+  for (const directoryQuery of queryVariants) {
+    try {
+      const listed = await getSessions({
+        directory: normalized,
+        directoryQuery,
+        limit,
+        roots: true,
+      })
+      const matched = listed.filter((s) => sameDirectory(s.directory, normalized))
+      if (matched.length > 0) return matched
+    } catch {
+      /* try next variant or fallback */
+    }
+  }
+
+  const global = await getSessions({ limit })
+  return global.filter((s) => sameDirectory(s.directory, normalized))
 }
 
 export async function getProjectDirectories(): Promise<string[]> {

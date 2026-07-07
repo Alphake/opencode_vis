@@ -41,12 +41,27 @@ export function isMemoryWorkerInternalSessionId(sessionId: string): boolean {
   return blocklist.has(sessionId)
 }
 
-export function shouldSkipTraceIngestForSession(
+function isMemoryWorkerPipelineSession(
   sessionId: string,
   session: Pick<OcSession, 'title'> | null | undefined,
 ): boolean {
   if (isMemoryWorkerInternalSessionId(sessionId)) return true
   return isMemoryWorkerInternalSession(session)
+}
+
+/** Hide memory_worker background sessions from sidebar history. */
+export function shouldHideSessionFromHistory(
+  sessionId: string,
+  session: Pick<OcSession, 'id' | 'title'> | null | undefined,
+): boolean {
+  return isMemoryWorkerPipelineSession(sessionId, session)
+}
+
+export function shouldSkipTraceIngestForSession(
+  sessionId: string,
+  session: Pick<OcSession, 'title'> | null | undefined,
+): boolean {
+  return isMemoryWorkerPipelineSession(sessionId, session)
 }
 
 export function registerMemoryWorkerInternalSessionIds(ids: Iterable<string>): void {

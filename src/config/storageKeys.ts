@@ -16,6 +16,8 @@ export const APP_STORAGE_NAMESPACE = 'vibetrace'
 
 export const STORAGE_KEYS = {
   manualDirectories: `${APP_STORAGE_NAMESPACE}.manual.directories.v1`,
+  /** Workspace paths ever seen in session list — used to re-fetch full history on refresh */
+  knownDirectories: `${APP_STORAGE_NAMESPACE}.known.directories.v1`,
   closedDirectories: `${APP_STORAGE_NAMESPACE}.closed.directories.v1`,
   composerModelRef: `${APP_STORAGE_NAMESPACE}.opencodeComposerModelRef`,
   sidebarSessionListWidth: `${APP_STORAGE_NAMESPACE}.layout.sidebarSessionListWidth.v1`,

@@ -71,10 +71,10 @@ function firstUserMessageIndex(subtask: AssistantSubtask): number | null {
   return Math.min(...indices)
 }
 
-function distillChannelLabel(channel: string | undefined, source: string | undefined): string {
-  if (channel === 'feedback' || source === 'feedback_distill') return 'User Feedback'
-  if (channel === 'manual' || source === 'manual_edit') return 'Manual Edit'
-  return 'Task Switch · Pipeline'
+function historyEntrySourceLabel(entry: SkillDistillHistoryEntry): string | null {
+  if (entry.channel === 'feedback' || entry.source === 'feedback_distill') return 'Feedback'
+  if (entry.channel === 'manual' || entry.source === 'manual_edit') return 'Manual'
+  return null
 }
 
 function operationBadgeStyle(operation: string | undefined): { bg: string; color: string; border: string } {
@@ -93,12 +93,6 @@ function formatHistoryTimestamp(value: string | undefined): string {
   return date.toLocaleString()
 }
 
-function _truncateDisplayText(text: string, maxLen: number): string {
-  const clean = text.trim()
-  if (clean.length <= maxLen) return clean
-  return `${clean.slice(0, maxLen - 1).trimEnd()}…`
-}
-
 function extractHistoryAnchorIndex(entry: SkillDistillHistoryEntry): number | null {
   const anchors = entry.traceAnchors ?? []
   for (const anchor of anchors) {
@@ -108,23 +102,50 @@ function extractHistoryAnchorIndex(entry: SkillDistillHistoryEntry): number | nu
   return null
 }
 
-function extractHistoryQuotes(entry: SkillDistillHistoryEntry): string[] {
-  const quotes: string[] = []
-  for (const anchor of entry.traceAnchors ?? []) {
-    const quote = anchor.quote_or_summary ?? anchor.summary
-    if (typeof quote === 'string' && quote.trim()) quotes.push(quote.trim())
-  }
-  if (quotes.length === 0 && entry.userComment?.trim()) {
-    quotes.push(entry.userComment.trim())
-  }
-  return quotes.slice(0, 2)
-}
-
 function historyEntryBodyText(entry: SkillDistillHistoryEntry): string {
   const rationale = entry.rationale?.trim() || ''
   const summary = entry.summary?.trim() || ''
   if (rationale && summary && rationale !== summary) return rationale
   return rationale || summary || 'Skill change record'
+}
+
+function _historyTextsOverlap(a: string, b: string): boolean {
+  const left = a.trim().toLowerCase()
+  const right = b.trim().toLowerCase()
+  if (!left || !right) return false
+  return left === right || left.includes(right) || right.includes(left)
+}
+
+function historyEntryUserComment(entry: SkillDistillHistoryEntry, bodyText: string): string {
+  if (entry.channel !== 'feedback' && entry.source !== 'feedback_distill') return ''
+  const comment = entry.userComment?.trim() || ''
+  if (!comment || _historyTextsOverlap(comment, bodyText)) return ''
+  return comment
+}
+
+function historyEntryTraceQuote(entry: SkillDistillHistoryEntry, bodyText: string): string {
+  if (entry.channel === 'feedback' || entry.source === 'feedback_distill') return ''
+  for (const anchor of entry.traceAnchors ?? []) {
+    const quote = anchor.quote_or_summary ?? anchor.summary
+    if (typeof quote === 'string' && quote.trim() && !_historyTextsOverlap(quote, bodyText)) {
+      return quote.trim()
+    }
+  }
+  return ''
+}
+
+function historyEntryChangePaths(entry: SkillDistillHistoryEntry): string[] {
+  const paths = (entry.changes ?? [])
+    .map((change) => change.path?.trim())
+    .filter((path): path is string => Boolean(path))
+  const meaningful = paths.filter((path) => path.toLowerCase() !== 'skill.md')
+  return meaningful.length > 0 ? meaningful.slice(0, 3) : []
+}
+
+function historyEntryNavigateLabel(entry: SkillDistillHistoryEntry, anchorIndex: number | null): string | null {
+  if (anchorIndex !== null) return `Panel #${anchorIndex + 1}`
+  if (entry.taskId) return 'View task'
+  return null
 }
 
 function formatFeedbackScopeLabel(selectedIndices: number[], totalPanelCount: number): string {
@@ -874,7 +895,7 @@ export default function SubtaskDebugPanel({
 
   const distillHistory = selectedSkillDetail?.history ?? []
   const skillMdSectionHeight =
-    !skillDetailLoading && distillHistory.length > 0 ? 'min(460px, 52vh)' : 'min(580px, 70vh)'
+    !skillDetailLoading && distillHistory.length > 0 ? 'min(420px, 48vh)' : 'min(580px, 70vh)'
 
   return (
     <div
@@ -1911,147 +1932,180 @@ export default function SubtaskDebugPanel({
                   border: '1px solid #EAECF0',
                   borderRadius: 12,
                   background: '#FFFFFF',
-                  padding: 10,
+                  padding: '8px 10px',
                   display: 'flex',
                   flexDirection: 'column',
                   gap: 8,
                   flex: '0 0 auto',
                 }}
               >
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>Distill History</div>
-                </div>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>Distill History</div>
 
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: 8,
-                      overflowX: 'auto',
-                      paddingBottom: 2,
-                    }}
-                  >
-                    {distillHistory.map((entry, index) => {
-                      const badge = operationBadgeStyle(entry.operation)
-                      const quotes = extractHistoryQuotes(entry)
-                      const anchorIndex = extractHistoryAnchorIndex(entry)
-                      const canNavigate = Boolean(entry.taskId) || anchorIndex !== null
-                      const bodyText = historyEntryBodyText(entry)
-                      const panelFeedback = Array.isArray(entry.feedbackContext?.selectedPanels)
-                        ? (entry.feedbackContext?.selectedPanels as Array<{ comment?: string; sourceIndex?: number }>)
-                        : []
-                      const panelComments = panelFeedback
-                        .map((panel, panelIndex) => {
-                          const label = `Panel #${typeof panel.sourceIndex === 'number' ? panel.sourceIndex + 1 : panelIndex + 1}`
-                          return panel.comment ? `${label}: ${panel.comment}` : label
-                        })
-                        .slice(0, 2)
-                      return (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    border: '1px solid #EAECF0',
+                    borderRadius: 8,
+                    background: '#FCFCFD',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {distillHistory.map((entry, index) => {
+                    const badge = operationBadgeStyle(entry.operation)
+                    const operationLabel = String(entry.operation || 'UPDATE').toUpperCase()
+                    const sourceLabel = historyEntrySourceLabel(entry)
+                    const anchorIndex = extractHistoryAnchorIndex(entry)
+                    const canNavigate = Boolean(entry.taskId) || anchorIndex !== null
+                    const bodyText = historyEntryBodyText(entry)
+                    const userComment = historyEntryUserComment(entry, bodyText)
+                    const traceQuote = historyEntryTraceQuote(entry, bodyText)
+                    const changePaths = historyEntryChangePaths(entry)
+                    const navigateLabel = historyEntryNavigateLabel(entry, anchorIndex)
+                    const rowKey = entry.id || `${entry.createdAt}-${index}`
+                    return (
+                      <div
+                        key={rowKey}
+                        role={canNavigate ? 'button' : undefined}
+                        tabIndex={canNavigate ? 0 : undefined}
+                        onClick={canNavigate ? () => navigateFromSkillHistory(entry) : undefined}
+                        onKeyDown={
+                          canNavigate
+                            ? (event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault()
+                                  navigateFromSkillHistory(entry)
+                                }
+                              }
+                            : undefined
+                        }
+                        style={{
+                          width: '100%',
+                          boxSizing: 'border-box',
+                          padding: '10px 12px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          borderBottom: index < distillHistory.length - 1 ? '1px solid #EAECF0' : undefined,
+                          cursor: canNavigate ? 'pointer' : 'default',
+                          background: 'transparent',
+                        }}
+                        onMouseEnter={(event) => {
+                          if (canNavigate) event.currentTarget.style.background = '#F9FAFB'
+                        }}
+                        onMouseLeave={(event) => {
+                          event.currentTarget.style.background = 'transparent'
+                        }}
+                      >
                         <div
-                          key={entry.id || `${entry.createdAt}-${index}`}
                           style={{
-                            flex: '0 0 280px',
-                            border: '1px solid #EAECF0',
-                            borderRadius: 10,
-                            background: '#FCFCFD',
-                            padding: 10,
                             display: 'flex',
-                            flexDirection: 'column',
-                            gap: 6,
-                            minHeight: 120,
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 8,
+                            flexWrap: 'wrap',
                           }}
                         >
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <span
+                              style={{
+                                fontSize: 9,
+                                fontWeight: 800,
+                                color: badge.color,
+                                background: badge.bg,
+                                border: `1px solid ${badge.border}`,
+                                borderRadius: 999,
+                                padding: '1px 7px',
+                              }}
+                            >
+                              {operationLabel}
+                            </span>
+                            <span style={{ fontSize: 9, color: '#98A2B3', whiteSpace: 'nowrap' }}>
+                              {formatHistoryTimestamp(entry.createdAt)}
+                            </span>
+                            {sourceLabel ? (
                               <span
                                 style={{
                                   fontSize: 9,
-                                  fontWeight: 800,
-                                  color: badge.color,
-                                  background: badge.bg,
-                                  border: `1px solid ${badge.border}`,
+                                  fontWeight: 700,
+                                  color: sourceLabel === 'Feedback' ? '#92400E' : '#5925DC',
+                                  background: sourceLabel === 'Feedback' ? '#FFFAEB' : '#F4F3FF',
+                                  border: `1px solid ${sourceLabel === 'Feedback' ? '#FEDF89' : '#D9D6FE'}`,
                                   borderRadius: 999,
                                   padding: '1px 7px',
                                 }}
                               >
-                                {String(entry.operation || 'UPDATE').toUpperCase()}
+                                {sourceLabel}
                               </span>
-                              <span style={{ fontSize: 9, color: '#475467' }}>
-                                {distillChannelLabel(entry.channel, entry.source)}
-                              </span>
-                            </div>
-                            <span style={{ fontSize: 9, color: '#98A2B3', whiteSpace: 'nowrap' }}>
-                              {formatHistoryTimestamp(entry.createdAt)}
-                            </span>
+                            ) : null}
                           </div>
-
-                          <div style={{ fontSize: 10, color: '#111827', lineHeight: 1.5, flex: 1 }}>
-                            {bodyText}
-                          </div>
-
-                          {entry.taskLabel ? (
-                            <div style={{ fontSize: 9, color: '#667085' }}>Task: {entry.taskLabel}</div>
-                          ) : null}
-
-                          {entry.channel === 'feedback' && entry.userComment?.trim() ? (
-                            <div
+                          {navigateLabel ? (
+                            <span
                               style={{
-                                fontSize: 9,
-                                color: '#92400E',
-                                lineHeight: 1.45,
-                                padding: '5px 7px',
-                                borderRadius: 7,
-                                background: '#FFFAEB',
-                                border: '1px solid #FEDF89',
-                              }}
-                            >
-                              User said: {entry.userComment.trim()}
-                            </div>
-                          ) : null}
-
-                          {panelComments.length > 0 ? (
-                            <div style={{ fontSize: 9, color: '#475467', lineHeight: 1.45 }}>
-                              {panelComments.join(' · ')}
-                            </div>
-                          ) : null}
-
-                          {quotes.length > 0 && entry.channel !== 'feedback' ? (
-                            <div style={{ fontSize: 9, color: '#667085', lineHeight: 1.45 }}>
-                              「{_truncateDisplayText(quotes[0], 120)}」
-                            </div>
-                          ) : null}
-
-                          {(entry.changes ?? []).length > 0 && entry.channel === 'task_switch' ? (
-                            <div style={{ fontSize: 9, color: '#667085', lineHeight: 1.45 }}>
-                              Changed: {(entry.changes ?? [])
-                                .slice(0, 2)
-                                .map((change) => change.path)
-                                .join('、')}
-                            </div>
-                          ) : null}
-
-                          {canNavigate ? (
-                            <button
-                              type="button"
-                              onClick={() => navigateFromSkillHistory(entry)}
-                              style={{
-                                alignSelf: 'flex-start',
-                                border: '1px solid #CBD5E1',
-                                borderRadius: 8,
-                                background: '#FFFFFF',
-                                color: '#344054',
-                                padding: '3px 8px',
                                 fontSize: 9,
                                 fontWeight: 700,
-                                cursor: 'pointer',
+                                color: '#475467',
+                                whiteSpace: 'nowrap',
                               }}
                             >
-                              {anchorIndex !== null ? `View Panel #${anchorIndex + 1}` : 'View Source Task'}
-                            </button>
+                              {navigateLabel} →
+                            </span>
                           ) : null}
                         </div>
-                      )
-                    })}
-                  </div>
+
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: '#111827',
+                            lineHeight: 1.55,
+                            wordBreak: 'break-word',
+                            whiteSpace: 'pre-wrap',
+                          }}
+                        >
+                          {bodyText}
+                        </div>
+
+                        {userComment ? (
+                          <div
+                            style={{
+                              fontSize: 9,
+                              color: '#92400E',
+                              lineHeight: 1.5,
+                              padding: '5px 8px',
+                              borderRadius: 7,
+                              background: '#FFFAEB',
+                              border: '1px solid #FEDF89',
+                              wordBreak: 'break-word',
+                              whiteSpace: 'pre-wrap',
+                            }}
+                          >
+                            User: {userComment}
+                          </div>
+                        ) : null}
+
+                        {traceQuote ? (
+                          <div
+                            style={{
+                              fontSize: 9,
+                              color: '#667085',
+                              lineHeight: 1.5,
+                              wordBreak: 'break-word',
+                              whiteSpace: 'pre-wrap',
+                            }}
+                          >
+                            「{traceQuote}」
+                          </div>
+                        ) : null}
+
+                        {changePaths.length > 0 ? (
+                          <div style={{ fontSize: 9, color: '#667085', lineHeight: 1.5 }}>
+                            Changed: {changePaths.join('、')}
+                          </div>
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                </div>
               </section>
               ) : null}
             </div>

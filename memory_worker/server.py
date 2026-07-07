@@ -1752,6 +1752,146 @@ def configured_skill_roots(project_dir: Path | None) -> list[Path]:
     return unique
 
 
+def _provenance_matches_task(provenance: dict[str, Any], session_id: str, task_id: str) -> bool:
+    session_id = str(session_id or "").strip()
+    task_id = str(task_id or "").strip()
+    if not session_id or not task_id:
+        return False
+    if str(provenance.get("sessionId") or "").strip() == session_id and str(provenance.get("taskId") or "").strip() == task_id:
+        return True
+    aliases = provenance.get("forkAliases")
+    if not isinstance(aliases, list):
+        return False
+    for alias in aliases:
+        if not isinstance(alias, dict):
+            continue
+        if str(alias.get("sessionId") or "").strip() == session_id and str(alias.get("taskId") or "").strip() == task_id:
+            return True
+    return False
+
+
+def _append_fork_skill_alias(
+    skill_dir: Path,
+    *,
+    fork_session_id: str,
+    fork_task_id: str,
+    source_session_id: str,
+    source_task_id: str,
+) -> None:
+    if not skill_dir.exists() or not skill_dir.is_dir():
+        return
+    provenance_path = skill_dir / "PROVENANCE.json"
+    existing = _safe_read_json_file(provenance_path)
+    payload: dict[str, Any] = existing if isinstance(existing, dict) else {}
+    aliases = payload.get("forkAliases")
+    if not isinstance(aliases, list):
+        aliases = []
+    already = any(
+        isinstance(item, dict)
+        and str(item.get("sessionId") or "").strip() == fork_session_id
+        and str(item.get("taskId") or "").strip() == fork_task_id
+        for item in aliases
+    )
+    if not already:
+        aliases.append(
+            {
+                "sessionId": fork_session_id,
+                "taskId": fork_task_id,
+                "sourceSessionId": source_session_id,
+                "sourceTaskId": source_task_id,
+            }
+        )
+    payload["forkAliases"] = aliases
+    write_json(provenance_path, payload)
+
+
+def _merge_skill_record_lists(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for skill in group:
+            if not isinstance(skill, dict):
+                continue
+            marker = _normalize_skill_path_marker(str(skill.get("skillPath") or skill.get("skillName") or ""))
+            if marker and marker in seen:
+                continue
+            if marker:
+                seen.add(marker)
+            merged.append(skill)
+    return merged
+
+
+def _collect_skills_for_session_task(
+    session_id: str,
+    task_id: str,
+    directory: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    session_id = str(session_id or "").strip()
+    task_id = str(task_id or "").strip()
+    if not session_id or not task_id:
+        return [], None
+    index = _load_task_skill_index()
+    key = _task_skill_key(session_id, task_id)
+    entry = (index.get("tasks") or {}).get(key)
+    index_skills = [x for x in entry.get("skills", []) if isinstance(x, dict)] if isinstance(entry, dict) else []
+    discovered = discover_task_skills_from_disk(session_id, task_id, directory)
+    skills = _merge_skill_record_lists(index_skills, discovered)
+    return skills, entry if isinstance(entry, dict) else None
+
+
+def _fork_skill_source_from_segments_index(
+    session_id: str,
+    task_id: str,
+    directory: str | None,
+) -> tuple[str, str, str] | None:
+    session_id = str(session_id or "").strip()
+    task_id = str(task_id or "").strip()
+    if not session_id or not task_id:
+        return None
+    session_key = _task_switch_session_key(session_id, directory)
+    index = _load_task_segments_index()
+    sessions = index.get("sessions") if isinstance(index.get("sessions"), dict) else {}
+    entry = sessions.get(session_key)
+    if not isinstance(entry, dict):
+        return None
+    source_parent = str(entry.get("forkSourceParentSessionId") or "").strip()
+    for tab in entry.get("tabs") if isinstance(entry.get("tabs"), list) else []:
+        if not isinstance(tab, dict):
+            continue
+        if str(tab.get("taskId") or "").strip() != task_id:
+            continue
+        source_task_id = str(tab.get("sourceTaskId") or tab.get("taskId") or "").strip()
+        source_parent = source_parent or str(tab.get("sourceParentSessionId") or "").strip()
+        if source_parent and source_task_id:
+            return source_parent, source_task_id, task_id
+    return None
+
+
+def _materialize_fork_skills_if_missing(
+    session_id: str,
+    task_id: str,
+    directory: str | None,
+) -> int:
+    existing, _entry = _collect_skills_for_session_task(session_id, task_id, directory)
+    if existing:
+        return len(existing)
+    source = _fork_skill_source_from_segments_index(session_id, task_id, directory)
+    if not source:
+        return 0
+    source_parent, source_task_id, fork_task_id = source
+    return _copy_task_skill_index_for_fork(
+        source_session_id=source_parent,
+        fork_session_id=session_id,
+        inherited_tabs=[
+            {
+                "taskId": fork_task_id,
+                "sourceTaskId": source_task_id,
+            }
+        ],
+        directory_override=directory,
+    )
+
+
 def discover_task_skills_from_disk(session_id: str, task_id: str, directory: str | None) -> list[dict[str, Any]]:
     project_dir = resolve_config_path(directory, Path(OPENCODE_DIRECTORY)) if directory else Path(OPENCODE_DIRECTORY)
     records: list[dict[str, Any]] = []
@@ -1766,9 +1906,7 @@ def discover_task_skills_from_disk(session_id: str, task_id: str, directory: str
             provenance = _safe_read_json_file(provenance_path)
             if not isinstance(provenance, dict):
                 continue
-            prov_session_id = str(provenance.get("sessionId") or "").strip()
-            prov_task_id = str(provenance.get("taskId") or "").strip()
-            if prov_session_id != session_id or prov_task_id != task_id:
+            if not _provenance_matches_task(provenance, session_id, task_id):
                 continue
 
             skill_md_path = child / "SKILL.md"
@@ -1805,6 +1943,7 @@ def task_skills_response(session_id: str, task_id: str) -> dict[str, Any]:
 
 
 def task_skills_response_for_directory(session_id: str, task_id: str, directory: str | None) -> dict[str, Any]:
+    _materialize_fork_skills_if_missing(session_id, task_id, directory)
     discovered = discover_task_skills_from_disk(session_id, task_id, directory)
     if discovered:
         merge_task_skill_records(
@@ -1814,24 +1953,33 @@ def task_skills_response_for_directory(session_id: str, task_id: str, directory:
             task_segment=None,
             source="provenance_scan",
         )
-    index = _load_task_skill_index()
-    task = (index.get("tasks") or {}).get(_task_skill_key(session_id, task_id))
+    skills, task = _collect_skills_for_session_task(session_id, task_id, directory)
+    if skills and not isinstance(task, dict):
+        merge_task_skill_records(
+            session_id,
+            task_id,
+            skills,
+            task_segment=None,
+            source="fork_inherit",
+        )
+        skills, task = _collect_skills_for_session_task(session_id, task_id, directory)
     if not isinstance(task, dict):
         return {
             "ok": True,
             "sessionId": session_id,
             "taskId": task_id,
             "status": "none",
-            "skills": [],
+            "skills": skills,
             "skillWriteRoot": str(SKILL_WRITE_ROOT),
             "discoveredCount": len(discovered),
         }
+    resolved_skills = skills if skills else ([x for x in task.get("skills", []) if isinstance(x, dict)])
     return {
         "ok": True,
         "sessionId": session_id,
         "taskId": task_id,
-        "status": task.get("status") or "none",
-        "skills": task.get("skills") if isinstance(task.get("skills"), list) else [],
+        "status": task.get("status") or ("ready" if resolved_skills else "none"),
+        "skills": resolved_skills,
         "taskSegment": task.get("taskSegment") or {},
         "pipelineRunDir": task.get("pipelineRunDir") or "",
         "updatedAt": task.get("updatedAt") or "",
@@ -1850,6 +1998,7 @@ def _safe_read_json_file(path: Path) -> Any:
 
 
 def task_skill_detail_response(session_id: str, task_id: str, skill_key: str) -> dict[str, Any]:
+    _materialize_fork_skills_if_missing(session_id, task_id, None)
     index = _load_task_skill_index()
     task = (index.get("tasks") or {}).get(_task_skill_key(session_id, task_id))
     if not isinstance(task, dict):
@@ -2936,11 +3085,201 @@ def _complete_task_switch_extraction(
         write_json(switch_run_dir / "04-pipeline-result.json", {"ok": False, "error": str(e)})
 
 
+def _message_index_by_id(messages: list[dict[str, Any]], message_id: str) -> int:
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        return -1
+    for i, msg in enumerate(messages):
+        info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+        if str(info.get("id") or "") == message_id:
+            return i
+    return -1
+
+
+def _resolve_turn_end_at_or_before(messages: list[dict[str, Any]], anchor_message_id: str) -> str:
+    anchor_idx = _message_index_by_id(messages, anchor_message_id)
+    if anchor_idx < 0:
+        return ""
+    for i in range(anchor_idx, -1, -1):
+        info = messages[i].get("info") if isinstance(messages[i].get("info"), dict) else {}
+        if info.get("role") == "assistant":
+            return str(info.get("id") or "")
+    return ""
+
+
+def _truncate_turn_records_at_anchor(
+    messages: list[dict[str, Any]],
+    turns: list[dict[str, Any]],
+    anchor_message_id: str,
+) -> list[dict[str, Any]]:
+    turn_end = _resolve_turn_end_at_or_before(messages, anchor_message_id)
+    if not turn_end:
+        return _dedupe_turn_records(turns)
+    anchor_end_idx = _message_index_by_id(messages, turn_end)
+    out: list[dict[str, Any]] = []
+    for turn in _dedupe_turn_records(turns):
+        end_id = str(turn.get("endAssistantMessageId") or "").strip()
+        end_idx = _message_index_by_id(messages, end_id)
+        if end_idx < 0:
+            continue
+        if end_idx <= anchor_end_idx:
+            out.append(turn)
+    return out
+
+
+def _truncate_task_switch_state_for_anchor(
+    parent_state: dict[str, Any],
+    messages: list[dict[str, Any]],
+    anchor_message_id: str,
+) -> dict[str, Any]:
+    truncated = {**parent_state}
+    if not anchor_message_id:
+        return truncated
+    last_turns = truncated.get("lastExtractedTurns")
+    if isinstance(last_turns, list):
+        truncated["lastExtractedTurns"] = _truncate_turn_records_at_anchor(messages, last_turns, anchor_message_id)
+    pending = truncated.get("pendingTurns")
+    if isinstance(pending, list):
+        truncated["pendingTurns"] = _truncate_turn_records_at_anchor(messages, pending, anchor_message_id)
+    in_flight = truncated.get("inFlightTurn")
+    if isinstance(in_flight, dict):
+        end_id = str(in_flight.get("endAssistantMessageId") or "").strip()
+        turn_end = _resolve_turn_end_at_or_before(messages, anchor_message_id)
+        end_idx = _message_index_by_id(messages, end_id) if end_id else -1
+        anchor_idx = _message_index_by_id(messages, turn_end) if turn_end else -1
+        if end_idx > anchor_idx:
+            truncated["inFlightTurn"] = None
+    truncated["inFlightTaskSwitch"] = None
+    return truncated
+
+
+def _copy_task_skill_index_for_fork(
+    *,
+    source_session_id: str,
+    fork_session_id: str,
+    inherited_tabs: list[dict[str, Any]],
+    directory_override: str | None = None,
+) -> int:
+    if not inherited_tabs:
+        return 0
+    index = _load_task_skill_index()
+    tasks = index.setdefault("tasks", {})
+    copied = 0
+    for tab in inherited_tabs:
+        if not isinstance(tab, dict):
+            continue
+        fork_task_id = str(tab.get("taskId") or "").strip()
+        source_task_id = str(tab.get("sourceTaskId") or tab.get("taskId") or "").strip()
+        if not fork_task_id or not source_task_id:
+            continue
+        skills, parent_entry = _collect_skills_for_session_task(
+            source_session_id,
+            source_task_id,
+            directory_override,
+        )
+        if not skills:
+            continue
+        task_segment = {
+            key: tab.get(key)
+            for key in (
+                "fromStartUserMessageId",
+                "fromEndAssistantMessageId",
+                "toEndAssistantMessageId",
+                "turnCount",
+                "title",
+                "description",
+                "summary",
+            )
+            if tab.get(key) is not None
+        }
+        fork_key = _task_skill_key(fork_session_id, fork_task_id)
+        tasks[fork_key] = {
+            **(parent_entry if isinstance(parent_entry, dict) else {}),
+            "sessionId": fork_session_id,
+            "taskId": fork_task_id,
+            "taskSegment": task_segment or (parent_entry.get("taskSegment") if isinstance(parent_entry, dict) else {}),
+            "status": "ready",
+            "skills": skills,
+            "inheritedFrom": {
+                "sessionId": source_session_id,
+                "taskId": source_task_id,
+            },
+            "updatedAt": now_iso(),
+        }
+        for skill in skills:
+            skill_path = str(skill.get("skillPath") or "").strip()
+            if not skill_path:
+                continue
+            _append_fork_skill_alias(
+                Path(skill_path),
+                fork_session_id=fork_session_id,
+                fork_task_id=fork_task_id,
+                source_session_id=source_session_id,
+                source_task_id=source_task_id,
+            )
+        copied += 1
+    if copied:
+        _save_task_skill_index(index)
+    return copied
+
+
+def _persist_inherited_fork_tabs(
+    session_id: str,
+    directory_override: str | None,
+    inherited_tabs: list[dict[str, Any]],
+    *,
+    source_parent_session_id: str = "",
+) -> None:
+    worker_tabs: list[dict[str, Any]] = []
+    for tab in inherited_tabs:
+        if not isinstance(tab, dict):
+            continue
+        task_id = str(tab.get("taskId") or "").strip()
+        if not task_id:
+            continue
+        status = str(tab.get("status") or "pending").strip()
+        worker_tabs.append(
+            {
+                "taskId": task_id,
+                "status": "extracted" if status == "extracted" else "pending",
+                "fromStartUserMessageId": str(tab.get("fromStartUserMessageId") or ""),
+                "fromEndAssistantMessageId": str(tab.get("fromEndAssistantMessageId") or ""),
+                "toEndAssistantMessageId": str(tab.get("toEndAssistantMessageId") or ""),
+                "turnCount": int(tab.get("turnCount") or 0),
+                "title": str(tab.get("title") or "").strip(),
+                "description": str(tab.get("description") or "").strip(),
+                "summary": str(tab.get("summary") or "").strip(),
+                "taskSwitchRunDir": str(tab.get("taskSwitchRunDir") or "").strip(),
+                "pipelineRunDir": str(tab.get("pipelineRunDir") or "").strip(),
+                "sourceTaskId": str(tab.get("sourceTaskId") or "").strip(),
+                "sourceParentSessionId": str(tab.get("sourceParentSessionId") or source_parent_session_id or "").strip(),
+                **({"provisional": True} if tab.get("provisional") else {}),
+            }
+        )
+    if not worker_tabs:
+        return
+    session_key = _task_switch_session_key(session_id, directory_override)
+    with _task_segments_lock:
+        index = _load_task_segments_index()
+        sessions = index.setdefault("sessions", {})
+        entry = sessions.setdefault(
+            session_key,
+            {"sessionId": session_id, "directory": (directory_override or "").strip(), "tabs": []},
+        )
+        entry["tabs"] = worker_tabs
+        if source_parent_session_id:
+            entry["forkSourceParentSessionId"] = source_parent_session_id
+        entry["updatedAt"] = now_iso()
+        _save_task_segments_index(index)
+
+
 def _inherit_task_switch_state_for_fork(
     *,
     fork_meta: dict[str, Any] | None,
     session_id: str,
     directory_override: str | None,
+    fork_anchor_message_id: str | None = None,
+    parent_messages: list[dict[str, Any]] | None = None,
 ) -> bool:
     if not isinstance(fork_meta, dict):
         return False
@@ -2965,8 +3304,12 @@ def _inherit_task_switch_state_for_fork(
         parent_state = sessions.get(parent_key)
         if not isinstance(parent_state, dict):
             return False
+        next_state = parent_state
+        anchor = str(fork_anchor_message_id or "").strip()
+        if anchor and isinstance(parent_messages, list) and parent_messages:
+            next_state = _truncate_task_switch_state_for_anchor(parent_state, parent_messages, anchor)
         sessions[fork_key] = {
-            **parent_state,
+            **next_state,
             "sessionId": session_id,
             "updatedAt": now_iso(),
         }
@@ -2978,14 +3321,45 @@ def inherit_fork_task_state(body: dict[str, Any]) -> dict[str, Any]:
     session_id = str(body.get("sessionId") or "").strip()
     source_parent = str(body.get("sourceParentSessionId") or "").strip()
     directory_override = str(body.get("directory") or "").strip() or None
+    fork_anchor_message_id = str(body.get("forkAnchorMessageId") or "").strip() or None
+    inherited_tabs_raw = body.get("inheritedTabs") if isinstance(body.get("inheritedTabs"), list) else []
+    inherited_tabs = [tab for tab in inherited_tabs_raw if isinstance(tab, dict)]
     if not session_id or not source_parent:
         return {"ok": False, "error": "sessionId and sourceParentSessionId are required"}
+
+    parent_messages: list[dict[str, Any]] = []
+    if fork_anchor_message_id:
+        try:
+            parent_messages = opencode_get_messages(source_parent, directory=directory_override)
+        except Exception:
+            parent_messages = []
+
     inherited = _inherit_task_switch_state_for_fork(
         fork_meta={"sourceParentSessionId": source_parent, "forkedSessionId": session_id},
         session_id=session_id,
         directory_override=directory_override,
+        fork_anchor_message_id=fork_anchor_message_id,
+        parent_messages=parent_messages,
     )
-    return {"ok": True, "inherited": inherited}
+    skill_count = _copy_task_skill_index_for_fork(
+        source_session_id=source_parent,
+        fork_session_id=session_id,
+        inherited_tabs=inherited_tabs,
+        directory_override=directory_override,
+    )
+    if inherited_tabs:
+        _persist_inherited_fork_tabs(
+            session_id,
+            directory_override,
+            inherited_tabs,
+            source_parent_session_id=source_parent,
+        )
+    return {
+        "ok": True,
+        "inherited": inherited,
+        "skillTabsCopied": skill_count,
+        "tabCount": len(inherited_tabs),
+    }
 
 
 def process_user_prompt_task_switch(

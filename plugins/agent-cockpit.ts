@@ -114,17 +114,41 @@ function killListenerOnPort(port: number): Promise<void> {
   })
 }
 
-function writeEnvLocal(serverUrl: URL): Record<string, string> {
-  const envPath = path.join(PROJECT_ROOT, ".env.local")
+/** Keys that require Vite restart when changed (Vite reads .env only at startup). */
+const VITE_PROXY_ENV_KEYS = [
+  "VITE_OPENCODE_BASE",
+  "OPENCODE_PROXY_TARGET",
+  "OPENCODE_BASE",
+  "VITE_OPENCODE_SERVER_PASSWORD",
+  "OPENCODE_SERVER_PASSWORD",
+  "VITE_OPENCODE_SERVER_USERNAME",
+  "OPENCODE_SERVER_USERNAME",
+] as const
+
+/** Keys that require memory-worker restart when changed. */
+const WORKER_PROXY_ENV_KEYS = [
+  "OPENCODE_BASE",
+  "OPENCODE_SERVER_PASSWORD",
+  "OPENCODE_SERVER_USERNAME",
+] as const
+
+function envSlice(vars: Record<string, string>, keys: readonly string[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const k of keys) out[k] = vars[k] ?? ""
+  return out
+}
+
+function envSliceEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  for (const k of keys) {
+    if ((a[k] ?? "") !== (b[k] ?? "")) return false
+  }
+  return true
+}
+
+function buildEnvVars(serverUrl: URL, existing: Record<string, string> = {}): Record<string, string> {
   const port = serverUrl.port || (serverUrl.protocol === "https:" ? "443" : "80")
   const proxyTarget = `${serverUrl.protocol}//${serverUrl.hostname}:${port}`
-
-  let existing: Record<string, string> = {}
-  if (existsSync(envPath)) {
-    try {
-      existing = parseEnvFile(readFileSync(envPath, "utf-8"))
-    } catch { /* ignore */ }
-  }
 
   const merged: Record<string, string> = {
     ...existing,
@@ -148,21 +172,59 @@ function writeEnvLocal(serverUrl: URL): Record<string, string> {
   }
   syncOpencodeAuthFromProcess(merged)
   merged.VIBETRACE_OPENCODE_MODE = "plugin"
-
-  try {
-    writeFileSync(envPath, formatEnvFile("plugin", merged), "utf-8")
-    console.log(`[VibeTrace] .env.local updated → proxy ${proxyTarget}`)
-  } catch (err) {
-    console.error("[VibeTrace] cannot write .env.local:", err)
-  }
   return merged
 }
 
-async function ensureMemoryWorker(spawnEnv: Record<string, string> = {}): Promise<void> {
+function writeEnvLocal(
+  serverUrl: URL,
+): { vars: Record<string, string>; changed: boolean; viteProxyChanged: boolean; workerProxyChanged: boolean } {
+  const envPath = path.join(PROJECT_ROOT, ".env.local")
+
+  let existing: Record<string, string> = {}
+  if (existsSync(envPath)) {
+    try {
+      existing = parseEnvFile(readFileSync(envPath, "utf-8"))
+    } catch { /* ignore */ }
+  }
+
+  const merged = buildEnvVars(serverUrl, existing)
+  const viteProxyChanged = !envSliceEqual(
+    envSlice(existing, VITE_PROXY_ENV_KEYS),
+    envSlice(merged, VITE_PROXY_ENV_KEYS),
+  )
+  const workerProxyChanged = !envSliceEqual(
+    envSlice(existing, WORKER_PROXY_ENV_KEYS),
+    envSlice(merged, WORKER_PROXY_ENV_KEYS),
+  )
+  const changed = viteProxyChanged || workerProxyChanged
+
+  if (!changed) {
+    console.log(`[VibeTrace] .env.local unchanged → proxy ${merged.OPENCODE_PROXY_TARGET}`)
+    return { vars: merged, changed: false, viteProxyChanged: false, workerProxyChanged: false }
+  }
+
+  try {
+    writeFileSync(envPath, formatEnvFile("plugin", merged), "utf-8")
+    console.log(`[VibeTrace] .env.local updated → proxy ${merged.OPENCODE_PROXY_TARGET}`)
+  } catch (err) {
+    console.error("[VibeTrace] cannot write .env.local:", err)
+  }
+  return { vars: merged, changed: true, viteProxyChanged, workerProxyChanged }
+}
+
+async function ensureMemoryWorker(
+  spawnEnv: Record<string, string> = {},
+  options: { restartIfRunning?: boolean } = {},
+): Promise<void> {
   const healthUrl = `http://127.0.0.1:${MEMORY_WORKER_PORT}/health`
+  const restartIfRunning = options.restartIfRunning ?? true
   try {
     const r = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
     if (r.ok) {
+      if (!restartIfRunning) {
+        console.log(`[VibeTrace] memory-worker already running → :${MEMORY_WORKER_PORT}`)
+        return
+      }
       console.log(`[VibeTrace] restarting memory-worker to reload .env.local → :${MEMORY_WORKER_PORT}`)
       await killListenerOnPort(MEMORY_WORKER_PORT)
       await new Promise((resolve) => setTimeout(resolve, 800))
@@ -220,9 +282,8 @@ async function startDevServer(serverUrl: URL): Promise<void> {
     return
   }
 
-  const envPath = path.join(PROJECT_ROOT, ".env.local")
-  const envVars = writeEnvLocal(serverUrl)
-  await ensureMemoryWorker(envVars)
+  const { vars: envVars, viteProxyChanged, workerProxyChanged } = writeEnvLocal(serverUrl)
+  await ensureMemoryWorker(envVars, { restartIfRunning: workerProxyChanged })
 
   const uiUrl = `http://127.0.0.1:${VITE_PORT}/`
   const viteEnv = { ...process.env, ...envVars }
@@ -234,14 +295,18 @@ async function startDevServer(serverUrl: URL): Promise<void> {
     viteRunning = r.ok || r.status < 500
   } catch { /* not running */ }
 
-  // Desktop may change port/password; old Vite only reads .env at startup → must restart or 401 login dialog appears
-  if (viteRunning) {
+  // Only restart when proxy/auth actually changed — avoid killing a healthy manual `npm run dev`.
+  if (viteRunning && viteProxyChanged) {
     console.log(
       `[VibeTrace] restarting Vite to apply .env.local (OpenCode → ${proxyTarget || "—"}) → :${VITE_PORT}`,
     )
     await killListenerOnPort(VITE_PORT)
     await new Promise((r) => setTimeout(r, 1000))
     viteRunning = false
+  } else if (viteRunning) {
+    console.log(`[VibeTrace] Vite already running with current proxy → :${VITE_PORT}`)
+    openBrowser(uiUrl)
+    return
   }
 
   console.log(`[VibeTrace] starting Vite (${resolveNpm()} run dev) …`)

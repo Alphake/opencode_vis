@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { OcSession } from '../types/opencode'
 import { folderDisplayName } from '../utils/sessionFolders'
-import { isMemoryWorkerInternalSession } from '../utils/memoryWorkerSessions'
 
 interface SidebarProps {
   /** Sessions in the selected folder (sorted, filtered). */
@@ -306,9 +305,7 @@ export default function Sidebar({
               No sessions in this folder yet. Use &quot;New session&quot; to start.
             </div>
           ) : (
-            sessionsInFolder.map((session) => {
-              const isInternal = isMemoryWorkerInternalSession(session)
-              return (
+            sessionsInFolder.map((session) => (
               <div
                 key={session.id}
                 onMouseEnter={() => setHoverSessionId(session.id)}
@@ -350,8 +347,7 @@ export default function Sidebar({
                   <span
                     style={{
                       fontSize: 12,
-                      color: isInternal ? '#5C6BC0' : '#171717',
-                      fontStyle: isInternal ? 'italic' : 'normal',
+                      color: '#171717',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
@@ -395,7 +391,7 @@ export default function Sidebar({
                   </button>
                 )}
               </div>
-            )})
+            ))
           )}
         </div>
         {onSessionListResizePointerDown ? (
