@@ -120,6 +120,8 @@ def _strip_harness_guidance(text: str) -> str:
         return text
     normalized = text.replace("\r\n", "\n")
     markers = [
+        "\n\n---\n用户输入\n",
+        "\n---\n用户输入\n",
         "\n\n---\nUser input\n",
         "\n---\nUser input\n",
         f"\n\n---\n{_LEGACY_CN_USER_INPUT}\n",
@@ -130,7 +132,7 @@ def _strip_harness_guidance(text: str) -> str:
         if idx >= 0:
             return normalized[idx + len(marker) :].lstrip()
     m = re.search(
-        rf"\n---\s*\n(?:User input|{re.escape(_LEGACY_CN_USER_INPUT)})\s*\n",
+        rf"\n---\s*\n(?:用户输入|User input|{re.escape(_LEGACY_CN_USER_INPUT)})\s*\n",
         normalized,
     )
     if m:

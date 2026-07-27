@@ -98,11 +98,6 @@ MW_OPENCODE_HTTP_TIMEOUT_SEC = 60
 MW_OPENCODE_MESSAGE_TIMEOUT_SEC = 180
 MW_ANALYZER_WAIT_PER_ATTEMPT_SEC = 180
 
-ANALYZER_IN_SESSION_RETRY_PROMPT = (
-    "The previous reply did not complete within the time limit. Continue in this same session: "
-    "finish the skill analysis and output the full JSON envelope only (skill_suggestions array), "
-    "with no extra prose before or after the JSON."
-)
 
 
 def parse_worker_port() -> int:
@@ -147,13 +142,13 @@ def ensure_prompt_files() -> None:
     if not analyzer.exists():
         analyzer.write_text(
             (
-                "You are SkillAnalyzer (Judge). From trace and pool_summary, output a single JSON object only; no explanatory prose.\n\n"
-                "Requirements:\n"
-                "1) operation must be CREATE / UPDATE / NONE only\n"
-                "2) NONE: skill_name='' and source_skill_absolute_path=''\n"
-                "3) UPDATE: source_skill_absolute_path must be non-empty and from pool_summary\n"
-                "4) guide must include folders, file_guidance, skill_md, trace_anchors\n\n"
-                "Output schema: SkillJudgeEnvelope v2.0.\n\n"
+                "你是 Skill 分析器（Judge）。根据 trace 与 pool_summary，仅输出单个 JSON 对象，不要解释性文字。\n\n"
+                "要求：\n"
+                "1) operation 只能是 CREATE / UPDATE / NONE\n"
+                "2) NONE：skill_name='' 且 source_skill_absolute_path=''\n"
+                "3) UPDATE：source_skill_absolute_path 须非空且来自 pool_summary\n"
+                "4) guide 须含 folders、file_guidance、skill_md、trace_anchors\n\n"
+                "输出 schema：SkillJudgeEnvelope v2.0。\n\n"
                 "trace:\n{{TRACE_JSON}}\n\n"
                 "pool_summary:\n{{POOL_SUMMARY_JSON}}\n"
             ),
@@ -163,12 +158,12 @@ def ensure_prompt_files() -> None:
     if not switcher.exists():
         switcher.write_text(
             (
-                "You are TaskSwitchJudge. From user input alone, decide whether the task switched from the previous segment to the current input.\n\n"
-                "The input JSON contains previous_user_prompts (accumulated user input since last extraction, old→new) "
-                "and current_user_prompt (this turn's user input). Do not use agent execution information.\n\n"
-                "Set task_switched=true when the current input starts a new goal, deliverable, or problem domain, "
-                "rather than a supplement, correction, continuation, verification, or format tweak to the prior task.\n\n"
-                "Output only a JSON object:\n"
+                "你是 TaskSwitchJudge。仅根据用户输入，判断任务是否从上一段切换到当前输入。\n\n"
+                "输入 JSON 含 previous_user_prompts（自上次提取以来累积的用户输入，旧→新）"
+                "与 current_user_prompt（本轮用户输入）。不要使用 agent 执行信息。\n\n"
+                "当当前输入开启新目标、交付物或问题域，而非对上一任务的补充、纠正、继续、验证或格式调整时，"
+                "设 task_switched=true。\n\n"
+                "仅输出 JSON 对象：\n"
                 "{\"task_switched\": boolean, \"confidence\": \"low|medium|high\", "
                 "\"reason\": \"string\", "
                 "\"previous_task\": {\"title\": \"string\", \"description\": \"string\"}, "
@@ -181,19 +176,19 @@ def ensure_prompt_files() -> None:
     if not feedback.exists():
         feedback.write_text(
             (
-                "You are FeedbackSkillDistiller. You receive a task segment, overall user feedback, "
-                "and localized feedback on one or more trace panels.\n\n"
-                "Goal: distill this feedback into a reusable skill draft to guide the agent on similar task/trace patterns later.\n\n"
-                "When feedbackContext.traceKind=\"feedback\" in the input, this is a feedback-distillation variant of the analyzer trace; "
-                "selectedPanels contains only user-selected panel traces—do not analyze unselected panels.\n\n"
-                "Requirements:\n"
-                "1. Output JSON only; no Markdown, explanations, or code fences.\n"
-                "2. skill_name uses kebab-case; keep it short and stable.\n"
-                "3. description describes trigger scenarios; do not merely restate the task id.\n"
-                "4. steps must be executable behavioral rules.\n"
-                "5. trace_anchors should cite panel subtaskIndex/actionKey/messageId etc. from the input to show where feedback came from.\n"
-                "6. If information is insufficient to distill a skill, output operation=\"NONE\" and explain why in rationale.\n\n"
-                "Output schema:\n"
+                "你是 FeedbackSkillDistiller。你将收到任务段、整体用户反馈，"
+                "以及用户对一个或多个 trace 面板的局部反馈。\n\n"
+                "目标：将反馈蒸馏为可复用 skill 草稿，指导 agent 处理类似任务/trace 模式。\n\n"
+                "当输入中 feedbackContext.traceKind=\"feedback\" 时，这是分析器 trace 的反馈蒸馏变体；"
+                "selectedPanels 仅含用户选中的面板 trace — 不要分析未选中的面板。\n\n"
+                "要求：\n"
+                "1. 仅输出 JSON；无 Markdown、说明或代码围栏。\n"
+                "2. skill_name 使用 kebab-case，简短稳定。\n"
+                "3. description 描述触发场景；不要仅复述任务 id。\n"
+                "4. steps 须为可执行的行为规则。\n"
+                "5. trace_anchors 应引用输入中的 subtaskIndex/actionKey/messageId 等，说明反馈来源。\n"
+                "6. 若信息不足以蒸馏 skill，输出 operation=\"NONE\" 并在 rationale 中说明原因。\n\n"
+                "输出 schema：\n"
                 "{\n"
                 "  \"operation\": \"CREATE\" | \"UPDATE\" | \"NONE\",\n"
                 "  \"skill_name\": \"string\",\n"
@@ -219,26 +214,26 @@ def ensure_prompt_files() -> None:
     if not error_diagnosis.exists():
         error_diagnosis.write_text(
             (
-                "You are VibeTrace Panel Analyzer. You receive a completed subtask trace. It may succeed or contain failed actions.\n\n"
-                "Goal: produce a minimal interpretation for this trace panel. If there is no error, explain in one sentence what it was for, what was done, and what was ultimately obtained. "
-                "If there is an error, give the same one-sentence process summary first, then error correction, cause analysis, and causal reasoning: where it failed, root cause, why the error occurred, and how to fix next.\n\n"
-                "Requirements:\n"
-                "1. Output JSON only; no Markdown, explanations, or code fences.\n"
-                "2. summary must be one sentence, as short as possible, in the form \"To X, performed Y, ultimately obtained Z\".\n"
-                "3. Summarize strictly from input.subtask.actions and input.errorActions; do not invent goals, results, files, pages, or errors not in the trace.\n"
-                "4. Describe overall steps without an action-by-action log; keep it concise, summarized, and readable.\n"
-                "5. Do not use unescaped ASCII double quotes inside JSON strings; when quoting the user, use guillemets, single quotes, or omit the quote.\n"
-                "6. If input.hasError=false, rootCause, causalChain, evidence, fixSuggestion must be empty string or empty array; confidence reflects trace completeness.\n"
-                "7. If input.hasError=true, reason only from evidence in the input trace; if evidence is insufficient, set confidence=\"low\".\n"
-                "8. When there is an error, distinguish surface error (e.g. tool error text) from root cause (e.g. wrong path, missing validation, concurrent subtask failure).\n"
-                "9. causalChain, evidence, and fixSuggestion are optional; fill only when the trace has clear evidence, otherwise keep empty arrays/strings to avoid verbosity.\n\n"
-                "Output schema:\n"
+                "你是 VibeTrace 面板分析器。你将收到已完成的子任务 trace，可能成功或含失败动作。\n\n"
+                "目标：为该 trace 面板生成最简解读。无错误时用一句话说明用途、做了什么、最终得到什么。"
+                "有错误时先给同样形式的一句话过程摘要，再写纠错、根因与因果：失败点、根因、为何出错、如何修复。\n\n"
+                "要求：\n"
+                "1. 仅输出 JSON；无 Markdown、说明或代码围栏。\n"
+                "2. summary 须为一句话，尽可能短，形式接近「为 X，执行了 Y，最终得到 Z」。\n"
+                "3. 严格从 input.subtask.actions 与 input.errorActions 归纳；不要编造 trace 中不存在的目标、结果、文件、页面或错误。\n"
+                "4. 描述整体步骤，不要逐动作流水账；保持简洁可读。\n"
+                "5. JSON 字符串内不要使用未转义的 ASCII 双引号；引用用户时用书名号、单引号或省略引号。\n"
+                "6. 若 input.hasError=false，rootCause、causalChain、evidence、fixSuggestion 须为空字符串或空数组；confidence 反映 trace 完整度。\n"
+                "7. 若 input.hasError=true，仅根据输入 trace 证据推理；证据不足时设 confidence=\"low\"。\n"
+                "8. 有错误时区分表面错误与根因（如路径错误、缺少校验、并发子任务失败）。\n"
+                "9. causalChain、evidence、fixSuggestion 可选；仅在有明确证据时填写，否则保持空以避免冗长。\n\n"
+                "输出 schema：\n"
                 "{\n"
-                "  \"summary\": \"One sentence: what this panel was for, what it did, and what it produced\",\n"
-                "  \"rootCause\": \"Empty when no error; root cause when there is an error\",\n"
+                "  \"summary\": \"一句话：面板用途、做了什么、产出什么\",\n"
+                "  \"rootCause\": \"无错误时为空；有错误时为根因\",\n"
                 "  \"causalChain\": [],\n"
                 "  \"evidence\": [],\n"
-                "  \"fixSuggestion\": \"Empty when no error; next-step suggestion when there is an error\",\n"
+                "  \"fixSuggestion\": \"无错误时为空；有错误时为下一步建议\",\n"
                 "  \"confidence\": \"high\" | \"medium\" | \"low\"\n"
                 "}\n\n"
                 "input:\n{{ERROR_DIAGNOSIS_INPUT_JSON}}\n"
@@ -248,10 +243,10 @@ def ensure_prompt_files() -> None:
     if not writer.exists():
         writer.write_text(
             (
-                "You are SkillWriter.\n"
-                "- CREATE: create a skill directory under SKILL_WRITE_ROOT/<skill_name>/\n"
-                "- UPDATE: read source_skill_bundle first, then rewrite\n"
-                "- NONE: skip\n"
+                "你是 SkillWriter。\n"
+                "- CREATE：在 SKILL_WRITE_ROOT/<skill_name>/ 下创建 skill 目录\n"
+                "- UPDATE：先读取 source_skill_bundle，再重写\n"
+                "- NONE：跳过\n"
             ),
             encoding="utf-8",
         )
@@ -658,6 +653,7 @@ def run_task_switch_judge(
         "00a-task-switch",
         directory=directory,
         parent_session_id=None,
+        retry_with_new_session=True,
     )
     parsed = _parse_task_switch_decision(
         str(llm_out.get("rawText") or ""),
@@ -2115,12 +2111,8 @@ def distill_feedback_skill(payload: dict[str, Any]) -> dict[str, Any]:
             "02a-feedback-distiller",
             directory=directory,
             parent_session_id=parent_session_id,
-            retry_in_session_on_timeout=True,
+            retry_with_new_session=True,
             max_attempts=MW_ANALYZER_SESSION_ATTEMPTS,
-            retry_prompt=(
-                "The previous reply did not complete or was not parseable. Continue in this same session: "
-                "finish the feedback distillation and output the JSON object only, with no extra prose."
-            ),
         )
     except Exception as e:
         append_log(log_file, "feedback_distill.llm.failed", {"error": str(e)})
@@ -2829,12 +2821,8 @@ def run_error_diagnosis_for_trace(
                 "03-error-diagnosis",
                 directory=effective_directory,
                 parent_session_id=parent_session_id or session_id,
-                retry_in_session_on_timeout=True,
+                retry_with_new_session=True,
                 max_attempts=MW_ANALYZER_SESSION_ATTEMPTS,
-                retry_prompt=(
-                    "The previous reply did not complete or was not parseable. Continue in this same session: "
-                    "finish the trace panel analysis and output the JSON object only, with no extra prose."
-                ),
             )
             write_json(run_dir / "04-error-diagnosis-raw.json", llm_out)
             parsed = try_parse_json_value(str(llm_out.get("rawText") or ""))
@@ -4196,88 +4184,89 @@ def opencode_generate_text(
     directory: str | None = None,
     parent_session_id: str | None = None,
     *,
-    retry_in_session_on_timeout: bool = False,
+    retry_with_new_session: bool = False,
     max_attempts: int | None = None,
+    # Deprecated aliases kept so older call sites / hot-reload don't break mid-edit.
+    retry_in_session_on_timeout: bool | None = None,
     retry_prompt: str | None = None,
 ) -> dict[str, Any]:
-    attempts_limit = max_attempts if max_attempts is not None else (MW_ANALYZER_SESSION_ATTEMPTS if retry_in_session_on_timeout else 1)
-    continue_prompt = (retry_prompt or ANALYZER_IN_SESSION_RETRY_PROMPT).strip()
-
-    append_log(log_file, f"{phase}.session.create.start", {})
-    session = opencode_create_session(
-        directory=directory,
-        parent_session_id=parent_session_id,
-        internal_label=phase,
-    )
-    write_json(run_dir / f"{phase}-session.json", session)
-    session_id = str(session.get("id") or "")
-    append_log(
-        log_file,
-        f"{phase}.session.create.ok",
-        {
-            "sessionID": session_id,
-            "directory": directory or OPENCODE_DIRECTORY,
-            "parentSessionID": parent_session_id or "",
-            "maxAttempts": attempts_limit,
-            "messageTimeoutSec": MW_OPENCODE_MESSAGE_TIMEOUT_SEC,
-            "waitStopTimeoutSec": MW_ANALYZER_WAIT_PER_ATTEMPT_SEC,
-        },
+    del retry_prompt  # new-session retries always resend the original prompt
+    if retry_in_session_on_timeout is not None:
+        retry_with_new_session = bool(retry_in_session_on_timeout)
+    attempts_limit = (
+        max_attempts
+        if max_attempts is not None
+        else (MW_ANALYZER_SESSION_ATTEMPTS if retry_with_new_session else 1)
     )
 
-    last_timeout: RuntimeError | None = None
+    last_error: Exception | None = None
     assistant: dict[str, Any] | None = None
+    session: dict[str, Any] | None = None
 
     for attempt in range(1, attempts_limit + 1):
-        before_ids = _assistant_message_ids(opencode_get_messages(session_id, directory=directory))
-        user_text = prompt if attempt == 1 else continue_prompt
+        append_log(
+            log_file,
+            f"{phase}.session.create.start",
+            {"attempt": attempt, "maxAttempts": attempts_limit, "isRetry": attempt > 1},
+        )
+        session = opencode_create_session(
+            directory=directory,
+            parent_session_id=parent_session_id,
+            internal_label=phase if attempt == 1 else f"{phase}-retry{attempt}",
+        )
+        session_id = str(session.get("id") or "")
+        write_json(run_dir / f"{phase}-session.json", session)
+        if attempt > 1:
+            write_json(run_dir / f"{phase}-session-attempt{attempt}.json", session)
+        append_log(
+            log_file,
+            f"{phase}.session.create.ok",
+            {
+                "sessionID": session_id,
+                "directory": directory or OPENCODE_DIRECTORY,
+                "parentSessionID": parent_session_id or "",
+                "attempt": attempt,
+                "maxAttempts": attempts_limit,
+                "messageTimeoutSec": MW_OPENCODE_MESSAGE_TIMEOUT_SEC,
+                "waitStopTimeoutSec": MW_ANALYZER_WAIT_PER_ATTEMPT_SEC,
+            },
+        )
         append_log(
             log_file,
             f"{phase}.attempt.start",
-            {"attempt": attempt, "maxAttempts": attempts_limit, "isRetry": attempt > 1},
+            {"attempt": attempt, "maxAttempts": attempts_limit, "isRetry": attempt > 1, "sessionID": session_id},
         )
+
         try:
-            opencode_send_message(session_id, user_text, directory=directory)
-        except RuntimeError as e:
-            append_log(
-                log_file,
-                f"{phase}.message.send.failed",
-                {
-                    "sessionID": session_id,
-                    "attempt": attempt,
-                    "error": str(e),
-                    "messageTimeoutSec": MW_OPENCODE_MESSAGE_TIMEOUT_SEC,
-                },
-            )
-            raise RuntimeError(
-                f"{phase} message send failed (HTTP wait up to {MW_OPENCODE_MESSAGE_TIMEOUT_SEC}s): {e}"
-            ) from e
-        append_log(log_file, f"{phase}.message.send.ok", {"sessionID": session_id, "attempt": attempt})
-        try:
+            before_ids = _assistant_message_ids(opencode_get_messages(session_id, directory=directory))
+            opencode_send_message(session_id, prompt, directory=directory)
+            append_log(log_file, f"{phase}.message.send.ok", {"sessionID": session_id, "attempt": attempt})
             assistant = wait_assistant_stop_message(session_id, before_ids, directory=directory)
             append_log(log_file, f"{phase}.wait.stop.ok", {"sessionID": session_id, "attempt": attempt})
             break
         except RuntimeError as e:
-            if "timeout" not in str(e).lower():
-                raise
-            last_timeout = e
+            last_error = e
+            can_retry = retry_with_new_session and attempt < attempts_limit
             append_log(
                 log_file,
-                f"{phase}.wait.timeout",
+                f"{phase}.attempt.failed",
                 {
                     "sessionID": session_id,
                     "attempt": attempt,
+                    "maxAttempts": attempts_limit,
+                    "error": str(e),
+                    "willRetryWithNewSession": can_retry,
                     "waitStopTimeoutSec": MW_ANALYZER_WAIT_PER_ATTEMPT_SEC,
-                    "willRetryInSession": retry_in_session_on_timeout and attempt < attempts_limit,
+                    "messageTimeoutSec": MW_OPENCODE_MESSAGE_TIMEOUT_SEC,
                 },
             )
-            if not retry_in_session_on_timeout or attempt >= attempts_limit:
+            if not can_retry:
                 raise RuntimeError(
-                    f"{phase} wait for assistant stop timed out after {MW_ANALYZER_WAIT_PER_ATTEMPT_SEC}s "
-                    f"({attempts_limit} attempt(s) exhausted)"
+                    f"{phase} failed after {attempt} attempt(s): {e}"
                 ) from e
 
-    if assistant is None:
-        raise last_timeout or RuntimeError("timeout waiting assistant stop message")
+    if assistant is None or session is None:
+        raise last_error or RuntimeError(f"{phase} failed with no assistant response")
 
     write_json(run_dir / f"{phase}-assistant-message.json", assistant)
     raw_text = extract_assistant_text(assistant)
@@ -4592,8 +4581,8 @@ def run_writer(
         }
         writer_llm_prompt = (
             f"{writer_prompt}\n\n"
-            "Execute the real changes now. Operate only under target_root. When done, output the agreed JSON.\n\n"
-            f"Input:\n{json.dumps(writer_input, ensure_ascii=False, indent=2)}"
+            "现在执行真实变更。仅在 target_root 下操作。完成后输出约定的 JSON。\n\n"
+            f"输入：\n{json.dumps(writer_input, ensure_ascii=False, indent=2)}"
         )
         try:
             llm_out = opencode_generate_text(
@@ -4717,7 +4706,7 @@ def run_analyzer(
         "03a-analyzer",
         directory=directory,
         parent_session_id=parent_session_id,
-        retry_in_session_on_timeout=True,
+        retry_with_new_session=True,
         max_attempts=MW_ANALYZER_SESSION_ATTEMPTS,
     )
     raw_text = llm_out["rawText"]
@@ -4915,13 +4904,24 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
+        """Write a JSON response. Client disconnect mid-write is logged, not raised.
+
+        Long /ingest-trace handlers (sync error-diagnosis) often outlive the browser
+        or Vite proxy; the work may already be done when BrokenPipe happens.
+        """
         payload = json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(status)
-        self._set_common_headers()
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(status)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+            print(
+                f"[memory-worker] client disconnected while sending HTTP {status} "
+                f"({type(e).__name__}); response body dropped"
+            )
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type RefObject } from 'react'
+import { useState, useEffect, useMemo, useRef, type RefObject } from 'react'
 import type { OcMessage, OcPendingQuestionRequest, OcTodo } from '../types/opencode'
 import type { CanonicalTodo, LatestTodowriteBatchProgress } from '../utils/todoRegistry'
 import MessageBubble from './MessageBubble'
@@ -139,6 +139,19 @@ export default function MessagePanel({
         .filter((marker): marker is ScrollNodeMarker => marker != null),
     [messages],
   )
+
+  /** Jump to latest turn after session load — mw-internal prompts are huge and bury the answer at the top. */
+  const wasLoadingRef = useRef(loading)
+  useEffect(() => {
+    const finishedLoad = wasLoadingRef.current && !loading
+    wasLoadingRef.current = loading
+    if (!finishedLoad || !sessionId || messages.length === 0) return
+    const el = messageListScrollRef?.current
+    if (!el) return
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight
+    })
+  }, [loading, sessionId, messages.length, messageListScrollRef])
 
   return (
     <div

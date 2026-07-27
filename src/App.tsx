@@ -842,11 +842,23 @@ function App() {
     })
 
     const preferred = nextTabs.find((tab) => tab.status === 'pending') ?? nextTabs[nextTabs.length - 1]
+    const taskSwitched = isTaskSwitchedIngestResult(result)
     if (preferred) {
-      setActiveTaskSegmentBySessionId((prev) => {
-        if (taskSegmentManuallySelectedBySessionId[sessionId] && prev[sessionId]) return prev
-        return { ...prev, [sessionId]: preferred.id }
-      })
+      if (taskSwitched) {
+        // New task tab just appeared — follow it even if the user had pinned an older tab.
+        setTaskSegmentManuallySelectedBySessionId((prev) => {
+          if (!prev[sessionId]) return prev
+          const next = { ...prev }
+          delete next[sessionId]
+          return next
+        })
+        setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [sessionId]: preferred.id }))
+      } else {
+        setActiveTaskSegmentBySessionId((prev) => {
+          if (taskSegmentManuallySelectedBySessionId[sessionId] && prev[sessionId]) return prev
+          return { ...prev, [sessionId]: preferred.id }
+        })
+      }
     }
     console.info('[VibeTrace][task-segments applied]', {
       sessionId,
@@ -1362,7 +1374,13 @@ function App() {
     if (!activeTaskSegment) return visibleSubtasks
     const activeSegmentIndex = taskSegmentsForActiveSession.findIndex((tab) => tab.id === activeTaskSegment.id)
     const priorTabs = activeSegmentIndex > 0 ? taskSegmentsForActiveSession.slice(0, activeSegmentIndex) : []
-    const range = resolveTaskSegmentMessageRange(activeTaskSegment, messages, priorTabs)
+    const isLatestTab =
+      activeSegmentIndex >= 0 && activeSegmentIndex === taskSegmentsForActiveSession.length - 1
+    const range = resolveTaskSegmentMessageRange(activeTaskSegment, messages, priorTabs, {
+      // While task-switch is deciding, keep showing new turns on the latest tab;
+      // when a new pending tab appears, applyMemoryWorker moves focus there.
+      extendToLiveEnd: isLatestTab,
+    })
     if (!range) return []
     const { startIndex, endIndex } = range
     return visibleSubtasks.filter(({ subtask }) => {

@@ -134,10 +134,16 @@ export default function MessageBubble({
   )
 }
 
+const LONG_USER_MESSAGE_CHARS = 1200
+
 function UserMessage({ message }: { message: OcMessage }) {
   const content = userMessageBodyForDisplay(message)
   const [showCopy, setShowCopy] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const isLong = content.length > LONG_USER_MESSAGE_CHARS
+  const displayContent =
+    isLong && !expanded ? `${content.slice(0, LONG_USER_MESSAGE_CHARS).trimEnd()}…` : content
 
   const handleCopy = () => {
     navigator.clipboard.writeText(content).then(() => {
@@ -163,9 +169,29 @@ function UserMessage({ message }: { message: OcMessage }) {
           lineHeight: 1.5,
           color: '#333',
           wordBreak: 'break-word',
+          whiteSpace: 'pre-wrap',
         }}
       >
-        {content || <span style={{ color: '#BBB' }}>No text payload</span>}
+        {displayContent || <span style={{ color: '#BBB' }}>No text payload</span>}
+        {isLong ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            style={{
+              display: 'block',
+              marginTop: 6,
+              padding: 0,
+              border: 'none',
+              background: 'transparent',
+              color: '#8445BC',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            {expanded ? 'Show less' : `Show more (${content.length.toLocaleString()} chars)`}
+          </button>
+        ) : null}
       </div>
       {/* Copy button */}
       {showCopy && (
@@ -192,7 +218,11 @@ function UserMessage({ message }: { message: OcMessage }) {
 }
 
 function AgentInfo({ info }: { info: OcMessageInfo }) {
-  const modelName = info.model?.modelID || null
+  const flatModelId =
+    typeof (info as OcMessageInfo & { modelID?: unknown }).modelID === 'string'
+      ? String((info as OcMessageInfo & { modelID?: string }).modelID)
+      : null
+  const modelName = info.model?.modelID || flatModelId || null
   const totalTokens = info.tokens?.total || null
 
   let duration: string | null = null

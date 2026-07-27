@@ -49,12 +49,12 @@ function isMemoryWorkerPipelineSession(
   return isMemoryWorkerInternalSession(session)
 }
 
-/** Hide memory_worker background sessions from sidebar history. */
+/** Keep memory_worker background sessions visible in sidebar history (still skip trace ingest to avoid loops). */
 export function shouldHideSessionFromHistory(
-  sessionId: string,
-  session: Pick<OcSession, 'id' | 'title'> | null | undefined,
+  _sessionId: string,
+  _session: Pick<OcSession, 'id' | 'title'> | null | undefined,
 ): boolean {
-  return isMemoryWorkerPipelineSession(sessionId, session)
+  return false
 }
 
 export function shouldSkipTraceIngestForSession(

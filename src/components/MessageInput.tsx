@@ -54,6 +54,8 @@ export default function MessageInput({
   const [attachError, setAttachError] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  /** Tracks IME composition; Mac CJK IMEs sometimes clear isComposing before keydown. */
+  const isComposingRef = useRef(false)
 
   useLayoutEffect(() => {
     const el = taRef.current
@@ -114,11 +116,13 @@ export default function MessageInput({
     }
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      void handleSend()
-    }
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Enter' || e.shiftKey) return
+    // Skip IME confirm/select Enter (common on Mac Chinese/Japanese IMEs).
+    // keyCode 229 = legacy "IME processing" signal still used by some browsers.
+    if (e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229) return
+    e.preventDefault()
+    void handleSend()
   }
 
   const onPickFiles = () => {
@@ -152,6 +156,12 @@ export default function MessageInput({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
+          onCompositionStart={() => {
+            isComposingRef.current = true
+          }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false
+          }}
           placeholder="Ask something…"
           disabled={disabled || sending}
           rows={MIN_ROWS}

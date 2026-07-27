@@ -163,11 +163,16 @@ export type TaskSegmentMessageRange = {
 /**
  * Resolve the message index window for a task tab against the live session timeline.
  * Falls back gracefully when fork truncation removed the original tab end marker.
+ *
+ * `extendToLiveEnd`: keep the chronologically latest tab open through the newest
+ * messages so the right-rail trajectory stays live while task-switch is still deciding
+ * (and before a new pending tab exists). Pending/provisional tabs always extend.
  */
 export function resolveTaskSegmentMessageRange(
   tab: TaskSegmentTab,
   messages: OcMessage[],
   priorTabs: TaskSegmentTab[],
+  options?: { extendToLiveEnd?: boolean },
 ): TaskSegmentMessageRange | null {
   if (messages.length === 0) return null
 
@@ -191,9 +196,13 @@ export function resolveTaskSegmentMessageRange(
     ? messageIndexById(messages, tab.toEndAssistantMessageId)
     : -1
 
+  const openEnded =
+    tab.status === 'pending' || tab.provisional || Boolean(options?.extendToLiveEnd)
+
   let endIndex: number
-  if (tab.status === 'pending' || tab.provisional) {
-    endIndex = explicitEndIndex >= 0 ? explicitEndIndex : messages.length - 1
+  if (openEnded) {
+    // Always follow the live timeline — do not clip at a stale toEndAssistantMessageId.
+    endIndex = messages.length - 1
   } else if (explicitEndIndex >= 0) {
     endIndex = explicitEndIndex
   } else {

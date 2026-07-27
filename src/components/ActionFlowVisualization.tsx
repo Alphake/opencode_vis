@@ -5,7 +5,6 @@ import { Tooltip } from 'react-tooltip'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
 import { buildCompactMappedActionTooltipHtml } from '../utils/actionTooltipMapping'
-import type { TooltipTranslateFn } from '../utils/tooltipTranslate'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import {
   type ActionTypePaletteId,
@@ -354,24 +353,19 @@ export type FlowEndSummary = {
 function flowEndDiagnosisList(
   items: string[] | undefined,
   esc: (s: string) => string,
-  translate?: TooltipTranslateFn,
 ): string {
   const values = (items ?? []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 4)
   if (values.length === 0) return ''
   return values
-    .map((x) => {
-      const text = translate ? translate(x) : x
-      return `<div style="font-size:11px;line-height:1.45;color:#4B5563;margin-top:3px;">• ${esc(text)}</div>`
-    })
+    .map((x) => `<div style="font-size:11px;line-height:1.45;color:#4B5563;margin-top:3px;">• ${esc(x)}</div>`)
     .join('')
 }
 
 function buildFlowEndDiagnosisHtml(
   item: MemoryWorkerErrorDiagnosis | undefined,
   esc: (s: string) => string,
-  translate?: TooltipTranslateFn,
 ): string {
-  const t = (s: string) => esc(translate ? translate(s) : s)
+  const t = (s: string) => esc(s)
   if (!item) return ''
   if (item.status === 'running') {
     return `<div style="border-top:1px solid #D0E2FF;margin-top:10px;padding-top:10px;">
@@ -392,8 +386,8 @@ ${item.runDir ? `<div style="font-size:10px;line-height:1.4;color:#9A3412;margin
   const d = item.diagnosis
   if (!d) return ''
   const confidence = d.confidence ? String(d.confidence) : 'unknown'
-  const causal = flowEndDiagnosisList(d.causalChain, esc, translate)
-  const evidence = flowEndDiagnosisList(d.evidence, esc, translate)
+  const causal = flowEndDiagnosisList(d.causalChain, esc)
+  const evidence = flowEndDiagnosisList(d.evidence, esc)
   const borderColor = hasError ? '#F1D0BC' : '#D0E2FF'
   const headingColor = hasError ? '#B45309' : '#1D4ED8'
   const bodyColor = hasError ? '#7A2E0E' : '#374151'
@@ -415,9 +409,9 @@ function buildFlowEndPlaceholderHtml(esc: (s: string) => string): string {
 </div>`
 }
 
-function buildFlowEndTooltipHtml(s: FlowEndSummary, translate?: TooltipTranslateFn): string {
+function buildFlowEndTooltipHtml(s: FlowEndSummary): string {
   const esc = escapeHtml
-  const diagnosis = buildFlowEndDiagnosisHtml(s.errorDiagnosis, esc, translate)
+  const diagnosis = buildFlowEndDiagnosisHtml(s.errorDiagnosis, esc)
   const body = diagnosis || buildFlowEndPlaceholderHtml(esc)
 
   return `<div class="action-tip-root action-tip-root--compact" style="text-align:left;max-width:min(440px,92vw);">
@@ -1351,7 +1345,6 @@ interface Props {
   forkAnchorActionKey?: string | null
   /** Palette id when `colorMode === 'type'` */
   actionTypePaletteId?: ActionTypePaletteId
-  tooltipTranslate?: TooltipTranslateFn
 }
 
 export default function ActionFlowVisualization({
@@ -1379,7 +1372,6 @@ export default function ActionFlowVisualization({
   onSelectAction,
   forkAnchorActionKey = null,
   actionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID,
-  tooltipTranslate,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -1803,7 +1795,7 @@ export default function ActionFlowVisualization({
         const fill = isGhostEnd ? '#E8E8E8' : actionFlowPalette.end.fill
         const stroke = isGhostEnd ? '#BFBFBF' : actionFlowPalette.end.stroke
         const endSummary = isGhostEnd ? ghostFlowEndSummary : flowEndSummary
-        const endTip = endSummary ? buildFlowEndTooltipHtml(endSummary, tooltipTranslate) : ''
+        const endTip = endSummary ? buildFlowEndTooltipHtml(endSummary) : ''
         const circle = content
           .append('circle')
           .attr('cx', nx + w / 2)
@@ -1884,9 +1876,7 @@ export default function ActionFlowVisualization({
          */
         .attr('pointer-events', 'all')
         .attr('data-tooltip-id', tooltipId)
-        .attr('data-tooltip-html', buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs, {
-          translate: tooltipTranslate,
-        }))
+        .attr('data-tooltip-html', buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs))
         .attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
       if (onSelectAction) {
         actionTarget.on('click', (ev: MouseEvent) => {
@@ -2253,7 +2243,6 @@ export default function ActionFlowVisualization({
     ghostFlowEndSummary,
     embedded,
     viewportMaxHeight,
-    tooltipTranslate,
   ])
 
   /**
