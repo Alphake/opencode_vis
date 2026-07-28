@@ -30,6 +30,13 @@ import {
 import { stripHarnessGuidanceForDisplay } from '../config/harnessGuidance'
 import { experimentTelemetry } from '../experiment/telemetry'
 
+/** Skill row in the session-scoped Skill Panel (may come from any task tab). */
+type SessionSkillRecord = TaskSkillRecord & { taskId: string }
+
+function skillRecordMarker(skill: Pick<TaskSkillRecord, 'skillPath' | 'skillName' | 'feedbackRunDir'>): string {
+  return String(skill.skillPath || skill.skillName || skill.feedbackRunDir || '').trim()
+}
+
 export type SubtaskTaskTab = {
   id: string
   status: 'pending' | 'extracted'
@@ -181,6 +188,8 @@ interface SubtaskDebugPanelProps {
   onSelectTaskTab?: (id: string) => void
   sessionId?: string
   errorDiagnosisBySubtaskId?: Record<string, MemoryWorkerErrorDiagnosis>
+  /** First time a subtask card scrolls into view (≥35% visible). */
+  onPanelBecameVisible?: (subtaskId: string) => void
 }
 
 export default function SubtaskDebugPanel({
@@ -201,11 +210,13 @@ export default function SubtaskDebugPanel({
   onSelectTaskTab,
   sessionId,
   errorDiagnosisBySubtaskId = {},
+  onPanelBecameVisible,
 }: SubtaskDebugPanelProps) {
   const summaryTooltipSafeId = useId().replace(/:/g, '')
   const summaryTooltipId = `subtask-summary-tip-${summaryTooltipSafeId}`
   const [tooltipMounted, setTooltipMounted] = useState(false)
   const pendingSummaryTipRef = useRef(false)
+  const pendingSummarySubtaskIdRef = useRef<string | null>(null)
   const [colorBy, setColorBy] = useState<'tokens' | 'type'>('type')
   const [legendExpanded, setLegendExpanded] = useState(false)
   const [skillsByTaskId, setSkillsByTaskId] = useState<Record<string, TaskSkillRecord[]>>({})
@@ -215,7 +226,7 @@ export default function SubtaskDebugPanel({
   const [skillErrorByTaskId, setSkillErrorByTaskId] = useState<Record<string, string>>({})
   const [skillComment, setSkillComment] = useState('')
   const [feedbackMode, setFeedbackMode] = useState(false)
-  const [selectedSkillRecord, setSelectedSkillRecord] = useState<TaskSkillRecord | null>(null)
+  const [selectedSkillRecord, setSelectedSkillRecord] = useState<SessionSkillRecord | null>(null)
   const [selectedSkillDetail, setSelectedSkillDetail] = useState<TaskSkillDetailResult | null>(null)
   const [skillDetailLoading, setSkillDetailLoading] = useState(false)
   const [skillDetailError, setSkillDetailError] = useState('')
@@ -232,6 +243,27 @@ export default function SubtaskDebugPanel({
   const actionTypePaletteId: ActionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID
   const [childSessionMessages, setChildSessionMessages] = useState<Record<string, OcMessage[]>>({})
   const summaryViewportRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!onPanelBecameVisible) return
+    const root = flowLayoutMode === 'summary' ? summaryViewportRef.current : listScrollRef?.current
+    if (!root) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting || entry.intersectionRatio < 0.35) continue
+          const id = (entry.target as HTMLElement).dataset.subtaskPanelId
+          if (id) onPanelBecameVisible(id)
+        }
+      },
+      { root: flowLayoutMode === 'summary' ? null : root, threshold: [0, 0.35, 0.5] },
+    )
+
+    const nodes = root.querySelectorAll('[data-subtask-panel-id]')
+    nodes.forEach((node) => observer.observe(node))
+    return () => observer.disconnect()
+  }, [visibleSubtasks, flowLayoutMode, onPanelBecameVisible, listScrollRef])
   const [summaryViewportSize, setSummaryViewportSize] = useState({ width: 0, height: 0 })
   const displayTaskTabs =
     taskTabs.length > 0
@@ -250,11 +282,44 @@ export default function SubtaskDebugPanel({
     : 0
   const activeDisplayTaskLabel = `Task ${activeDisplayTaskIndex + 1}`
   const activeTaskId = activeDisplayTask?.id ?? ''
-  const activeSkills = activeTaskId ? skillsByTaskId[activeTaskId] ?? [] : []
-  const activeSkillStatus = activeTaskId ? skillStatusByTaskId[activeTaskId] ?? 'none' : 'none'
-  const activeSkillDiscoveredCount = activeTaskId ? skillDiscoveredCountByTaskId[activeTaskId] ?? 0 : 0
-  const activeSkillLoading = activeTaskId ? Boolean(skillLoadingByTaskId[activeTaskId]) : false
-  const activeSkillError = activeTaskId ? skillErrorByTaskId[activeTaskId] : undefined
+  const sessionTaskIds = useMemo(
+    () => displayTaskTabs.map((tab) => tab.id).filter((id) => Boolean(id) && id !== 'task-1-live'),
+    [displayTaskTabs],
+  )
+  const sessionTaskIdsKey = sessionTaskIds.join('|')
+  const sessionSkills = useMemo<SessionSkillRecord[]>(() => {
+    const out: SessionSkillRecord[] = []
+    const seen = new Set<string>()
+    for (const taskId of sessionTaskIds) {
+      for (const skill of skillsByTaskId[taskId] ?? []) {
+        const marker = skillRecordMarker(skill)
+        if (marker && seen.has(marker)) continue
+        if (marker) seen.add(marker)
+        out.push({ ...skill, taskId })
+      }
+    }
+    return out.sort((a, b) => {
+      const at = Date.parse(a.createdAt || '') || 0
+      const bt = Date.parse(b.createdAt || '') || 0
+      return bt - at
+    })
+  }, [sessionTaskIds, skillsByTaskId])
+  const sessionSkillLoading = sessionTaskIds.some((taskId) => Boolean(skillLoadingByTaskId[taskId]))
+  const sessionSkillStatus = useMemo(() => {
+    if (sessionTaskIds.length === 0) return 'none'
+    const statuses = sessionTaskIds.map((taskId) => skillStatusByTaskId[taskId] ?? 'none')
+    if (statuses.some((s) => s === 'distilling') || sessionSkillLoading) return 'distilling'
+    if (sessionSkills.length > 0 || statuses.some((s) => s === 'ready')) return 'ready'
+    if (statuses.some((s) => s === 'error')) return 'error'
+    return 'none'
+  }, [sessionTaskIds, skillStatusByTaskId, sessionSkillLoading, sessionSkills.length])
+  const sessionSkillDiscoveredCount = sessionTaskIds.reduce(
+    (sum, taskId) => sum + (skillDiscoveredCountByTaskId[taskId] ?? 0),
+    0,
+  )
+  const sessionSkillError = sessionTaskIds
+    .map((taskId) => skillErrorByTaskId[taskId])
+    .find((err) => Boolean(err))
   const canShowSkillDock = Boolean(
     activeDisplayTask && (activeDisplayTask.turnCount > 0 || visibleSubtasks.length > 0),
   )
@@ -281,39 +346,83 @@ export default function SubtaskDebugPanel({
     setEditingFeedbackSubtaskIndex(null)
     setDraftPanelFeedback('')
     setSkillComment('')
+  }, [activeTaskId])
+
+  useEffect(() => {
     setSelectedSkillRecord(null)
     setSelectedSkillDetail(null)
     setSkillDetailError('')
     setCopiedSkillPath(false)
-  }, [activeTaskId])
+    setSkillsByTaskId({})
+    setSkillStatusByTaskId({})
+    setSkillDiscoveredCountByTaskId({})
+    setSkillLoadingByTaskId({})
+    setSkillErrorByTaskId({})
+  }, [sessionId])
 
   useEffect(() => {
-    if (!canShowSkillDock || !sessionId || !activeTaskId || activeTaskId === 'task-1-live') return
+    if (!canShowSkillDock || !sessionId || sessionTaskIds.length === 0) return
     let cancelled = false
-    setSkillLoadingByTaskId((prev) => ({ ...prev, [activeTaskId]: true }))
-    setSkillErrorByTaskId((prev) => ({ ...prev, [activeTaskId]: '' }))
-    void fetchTaskSkills(sessionId, activeTaskId, sessionDirectory)
-      .then((result) => {
-        if (cancelled) return
-        setSkillsByTaskId((prev) => ({ ...prev, [activeTaskId]: result.skills ?? [] }))
-        setSkillStatusByTaskId((prev) => ({ ...prev, [activeTaskId]: result.status || 'none' }))
-        setSkillDiscoveredCountByTaskId((prev) => ({ ...prev, [activeTaskId]: result.discoveredCount ?? 0 }))
+    const taskIds = [...sessionTaskIds]
+    for (const taskId of taskIds) {
+      setSkillLoadingByTaskId((prev) => ({ ...prev, [taskId]: true }))
+      setSkillErrorByTaskId((prev) => ({ ...prev, [taskId]: '' }))
+    }
+    void Promise.all(
+      taskIds.map(async (taskId) => {
+        try {
+          const result = await fetchTaskSkills(sessionId, taskId, sessionDirectory)
+          return { taskId, result, error: null as string | null }
+        } catch (err: unknown) {
+          return {
+            taskId,
+            result: null,
+            error: err instanceof Error ? err.message : String(err),
+          }
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return
+      setSkillsByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          if (entry.result) next[entry.taskId] = entry.result.skills ?? []
+        }
+        return next
       })
-      .catch((err: unknown) => {
-        if (cancelled) return
-        setSkillErrorByTaskId((prev) => ({
-          ...prev,
-          [activeTaskId]: err instanceof Error ? err.message : String(err),
-        }))
+      setSkillStatusByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          next[entry.taskId] = entry.result?.status || (entry.error ? 'error' : 'none')
+        }
+        return next
       })
-      .finally(() => {
-        if (cancelled) return
-        setSkillLoadingByTaskId((prev) => ({ ...prev, [activeTaskId]: false }))
+      setSkillDiscoveredCountByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          next[entry.taskId] = entry.result?.discoveredCount ?? 0
+        }
+        return next
       })
+      setSkillErrorByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          next[entry.taskId] = entry.error || ''
+        }
+        return next
+      })
+      setSkillLoadingByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          next[entry.taskId] = false
+        }
+        return next
+      })
+    })
     return () => {
       cancelled = true
     }
-  }, [activeTaskId, canShowSkillDock, sessionDirectory, sessionId])
+  }, [canShowSkillDock, sessionDirectory, sessionId, sessionTaskIdsKey])
 
   const summarySegments = useMemo(
     () =>
@@ -564,7 +673,13 @@ export default function SubtaskDebugPanel({
     ? 'Please select at least one panel'
     : 'Describe your feedback on the selected execution trace — what worked, what failed, or what should change'
   const distillButtonDisabled =
-    activeSkillLoading || !sessionId || !activeTaskId || !canDistillFeedback
+    sessionSkillLoading || !sessionId || !activeTaskId || !canDistillFeedback
+  const selectAllFeedbackPanels = () => {
+    setSelectedFeedbackSubtaskIndices(visibleSubtasks.map(({ sourceIndex }) => sourceIndex))
+  }
+  const deselectAllFeedbackPanels = () => {
+    setSelectedFeedbackSubtaskIndices([])
+  }
   const openPanelFeedbackEditor = (sourceIndex: number) => {
     setFeedbackMode(true)
     setSelectedFeedbackSubtaskIndices((prev) =>
@@ -610,7 +725,7 @@ export default function SubtaskDebugPanel({
               row.childDescriptors.flatMap((d) => childSessionMessages[d.childSessionID] ?? []),
             )
             return (
-              <div key={`${row.subtaskId}:${row.sourceIndex}:${row.rowIndex}`}>
+              <div key={`${row.subtaskId}:${row.sourceIndex}:${row.rowIndex}`} data-subtask-panel-id={row.subtaskId}>
                 <div
                   style={{
                     display: 'flex',
@@ -658,6 +773,8 @@ export default function SubtaskDebugPanel({
                             data-vt-tip="action"
                             onMouseEnter={() => {
                               pendingSummaryTipRef.current = true
+                              pendingSummarySubtaskIdRef.current = row.subtaskId
+                              experimentTelemetry.onPanelView(row.subtaskId, sessionId, 'tooltip.summary')
                             }}
                             style={{
                               width: summaryLayout.blockWidth,
@@ -693,7 +810,11 @@ export default function SubtaskDebugPanel({
           arrowColor="#f8fafc"
           afterShow={() => {
             if (pendingSummaryTipRef.current) {
-              experimentTelemetry.onActionTooltipShow(sessionId, 'summary')
+              experimentTelemetry.onActionTooltipShow(
+                sessionId,
+                'summary',
+                pendingSummarySubtaskIdRef.current || undefined,
+              )
             }
           }}
         />
@@ -785,8 +906,8 @@ export default function SubtaskDebugPanel({
   }
 
 
-  const openSkillDetail = (skill: TaskSkillRecord) => {
-    if (!sessionId || !activeTaskId) return
+  const openSkillDetail = (skill: SessionSkillRecord) => {
+    if (!sessionId || !skill.taskId) return
     const skillKey = skill.skillPath || skill.skillName || skill.feedbackRunDir || ''
     experimentTelemetry.onSkillPanelClick(sessionId, skillKey || undefined)
     setSelectedSkillRecord(skill)
@@ -802,7 +923,7 @@ export default function SubtaskDebugPanel({
       return
     }
     setSkillDetailLoading(true)
-    void fetchTaskSkillDetail(sessionId, activeTaskId, skillKey)
+    void fetchTaskSkillDetail(sessionId, skill.taskId, skillKey)
       .then((result) => {
         setSelectedSkillDetail(result)
         setSkillMdDraft(result.skillMd || '')
@@ -844,22 +965,23 @@ export default function SubtaskDebugPanel({
 
   const saveSkillMdDraft = () => {
     const skillPath = selectedSkillRecord?.skillPath || ''
+    const skillTaskId = selectedSkillRecord?.taskId || ''
     const skillKey =
       selectedSkillRecord?.skillPath ||
       selectedSkillRecord?.skillName ||
       selectedSkillRecord?.feedbackRunDir ||
       ''
-    if (!skillPath || !skillMdDraft.trim() || !sessionId || !activeTaskId || !skillKey) return
+    if (!skillPath || !skillMdDraft.trim() || !sessionId || !skillTaskId || !skillKey) return
     setSkillMdSaving(true)
     setSkillMdSaveError('')
     void saveTaskSkillMd({
       skillPath,
       content: skillMdDraft,
       sessionId,
-      taskId: activeTaskId,
+      taskId: skillTaskId,
     })
       .then(() =>
-        fetchTaskSkillDetail(sessionId, activeTaskId, skillKey).then((result) => {
+        fetchTaskSkillDetail(sessionId, skillTaskId, skillKey).then((result) => {
           setSelectedSkillDetail(result)
           setSkillMdDraft(result.skillMd || skillMdDraft)
           setSkillMdEditing(false)
@@ -1094,7 +1216,8 @@ export default function SubtaskDebugPanel({
                       <span style={{ height: 1, flex: 1, background: '#E0E0E0' }} />
                     </div>
                   ) : null}
-                  <SubtaskCard
+                  <div data-subtask-panel-id={st.subtask_id}>
+                    <SubtaskCard
                     subtask={st}
                     messages={messages}
                     displayIndex={si}
@@ -1128,6 +1251,7 @@ export default function SubtaskDebugPanel({
                     onToggleFeedbackSelection={() => toggleFeedbackPanel(sourceIndex)}
                     onOpenFeedbackComment={() => openPanelFeedbackEditor(sourceIndex)}
                   />
+                  </div>
                 </Fragment>
               )
             })
@@ -1152,18 +1276,21 @@ export default function SubtaskDebugPanel({
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexShrink: 0 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 11, fontWeight: 800, color: '#1F2937' }}>
-                Skill Panel · {activeDisplayTaskLabel}
+                Skill Panel
+              </div>
+              <div style={{ fontSize: 9, color: '#667085', marginTop: 1 }}>
+                Session skills{sessionSkills.length > 0 ? ` · ${sessionSkills.length}` : ''}
               </div>
             </div>
             <span
               style={{
                 fontSize: 9,
                 color:
-                  activeSkillStatus === 'ready'
+                  sessionSkillStatus === 'ready'
                     ? '#166534'
-                    : activeSkillStatus === 'distilling' || activeSkillLoading
+                    : sessionSkillStatus === 'distilling' || sessionSkillLoading
                     ? '#92400E'
-                    : activeSkillStatus === 'error'
+                    : sessionSkillStatus === 'error'
                     ? '#991B1B'
                     : '#8A8A8A',
                 border: '1px solid #E1E1E1',
@@ -1173,24 +1300,24 @@ export default function SubtaskDebugPanel({
                 whiteSpace: 'nowrap',
               }}
             >
-              {activeSkillLoading
+              {sessionSkillLoading
                 ? 'loading'
-                : activeSkillStatus === 'ready'
+                : sessionSkillStatus === 'ready'
                 ? 'skill ready'
-                : activeSkillStatus === 'distilling'
+                : sessionSkillStatus === 'distilling'
                 ? 'distilling'
-                : activeSkillStatus === 'error'
+                : sessionSkillStatus === 'error'
                 ? 'error'
                 : 'none'}
             </span>
           </div>
 
-          {activeSkills.length > 0 || activeSkillError || (!activeSkillLoading && activeTaskId !== 'task-1-live') ? (
+          {sessionSkills.length > 0 || sessionSkillError || (!sessionSkillLoading && sessionTaskIds.length > 0) ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minHeight: 0, maxHeight: 'min(160px, 28vh)', overflowY: 'auto' }}>
-            {activeSkills.length > 0 ? (
-              activeSkills.map((skill, idx) => (
+            {sessionSkills.length > 0 ? (
+              sessionSkills.map((skill, idx) => (
                 <button
-                  key={`${skill.skillPath || skill.skillName}:${idx}`}
+                  key={`${skill.taskId}:${skill.skillPath || skill.skillName}:${idx}`}
                   type="button"
                   onClick={() => openSkillDetail(skill)}
                   style={{
@@ -1258,7 +1385,7 @@ export default function SubtaskDebugPanel({
                   </span>
                 </button>
               ))
-            ) : activeSkillError ? (
+            ) : sessionSkillError ? (
               <div
                 style={{
                   minHeight: 32,
@@ -1271,9 +1398,9 @@ export default function SubtaskDebugPanel({
                   lineHeight: 1.35,
                 }}
               >
-                {activeSkillError}
+                {sessionSkillError}
               </div>
-            ) : !activeSkillLoading && activeTaskId !== 'task-1-live' ? (
+            ) : !sessionSkillLoading ? (
               <div
                 style={{
                   minHeight: 32,
@@ -1287,7 +1414,7 @@ export default function SubtaskDebugPanel({
                 }}
               >
                 No linked skill
-                {activeSkillDiscoveredCount > 0 ? ` (${activeSkillDiscoveredCount} discovered)` : ''}.
+                {sessionSkillDiscoveredCount > 0 ? ` (${sessionSkillDiscoveredCount} discovered)` : ''}.
               </div>
             ) : null}
           </div>
@@ -1305,46 +1432,80 @@ export default function SubtaskDebugPanel({
                   background: hasSelectedFeedbackPanels ? '#FFFFFF' : '#F8F9FB',
                 }}
               >
-                {hasSelectedFeedbackPanels ? (
-                  <div
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '5px 7px',
+                    borderBottom: '1px solid #EEF2F6',
+                    background: '#F8FAFC',
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={selectAllFeedbackPanels}
                     style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '5px 7px',
-                      borderBottom: '1px solid #EEF2F6',
-                      background: '#F8FAFC',
+                      border: '1px solid #CBD5E1',
+                      borderRadius: 999,
+                      background: '#FFFFFF',
+                      color: '#334155',
+                      padding: '2px 7px',
+                      fontSize: 9,
+                      lineHeight: '14px',
+                      fontWeight: 650,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
                     }}
                   >
-                    <span style={{ fontSize: 9, color: '#64748B', lineHeight: '16px' }}>
-                      Selected:{' '}
-                      <span style={{ fontWeight: 650, color: '#334155' }}>{feedbackScopeLabel}</span>
-                    </span>
-                    {panelsWithPanelComments.map((panel) => (
-                      <button
-                        key={panel.sourceIndex}
-                        type="button"
-                        onClick={() => openPanelFeedbackEditor(panel.sourceIndex)}
-                        title={panel.comment}
-                        style={{
-                          border: '1px solid #9AC2F8',
-                          borderRadius: 999,
-                          background: '#F0F7FF',
-                          color: '#185EA8',
-                          padding: '2px 7px',
-                          fontSize: 9,
-                          lineHeight: '14px',
-                          fontWeight: 650,
-                          cursor: 'pointer',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        Panel #{panel.sourceIndex + 1} · note
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={deselectAllFeedbackPanels}
+                    style={{
+                      border: '1px solid #CBD5E1',
+                      borderRadius: 999,
+                      background: '#FFFFFF',
+                      color: '#334155',
+                      padding: '2px 7px',
+                      fontSize: 9,
+                      lineHeight: '14px',
+                      fontWeight: 650,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    Deselect all
+                  </button>
+                  <span style={{ fontSize: 9, color: '#64748B', lineHeight: '16px' }}>
+                    Selected:{' '}
+                    <span style={{ fontWeight: 650, color: '#334155' }}>{feedbackScopeLabel}</span>
+                  </span>
+                  {panelsWithPanelComments.map((panel) => (
+                    <button
+                      key={panel.sourceIndex}
+                      type="button"
+                      onClick={() => openPanelFeedbackEditor(panel.sourceIndex)}
+                      title={panel.comment}
+                      style={{
+                        border: '1px solid #9AC2F8',
+                        borderRadius: 999,
+                        background: '#F0F7FF',
+                        color: '#185EA8',
+                        padding: '2px 7px',
+                        fontSize: 9,
+                        lineHeight: '14px',
+                        fontWeight: 650,
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Panel #{panel.sourceIndex + 1} · note
+                    </button>
+                  ))}
+                </div>
                 <textarea
                   value={skillComment}
                   onChange={(e) => setSkillComment(e.target.value)}
@@ -1421,7 +1582,7 @@ export default function SubtaskDebugPanel({
               <button
                 type="button"
                 onClick={enterFeedbackMode}
-                disabled={activeSkillLoading}
+                disabled={sessionSkillLoading}
                 style={{
                   width: '100%',
                   minHeight: 36,
@@ -1433,7 +1594,7 @@ export default function SubtaskDebugPanel({
                   fontSize: 13,
                   lineHeight: '22px',
                   fontWeight: 700,
-                  cursor: activeSkillLoading ? 'not-allowed' : 'pointer',
+                  cursor: sessionSkillLoading ? 'not-allowed' : 'pointer',
                   whiteSpace: 'nowrap',
                 }}
               >

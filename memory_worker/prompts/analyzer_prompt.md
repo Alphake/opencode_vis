@@ -51,9 +51,23 @@
 
 是否已有 skill 覆盖；有则 → `UPDATE`，无则考虑 `CREATE`。
 
-## Skill 粒度：专精与通用均可
+## Skill 粒度：倾向拆分，专精优于笼统
 
-沉淀的 skill **不必**是「通用需求分析」级别。以下粒度均有效 — 选最贴合 trace 的一种或多种：
+沉淀的 skill **不必**是「通用需求分析」级别；也**不要**把一整段大任务收成一个大 skill。**优先按工作阶段与交付物类型拆开**，同一 trace 可产出多条 skill 建议。
+
+### 优先拆分的阶段类型
+
+| 阶段 | 示例 skill 名 | 何时单独成 skill |
+|------|-----------------|-------------------|
+| **探索搜集** | `plugin-storage-survey` | 有稳定的调研步骤、信息源、对比维度 |
+| **方案规划** | `tab-switch-design-checklist` | 有选型、架构或验收标准的可复用套路 |
+| **Demo / 原型实现** | `html-chart-demo-scaffold` | 有快速搭原型的固定步骤或模板 |
+| **明确功能实现** | `fix-tab-active-state` | 某一具体功能/修复有可复用的实现或排查路径 |
+| **错误/踩坑主题** | `ingest-duplicate-trigger-debug` | 可命名的错误模式与预防检查清单 |
+
+同一任务段内若同时出现「先调研再规划再写 Demo」，应评估是否分别 `CREATE` 多条 skill，而不是一条涵盖全流程的 skill。
+
+以下粒度也有效 — 选最贴合 trace 的一种或多种：
 
 | 粒度 | 示例 |
 |------|------|
@@ -63,14 +77,14 @@
 | **错误/踩坑主题** | 「避免 Windows 路径与 opencode 目录不一致」「ingest 重复触发排查」 |
 | **通用工作流** | 「多 explore 子 agent 并行调研模板」— 仅当 trace 确实可跨场景复用 |
 
-`skill_name` 应具体、可检索；避免 `general-assistant` 等模糊名。`description` 应明确 **何时触发、解决什么问题**。
+`skill_name` 应具体、可检索；避免 `general-assistant`、`full-project-workflow` 等模糊名。`description` 应明确 **何时触发、解决什么问题、对应哪类交付物**。
 
 ## 分析方法
 
 1. **重述用户要什么**（1–2 句，仅内部推理 — 不要输出到 JSON 外）。
 2. **列出错误/死循环/重试项**（若无，写「无显著异常」）。
-3. 划分子任务；逐个子任务独立判断是否需 skill。
-4. 判断是否存在跨子任务工作流 → 可产出 `scope = "global"` 建议。
+3. 按**工作阶段**（探索搜集 / 方案规划 / Demo 实现 / 明确功能 / 错误排查）划分子任务；**每个阶段独立判断**是否需 skill，能拆则拆，不要默认合并。
+4. 仅当 trace 中确有跨阶段、跨子任务的**稳定串联套路**时，才产出 `scope = "global"` 建议；默认优先 `scope = "subtask"` 的专精 skill。
 5. 对每个候选 skill 设 `CREATE | UPDATE | NONE`；`UPDATE` 必须从 `pool_summary` 填 `source_skill_absolute_path`。
 6. `file_guidance` 须可执行：步骤、注意、检查清单、排查要点写入对应 `SKILL.md` 章节。
 

@@ -1454,7 +1454,10 @@ function App() {
       if (next !== null) {
         const st = assistantSubtasks[next]
         if (st?.subtask_id) {
-          experimentTelemetry.onTrajectoryView(st.subtask_id, selectedSessionId || undefined)
+          experimentTelemetry.onTrajectoryClick(selectedSessionId || undefined, {
+            subtaskId: st.subtask_id,
+            source: 'card',
+          })
         } else {
           experimentTelemetry.onTrajectoryClick(selectedSessionId || undefined, { sourceIndex: next })
         }
@@ -1468,9 +1471,35 @@ function App() {
     })
   }, [assistantSubtasks, selectedSessionId])
 
+  const handleTodoPanelClick = useCallback(
+    (detail: {
+      target: 'header' | 'section' | 'todo'
+      section?: 'open' | 'done' | 'history'
+      todoId?: string
+    }) => {
+      experimentTelemetry.onTodoPanelClick(selectedSessionId || undefined, detail)
+    },
+    [selectedSessionId],
+  )
+
+  const handlePanelBecameVisible = useCallback(
+    (subtaskId: string) => {
+      experimentTelemetry.onPanelView(subtaskId, selectedSessionId || undefined, 'scroll')
+    },
+    [selectedSessionId],
+  )
+
+  useEffect(() => {
+    if (!experimentTelemetry.isActive()) return
+    if (linkedSubtaskIndex === null) return
+    const st = assistantSubtasks[linkedSubtaskIndex]
+    if (st?.subtask_id) {
+      experimentTelemetry.onPanelView(st.subtask_id, selectedSessionId || undefined, 'select')
+    }
+  }, [linkedSubtaskIndex, assistantSubtasks, selectedSessionId])
+
   const handleTodoClick = useCallback(
     (todo: OcTodo) => {
-      experimentTelemetry.onTodoClick(selectedSessionId || undefined, todo.id)
       const preferred = findSubtaskIndexForTodo(assistantSubtasks, todo)
       if (
         preferred !== null &&
@@ -2184,6 +2213,7 @@ function App() {
               highlightTodoIds={linkedTodoIds}
               todoPanelRevealGeneration={todoPanelRevealGeneration}
               onTodoClick={handleTodoClick}
+              onTodoPanelClick={handleTodoPanelClick}
               onSessionTitleCommit={handleSessionTitleCommit}
               pendingQuestion={
                 selectedSessionId ? pendingQuestions[selectedSessionId] ?? null : null
@@ -2411,6 +2441,7 @@ function App() {
               activeTaskTabId={activeTaskSegmentId}
               sessionId={selectedSessionId}
               errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
+              onPanelBecameVisible={handlePanelBecameVisible}
               onSelectTaskTab={
                 selectedSessionId
                   ? (id) => handleSelectTaskSegment(selectedSessionId, id)
@@ -2461,6 +2492,7 @@ function App() {
           activeTaskTabId={activeTaskSegmentId}
           sessionId={selectedSessionId}
           errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
+          onPanelBecameVisible={handlePanelBecameVisible}
           onSelectTaskTab={
             selectedSessionId
               ? (id) => handleSelectTaskSegment(selectedSessionId, id)

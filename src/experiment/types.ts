@@ -17,13 +17,13 @@ export type ExperimentCounters = {
   trajectoryPanelScrolls: number
   /** Clicks / selections inside the right trajectory panel (excl. tooltip). */
   trajectoryPanelClicks: number
-  /** Todo panel item clicks (used to link/filter right-side panels). */
+  /** Clicks anywhere inside the Todo panel (header, sections, todo rows). */
   todoClicks: number
   /** Action-node tooltips that actually opened (timeline + summary blocks). */
   actionTooltipShows: number
   /** Flow-end yellow “summary” node tooltips that opened. */
   flowEndSummaryTooltipShows: number
-  /** Unique trajectory / subtask panels the user opened (clicked). */
+  /** Unique subtask / trace panels the user viewed (select, scroll into view, tooltip, etc.). */
   trajectoriesViewed: number
   /** Unique task tabs that existed or were selected during the experiment. */
   taskTabsSeen: number
@@ -50,9 +50,11 @@ export type ExperimentEventName =
   | 'trajectory.scroll'
   | 'trajectory.click'
   | 'todo.click'
+  | 'todo.panel_click'
   | 'tooltip.action'
   | 'tooltip.flow_end_summary'
   | 'trajectory.view'
+  | 'panel.view'
   | 'task_tab.seen'
   | 'task_tab.select'
   | 'skill.distill'
@@ -96,6 +98,8 @@ export type ExperimentReport = {
     firstInteractionOrder: ExperimentRegion[]
     /** ms from experiment start to first touch; null if never touched. */
     firstInteractionMs: Record<ExperimentRegion, number | null>
+    /** Unique panels viewed / unique panels generated (null when none generated). */
+    panelViewCoverage: number | null
   }
   /** Recent event log (capped). */
   events: ExperimentEvent[]

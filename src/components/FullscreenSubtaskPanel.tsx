@@ -27,6 +27,7 @@ interface Props {
   onSelectTaskTab?: (id: string) => void
   sessionId?: string
   errorDiagnosisBySubtaskId?: Record<string, MemoryWorkerErrorDiagnosis>
+  onPanelBecameVisible?: (subtaskId: string) => void
 }
 
 /**
@@ -52,6 +53,7 @@ export default function FullscreenSubtaskPanel({
   onSelectTaskTab,
   sessionId,
   errorDiagnosisBySubtaskId,
+  onPanelBecameVisible,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -194,6 +196,7 @@ export default function FullscreenSubtaskPanel({
             onSelectTaskTab={onSelectTaskTab}
             sessionId={sessionId}
             errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
+            onPanelBecameVisible={onPanelBecameVisible}
           />
         </div>
       </div>

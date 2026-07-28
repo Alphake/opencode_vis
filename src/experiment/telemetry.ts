@@ -117,12 +117,14 @@ function buildDerived(
   const leftOps = c.chatPanelScrolls + c.conversationTurns
   const interactionTotal = leftOps + rightOps
   const firstDerived = buildFirstInteractionDerived(startedAt, first)
+  const generated = c.subtaskPanelsGenerated
   return {
     chatFocusRatio: focusTotal > 0 ? c.chatPanelFocusMs / focusTotal : null,
     trajectoryFocusRatio: focusTotal > 0 ? c.trajectoryPanelFocusMs / focusTotal : null,
     chatScrollShare: scrollTotal > 0 ? c.chatPanelScrolls / scrollTotal : null,
     trajectoryInteractionShare: interactionTotal > 0 ? rightOps / interactionTotal : null,
     ...firstDerived,
+    panelViewCoverage: generated > 0 ? c.trajectoriesViewed / generated : null,
   }
 }
 
@@ -279,11 +281,29 @@ class ExperimentTelemetry {
     }
   }
 
-  onTodoClick(sessionId?: string, todoId?: string) {
+  onTodoPanelClick(
+    sessionId?: string,
+    props?: { target: 'header' | 'section' | 'todo'; section?: 'open' | 'done' | 'history'; todoId?: string },
+  ) {
     if (!this.isActive()) return
     this.bump('todoClicks')
-    this.markFirst('todo', 'todo.click')
-    this.track('todo.click', sessionId, todoId ? { todoId } : undefined)
+    this.markFirst('todo', 'todo.panel_click')
+    this.track('todo.panel_click', sessionId, props)
+  }
+
+  /** @deprecated Use onTodoPanelClick */
+  onTodoClick(sessionId?: string, todoId?: string) {
+    this.onTodoPanelClick(sessionId, { target: 'todo', todoId })
+  }
+
+  /** Record that the user viewed a generated subtask panel (deduped by subtask id). */
+  onPanelView(subtaskId: string, sessionId?: string, via?: string) {
+    if (!this.isActive() || !subtaskId) return
+    if (this.snap!.seenTrajectoryIds.includes(subtaskId)) return
+    this.snap!.seenTrajectoryIds.push(subtaskId)
+    this.snap!.counters.trajectoriesViewed = this.snap!.seenTrajectoryIds.length
+    this.markFirst('trajectory', via ? `panel.view:${via}` : 'panel.view')
+    this.track('panel.view', sessionId, { subtaskId, via, firstView: true })
   }
 
   onTrajectoryClick(sessionId?: string, props?: Record<string, unknown>) {
@@ -293,32 +313,31 @@ class ExperimentTelemetry {
     this.track('trajectory.click', sessionId, props)
   }
 
-  /** User selected a subtask card (trajectory view). */
+  /** User selected a subtask card (trajectory view). Prefer onPanelView via linkedSubtaskIndex effect. */
   onTrajectoryView(subtaskId: string, sessionId?: string) {
     if (!this.isActive() || !subtaskId) return
-    if (this.snap!.seenTrajectoryIds.includes(subtaskId)) {
-      this.onTrajectoryClick(sessionId, { subtaskId, revisit: true })
-      return
-    }
-    this.snap!.seenTrajectoryIds.push(subtaskId)
-    this.snap!.counters.trajectoriesViewed = this.snap!.seenTrajectoryIds.length
-    this.markFirst('trajectory', 'trajectory.view')
-    this.track('trajectory.view', sessionId, { subtaskId })
-    this.onTrajectoryClick(sessionId, { subtaskId, firstView: true })
+    const revisit = this.snap!.seenTrajectoryIds.includes(subtaskId)
+    this.onPanelView(subtaskId, sessionId, revisit ? 'card_revisit' : 'card')
+    this.onTrajectoryClick(sessionId, { subtaskId, revisit, firstView: !revisit })
   }
 
-  onActionTooltipShow(sessionId?: string, source?: string) {
+  onActionTooltipShow(sessionId?: string, source?: string, subtaskId?: string) {
     if (!this.isActive()) return
     this.bump('actionTooltipShows')
-    this.markFirst('trajectory', 'tooltip.action')
-    this.track('tooltip.action', sessionId, source ? { source } : undefined)
+    // Panel view is counted on mouseenter (sweep); afterShow only bumps tooltip counters.
+    if (!subtaskId) {
+      this.markFirst('trajectory', source ? `tooltip.${source}` : 'tooltip.action')
+    }
+    this.track('tooltip.action', sessionId, { source, subtaskId })
   }
 
-  onFlowEndSummaryTooltipShow(sessionId?: string) {
+  onFlowEndSummaryTooltipShow(sessionId?: string, subtaskId?: string) {
     if (!this.isActive()) return
     this.bump('flowEndSummaryTooltipShows')
-    this.markFirst('trajectory', 'tooltip.flow_end_summary')
-    this.track('tooltip.flow_end_summary', sessionId)
+    if (!subtaskId) {
+      this.markFirst('trajectory', 'tooltip.flow_end_summary')
+    }
+    this.track('tooltip.flow_end_summary', sessionId, subtaskId ? { subtaskId } : undefined)
   }
 
   onTaskTabSeen(taskTabId: string, sessionId?: string) {

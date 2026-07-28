@@ -1056,6 +1056,7 @@ export default function SubtaskCard({
               flowEndSummary={flowEndSummary}
               ghostFlowEndSummary={ghostFlowEndSummary}
               viewportMaxHeight={FLOW_VIEWPORT_MAX_HEIGHT}
+              telemetrySubtaskId={subtask.subtask_id}
             />
           )
         })()}

@@ -1346,6 +1346,8 @@ interface Props {
   forkAnchorActionKey?: string | null
   /** Palette id when `colorMode === 'type'` */
   actionTypePaletteId?: ActionTypePaletteId
+  /** Experiment: attribute tooltip views to this subtask panel. */
+  telemetrySubtaskId?: string
 }
 
 export default function ActionFlowVisualization({
@@ -1373,6 +1375,7 @@ export default function ActionFlowVisualization({
   onSelectAction,
   forkAnchorActionKey = null,
   actionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID,
+  telemetrySubtaskId,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -1389,6 +1392,8 @@ export default function ActionFlowVisualization({
   const [tooltipMounted, setTooltipMounted] = useState(false)
   const [scrollClientWidth, setScrollClientWidth] = useState(0)
   const pendingTipKindRef = useRef<'action' | 'flow-end' | null>(null)
+  const telemetrySubtaskIdRef = useRef(telemetrySubtaskId)
+  telemetrySubtaskIdRef.current = telemetrySubtaskId
   useEffect(() => {
     setTooltipMounted(true)
   }, [])
@@ -1815,6 +1820,8 @@ export default function ActionFlowVisualization({
             .attr('data-vt-tip', 'flow-end')
           circle.on('mouseenter', () => {
             pendingTipKindRef.current = 'flow-end'
+            const sid = telemetrySubtaskIdRef.current
+            if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.flow_end')
           })
         }
         return
@@ -1890,6 +1897,8 @@ export default function ActionFlowVisualization({
         .attr('data-vt-tip', 'action')
       actionTarget.on('mouseenter', () => {
         pendingTipKindRef.current = 'action'
+        const sid = telemetrySubtaskIdRef.current
+        if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.timeline')
       })
       if (onSelectAction) {
         actionTarget.on('click', (ev: MouseEvent) => {
@@ -2431,8 +2440,11 @@ export default function ActionFlowVisualization({
           arrowColor="#f8fafc"
           afterShow={() => {
             const kind = pendingTipKindRef.current
-            if (kind === 'flow-end') experimentTelemetry.onFlowEndSummaryTooltipShow()
-            else experimentTelemetry.onActionTooltipShow(undefined, 'timeline')
+            if (kind === 'flow-end') {
+              experimentTelemetry.onFlowEndSummaryTooltipShow(undefined, telemetrySubtaskId)
+            } else {
+              experimentTelemetry.onActionTooltipShow(undefined, 'timeline', telemetrySubtaskId)
+            }
           }}
         />
       )}

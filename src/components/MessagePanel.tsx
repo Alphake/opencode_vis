@@ -38,6 +38,12 @@ interface MessagePanelProps {
   /** Incremented on subtask selection to auto-expand matching todo sections */
   todoPanelRevealGeneration?: number
   onTodoClick?: (todo: OcTodo) => void
+  /** Experiment: any click inside the Todo panel. */
+  onTodoPanelClick?: (detail: {
+    target: 'header' | 'section' | 'todo'
+    section?: 'open' | 'done' | 'history'
+    todoId?: string
+  }) => void
   /** PATCH session title via OpenCode */
   onSessionTitleCommit?: (title: string) => Promise<void>
   /** OpenCode question channel requests (SSE `question.asked`) */
@@ -84,6 +90,7 @@ export default function MessagePanel({
   highlightTodoIds,
   todoPanelRevealGeneration,
   onTodoClick,
+  onTodoPanelClick,
   onSessionTitleCommit,
   pendingQuestion,
   onQuestionReply,
@@ -141,18 +148,71 @@ export default function MessagePanel({
     [messages],
   )
 
+  /** Stick to bottom while streaming; pause when the user scrolls up to read history. */
+  const stickToBottomRef = useRef(true)
+  const NEAR_BOTTOM_PX = 96
+
+  const scrollMessagesToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const el = messageListScrollRef?.current
+    if (!el) return
+    if (behavior === 'smooth') {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    } else {
+      el.scrollTop = el.scrollHeight
+    }
+  }
+
+  const updateStickToBottomFromScroll = () => {
+    const el = messageListScrollRef?.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = distanceFromBottom <= NEAR_BOTTOM_PX
+  }
+
   /** Jump to latest turn after session load — mw-internal prompts are huge and bury the answer at the top. */
   const wasLoadingRef = useRef(loading)
   useEffect(() => {
     const finishedLoad = wasLoadingRef.current && !loading
     wasLoadingRef.current = loading
     if (!finishedLoad || !sessionId || messages.length === 0) return
-    const el = messageListScrollRef?.current
-    if (!el) return
+    stickToBottomRef.current = true
     requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight
+      scrollMessagesToBottom()
     })
   }, [loading, sessionId, messages.length, messageListScrollRef])
+
+  /** Follow newly appended / streaming content while the viewport is pinned to the bottom. */
+  useEffect(() => {
+    if (!stickToBottomRef.current || loading || messages.length === 0) return
+    requestAnimationFrame(() => {
+      if (!stickToBottomRef.current) return
+      scrollMessagesToBottom()
+    })
+  }, [messages, waitingForAssistantReply, loading, messageListScrollRef])
+
+  /** When the user sends a message, re-pin and jump to the latest turn. */
+  const wasWaitingRef = useRef(waitingForAssistantReply)
+  useEffect(() => {
+    const startedWaiting = !wasWaitingRef.current && waitingForAssistantReply
+    wasWaitingRef.current = waitingForAssistantReply
+    if (!startedWaiting) return
+    stickToBottomRef.current = true
+    requestAnimationFrame(() => {
+      scrollMessagesToBottom()
+    })
+  }, [waitingForAssistantReply, messageListScrollRef])
+
+  /** Catch streaming text / tool-block growth while still stuck to bottom. */
+  useEffect(() => {
+    const el = messageListScrollRef?.current
+    if (!el || typeof MutationObserver === 'undefined') return
+    const observer = new MutationObserver(() => {
+      if (!stickToBottomRef.current) return
+      scrollMessagesToBottom()
+    })
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+    return () => observer.disconnect()
+  }, [messageListScrollRef, sessionId])
 
   return (
     <div
@@ -293,7 +353,10 @@ export default function MessagePanel({
       >
         <div
           ref={messageListScrollRef}
-          onScroll={() => experimentTelemetry.onScroll('chat', sessionId || undefined)}
+          onScroll={() => {
+            updateStickToBottomFromScroll()
+            experimentTelemetry.onScroll('chat', sessionId || undefined)
+          }}
           style={{
             height: '100%',
             overflowY: 'auto',
@@ -361,6 +424,7 @@ export default function MessagePanel({
             highlightTodoIds={highlightTodoIds}
             todoPanelRevealGeneration={todoPanelRevealGeneration}
             onTodoClick={onTodoClick}
+            onPanelClick={onTodoPanelClick}
             listScrollRef={todoPanelScrollRef}
           />
         </div>

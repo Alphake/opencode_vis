@@ -19,6 +19,12 @@ interface TodoPanelProps {
   latestTodowriteBatchProgress: LatestTodowriteBatchProgress | null
   highlightTodoIds?: Set<string> | null
   onTodoClick?: (todo: OcTodo) => void
+  /** Any click inside the Todo panel (header, section toggles, todo rows). */
+  onPanelClick?: (detail: {
+    target: 'header' | 'section' | 'todo'
+    section?: 'open' | 'done' | 'history'
+    todoId?: string
+  }) => void
   listScrollRef?: RefObject<HTMLDivElement | null>
   /** Increment when selecting a subtask — auto-expands relevant sections */
   todoPanelRevealGeneration?: number
@@ -50,6 +56,7 @@ export default function TodoPanel({
   latestTodowriteBatchProgress,
   highlightTodoIds,
   onTodoClick,
+  onPanelClick,
   listScrollRef,
   todoPanelRevealGeneration = 0,
 }: TodoPanelProps) {
@@ -120,6 +127,7 @@ export default function TodoPanel({
   if (latestActive.length === 0 && archivedCompleted.length === 0) return null
 
   const toggleMainPanel = () => {
+    onPanelClick?.({ target: 'header' })
     setPanelExpanded(prev => {
       const next = !prev
       if (next) {
@@ -132,6 +140,7 @@ export default function TodoPanel({
   }
 
   const handleTodoPick = (todo: CanonicalTodo) => {
+    onPanelClick?.({ target: 'todo', todoId: todo.id })
     setPanelExpanded(true)
     const inHistory = archivedCompleted.some(t => t.id === todo.id)
     if (inHistory) {
@@ -224,7 +233,10 @@ export default function TodoPanel({
           <div style={{ borderTop: '1px solid #F0F0F0', paddingTop: 6 }}>
             <button
               type="button"
-              onClick={() => setOpenSectionExpanded(v => !v)}
+              onClick={() => {
+                onPanelClick?.({ target: 'section', section: 'open' })
+                setOpenSectionExpanded(v => !v)
+              }}
               style={{
                 width: '100%',
                 display: 'flex',
@@ -270,7 +282,10 @@ export default function TodoPanel({
             <div style={{ borderTop: '1px solid #F0F0F0', paddingTop: 4 }}>
               <button
                 type="button"
-                onClick={() => setDoneOnListExpanded(v => !v)}
+                onClick={() => {
+                  onPanelClick?.({ target: 'section', section: 'done' })
+                  setDoneOnListExpanded(v => !v)
+                }}
                 style={{
                   width: '100%',
                   display: 'flex',
@@ -305,7 +320,10 @@ export default function TodoPanel({
             <div style={{ borderTop: '1px solid #F0F0F0', paddingTop: 4 }}>
               <button
                 type="button"
-                onClick={() => setHistoryExpanded(v => !v)}
+                onClick={() => {
+                  onPanelClick?.({ target: 'section', section: 'history' })
+                  setHistoryExpanded(v => !v)
+                }}
                 style={{
                   width: '100%',
                   display: 'flex',

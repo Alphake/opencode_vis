@@ -46,7 +46,8 @@
       "trajectory": 323010,
       "todo": 322440,
       "skill": 1500000
-    }
+    },
+    "panelViewCoverage": 0.6667
   },
   "events": [
     {

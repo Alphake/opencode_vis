@@ -63,15 +63,15 @@
 | `chatPanelScrolls` | 中间对话区滚动次数 | `scroll` 去抖 400ms，一次拖动算 1 次 |
 | `trajectoryPanelScrolls` | 右侧轨迹列表滚动次数 | 同上 |
 | `trajectoryPanelClicks` | 右侧面板操作次数 | 点子任务卡、切 task tab、切 timeline/summary 等 |
-| `todoClicks` | Todo 面板点击次数 | 点某个 todo 项（联动右侧子任务） |
+| `todoClicks` | Todo 面板内点击总次数 | 点标题展开、分区折叠、任意 todo 行，**面板内任何可点内容** |
 | `actionTooltipShows` | Action tooltip 真正亮起次数 | `react-tooltip` 的 `afterShow`（timeline 节点 + summary 色块） |
 | `flowEndSummaryTooltipShows` | 轨迹末端黄色 Summary 节点 tooltip | 悬浮 flow-end 节点且真正弹出 |
-| `trajectoriesViewed` | 查看了几条轨迹 | 点子任务卡后的 **去重** subtask id 数 |
+| `trajectoriesViewed` | **查看过**几个 panel（去重） | 选中 / 滚入视野 / **鼠标扫过 tooltip 锚点**，按 subtask id **去重**（不必等 tooltip 弹出） |
 | `taskTabsSeen` | 出现过几个 Task tab | 实验期间 task tab id **去重** |
 | `skillsDistilled` | 沉淀 skill 次数 | Distill **成功**回包后 +1 |
 | `forksCompleted` | Fork 次数 | fork API 成功后 +1 |
 | `skillPanelClicks` | Skill Panel 点击次数 | 打开某个 skill 详情 |
-| `subtaskPanelsGenerated` | 生成了多少子面板 / trace | 实验期间观察到的 subtask id **去重** |
+| `subtaskPanelsGenerated` | **生成了**多少 panel / trace | 实验期间观察到的 subtask id **去重** |
 | `chatPanelFocusMs` | 鼠标在中间栏停留总毫秒 | `pointerenter` / `pointerleave` 累计 |
 | `trajectoryPanelFocusMs` | 鼠标在右侧栏停留总毫秒 | 同上 |
 
@@ -87,8 +87,11 @@
 | `trajectoryInteractionShare` | 右侧相关操作 / (左侧操作+右侧操作) 的粗占比 |
 | `firstInteractionOrder` | 各区域按「首次交互」时间排序（未碰过的区域不出现） |
 | `firstInteractionMs` | 各区域首次交互相对 `startedAt` 的毫秒；未碰为 `null` |
+| `panelViewCoverage` | `trajectoriesViewed / subtaskPanelsGenerated`（看了几个 / 生成了几个） |
 
 焦点/滚动拿不到「绝对真实注意力」，只是可复现的代理指标；论文里建议写明定义。
+
+**Panel 覆盖率**：对比 `subtaskPanelsGenerated`（生成数）与 `trajectoriesViewed`（查看数，去重）。也可直接看 `derived.panelViewCoverage`。
 
 ### 首次交互（`firstInteractionAt`）
 
@@ -98,7 +101,7 @@
 |------|---------------------------|
 | `chat` | 对话区滚动、发送消息 |
 | `trajectory` | 右侧轨迹滚动 / 点击 / 看子任务 / tooltip / 切 task tab |
-| `todo` | 点击某个 todo |
+| `todo` | Todo 面板内任意点击（标题 / 分区 / todo 行） |
 | `skill` | Skill Panel 打开详情、或 Distill 成功 |
 
 事件日志里会多一条 `region.first`（`props.region` + `props.via`），之后同区域不再记。
@@ -125,7 +128,8 @@
 - `session.create`
 - `chat.turn` / `chat.scroll`
 - `trajectory.scroll` / `trajectory.click` / `trajectory.view`
-- `todo.click`
+- `todo.panel_click`
+- `panel.view`（某 panel 首次被查看，含 `via`：select / scroll / tooltip.* / card）
 - `tooltip.action` / `tooltip.flow_end_summary`
 - `task_tab.seen` / `task_tab.select`
 - `skill.distill` / `skill.panel_click`
