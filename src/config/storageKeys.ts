@@ -29,6 +29,8 @@ export const STORAGE_KEYS = {
   panelAnalysis: `${APP_STORAGE_NAMESPACE}.panelAnalysis.v1`,
   /** Prefix for `${prefix}${sessionId}` fork-panel snapshot entries */
   forkPanelPrefix: `${APP_STORAGE_NAMESPACE}:fork-panel:`,
+  /** Active user-study experiment draft (survives refresh until End & Save) */
+  experimentActive: `${APP_STORAGE_NAMESPACE}.experiment.active.v1`,
 } as const
 
 /** Composer `<select>` DOM id — must match `<label htmlFor>`; unrelated to persistence key spelling */

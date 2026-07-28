@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { OcSession } from '../types/opencode'
 import { folderDisplayName } from '../utils/sessionFolders'
+import ExperimentBar from '../experiment/ExperimentBar'
 
 interface SidebarProps {
   /** Sessions in the selected folder (sorted, filtered). */
@@ -394,6 +395,9 @@ export default function Sidebar({
             ))
           )}
         </div>
+
+        <ExperimentBar directory={selectedDirectory || ''} />
+
         {onSessionListResizePointerDown ? (
           <div
             role="separator"

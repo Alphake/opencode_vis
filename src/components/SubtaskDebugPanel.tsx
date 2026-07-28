@@ -28,6 +28,7 @@ import {
   mergeMessagesForActionTooltipLookup,
 } from '../utils/actionTooltipMapping'
 import { stripHarnessGuidanceForDisplay } from '../config/harnessGuidance'
+import { experimentTelemetry } from '../experiment/telemetry'
 
 export type SubtaskTaskTab = {
   id: string
@@ -204,6 +205,7 @@ export default function SubtaskDebugPanel({
   const summaryTooltipSafeId = useId().replace(/:/g, '')
   const summaryTooltipId = `subtask-summary-tip-${summaryTooltipSafeId}`
   const [tooltipMounted, setTooltipMounted] = useState(false)
+  const pendingSummaryTipRef = useRef(false)
   const [colorBy, setColorBy] = useState<'tokens' | 'type'>('type')
   const [legendExpanded, setLegendExpanded] = useState(false)
   const [skillsByTaskId, setSkillsByTaskId] = useState<Record<string, TaskSkillRecord[]>>({})
@@ -653,6 +655,10 @@ export default function SubtaskDebugPanel({
                             data-tooltip-id={summaryTooltipId}
                             data-tooltip-html={tipHtml}
                             data-tooltip-place="top"
+                            data-vt-tip="action"
+                            onMouseEnter={() => {
+                              pendingSummaryTipRef.current = true
+                            }}
                             style={{
                               width: summaryLayout.blockWidth,
                               height: summaryLayout.blockHeight,
@@ -685,6 +691,11 @@ export default function SubtaskDebugPanel({
           clickable
           globalCloseEvents={{ scroll: false, resize: true, escape: true }}
           arrowColor="#f8fafc"
+          afterShow={() => {
+            if (pendingSummaryTipRef.current) {
+              experimentTelemetry.onActionTooltipShow(sessionId, 'summary')
+            }
+          }}
         />
       )}
     </>
@@ -750,6 +761,10 @@ export default function SubtaskDebugPanel({
         setSkillsByTaskId((prev) => ({ ...prev, [taskId]: result.skills ?? (result.skill ? [result.skill] : []) }))
         setSkillStatusByTaskId((prev) => ({ ...prev, [taskId]: result.status || 'ready' }))
         setSkillDiscoveredCountByTaskId((prev) => ({ ...prev, [taskId]: result.discoveredCount ?? prev[taskId] ?? 0 }))
+        experimentTelemetry.onSkillDistill(
+          sessionId,
+          result.skill?.skillName || result.skills?.[0]?.skillName,
+        )
       })
       .catch((err: unknown) => {
         setSkillStatusByTaskId((prev) => ({ ...prev, [taskId]: 'error' }))
@@ -773,6 +788,7 @@ export default function SubtaskDebugPanel({
   const openSkillDetail = (skill: TaskSkillRecord) => {
     if (!sessionId || !activeTaskId) return
     const skillKey = skill.skillPath || skill.skillName || skill.feedbackRunDir || ''
+    experimentTelemetry.onSkillPanelClick(sessionId, skillKey || undefined)
     setSelectedSkillRecord(skill)
     setSelectedSkillDetail(null)
     setSkillDetailError('')
@@ -1027,6 +1043,7 @@ export default function SubtaskDebugPanel({
       >
         <div
           ref={listScrollRef}
+          onScroll={() => experimentTelemetry.onScroll('trajectory', sessionId)}
           style={{
             height: '100%',
             width: '100%',

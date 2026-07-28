@@ -37,6 +37,7 @@ import FullscreenSubtaskPanel from './components/FullscreenSubtaskPanel'
 import ActionAnalysisModal from './components/ActionAnalysisModal'
 import ForkSessionModal from './components/ForkSessionModal'
 import SubtaskMessageConnector from './components/SubtaskMessageConnector'
+import { experimentTelemetry } from './experiment/telemetry'
 import { groupAssistantSubtasks, isTodoWriteMessage } from './utils/subtaskGrouping'
 import {
   findSubtaskIndexForTodo,
@@ -768,6 +769,7 @@ function App() {
   }, [])
 
   const handleSelectTaskSegment = useCallback((sessionId: string, taskSegmentId: string) => {
+    experimentTelemetry.onTaskTabSelect(taskSegmentId, sessionId)
     setTaskSegmentManuallySelectedBySessionId((prev) => ({ ...prev, [sessionId]: true }))
     setActiveTaskSegmentBySessionId((prev) => ({ ...prev, [sessionId]: taskSegmentId }))
   }, [])
@@ -1355,6 +1357,19 @@ function App() {
     return sortTaskSegmentTabsByMessages(tabs, messages)
   }, [messages, selectedSessionId, taskSegmentsBySessionId])
 
+  useEffect(() => {
+    if (!experimentTelemetry.isActive()) return
+    const ids = assistantSubtasks.map((st) => st.subtask_id).filter(Boolean)
+    experimentTelemetry.onSubtasksObserved(ids, selectedSessionId || undefined)
+  }, [assistantSubtasks, selectedSessionId])
+
+  useEffect(() => {
+    if (!experimentTelemetry.isActive()) return
+    for (const tab of taskSegmentsForActiveSession) {
+      experimentTelemetry.onTaskTabSeen(tab.id, selectedSessionId || undefined)
+    }
+  }, [taskSegmentsForActiveSession, selectedSessionId])
+
   const activeTaskSegmentId = selectedSessionId ? activeTaskSegmentBySessionId[selectedSessionId] : undefined
   const activeTaskSegment = useMemo(() => {
     if (!activeTaskSegmentId) return null
@@ -1436,6 +1451,14 @@ function App() {
   const toggleSubtaskLink = useCallback((si: number) => {
     setLinkedSubtaskIndex((prev) => {
       const next = prev === si ? null : si
+      if (next !== null) {
+        const st = assistantSubtasks[next]
+        if (st?.subtask_id) {
+          experimentTelemetry.onTrajectoryView(st.subtask_id, selectedSessionId || undefined)
+        } else {
+          experimentTelemetry.onTrajectoryClick(selectedSessionId || undefined, { sourceIndex: next })
+        }
+      }
       setSelection((sel) => {
         if (!sel) return null
         if (next === null || sel.subtaskIndex !== next) return null
@@ -1443,10 +1466,11 @@ function App() {
       })
       return next
     })
-  }, [])
+  }, [assistantSubtasks, selectedSessionId])
 
   const handleTodoClick = useCallback(
     (todo: OcTodo) => {
+      experimentTelemetry.onTodoClick(selectedSessionId || undefined, todo.id)
       const preferred = findSubtaskIndexForTodo(assistantSubtasks, todo)
       if (
         preferred !== null &&
@@ -1462,7 +1486,7 @@ function App() {
       )
       if (fallback) setLinkedSubtaskIndex(fallback.sourceIndex)
     },
-    [assistantSubtasks, visibleSubtasksForTaskSegment]
+    [assistantSubtasks, visibleSubtasksForTaskSegment, selectedSessionId]
   )
 
   useEffect(() => {
@@ -1666,6 +1690,7 @@ function App() {
     // Fire-and-forget like fork’s first message: rely on SSE + a follow-up GET /message poll.
     void (async () => {
       try {
+        experimentTelemetry.onConversationTurn(sid)
         void notifyTaskSwitchPrompt({
           sessionId: sid,
           userPrompt: rawUserPrompt,
@@ -1747,6 +1772,7 @@ function App() {
     try {
       const dir = selectedDirectory || undefined
       const created = await createSession(dir)
+      experimentTelemetry.onManualSessionCreate(created.id)
       const list = await refreshSessions([created.directory])
       setSessions(list)
       setApiConnected(true)
@@ -1911,6 +1937,7 @@ function App() {
           messageID: action.messageID,
           directory: dir,
         })
+        experimentTelemetry.onForkComplete(targetSessionId, forked.id)
         if (bundle) {
           saveForkPanelSnapshotBundle(forked.id, bundle)
         }
@@ -2029,6 +2056,7 @@ function App() {
               await sendMessage(forked.id, guidedUserText, forked.directory, {
                 model: composerModelRef.trim() || undefined,
               })
+              experimentTelemetry.onConversationTurn(forked.id)
               const msgsAfterSend = await getMessages(
                 forked.id,
                 'after fork first user message',
@@ -2125,6 +2153,8 @@ function App() {
             display: 'flex',
             flexDirection: 'column',
           }}
+          onPointerEnter={() => experimentTelemetry.enterPanelFocus('chat')}
+          onPointerLeave={() => experimentTelemetry.leavePanelFocus('chat')}
         >
           <div
             style={{
@@ -2211,6 +2241,8 @@ function App() {
             flexDirection: 'column',
             transition: isResizingSubtaskPanel ? 'none' : 'width 0.15s ease',
           }}
+          onPointerEnter={() => experimentTelemetry.enterPanelFocus('trajectory')}
+          onPointerLeave={() => experimentTelemetry.leavePanelFocus('trajectory')}
         >
           <div
             style={{
@@ -2247,7 +2279,10 @@ function App() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <button
                   type="button"
-                  onClick={() => setSubtaskFlowLayoutMode('timeline')}
+                  onClick={() => {
+                    setSubtaskFlowLayoutMode('timeline')
+                    experimentTelemetry.onTrajectoryClick(selectedSessionId || undefined, { layout: 'timeline' })
+                  }}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -2278,7 +2313,10 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSubtaskFlowLayoutMode('summary')}
+                  onClick={() => {
+                    setSubtaskFlowLayoutMode('summary')
+                    experimentTelemetry.onTrajectoryClick(selectedSessionId || undefined, { layout: 'summary' })
+                  }}
                   style={{
                     display: 'flex',
                     alignItems: 'center',

@@ -10,6 +10,7 @@ import type { OcComposerModelOption } from '../services/opencodeApi'
 import { messagesHaveOpenQuestionWithInput } from '../utils/questionPart'
 import { collectStaleToolCallIDs } from '../utils/actionMapping'
 import ScrollNodeRail, { type ScrollNodeMarker } from './ScrollNodeRail'
+import { experimentTelemetry } from '../experiment/telemetry'
 
 interface MessagePanelProps {
   messages: OcMessage[]
@@ -292,6 +293,7 @@ export default function MessagePanel({
       >
         <div
           ref={messageListScrollRef}
+          onScroll={() => experimentTelemetry.onScroll('chat', sessionId || undefined)}
           style={{
             height: '100%',
             overflowY: 'auto',

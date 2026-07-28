@@ -4893,6 +4893,47 @@ def run_pipeline(trace: dict[str, Any], directory_override: str | None = None, p
     }
 
 
+def save_experiment_report(body: dict[str, Any]) -> dict[str, Any]:
+    """Write an experiment report JSON into the user's workspace folder root.
+
+    Expected body: { directory: str, report: object, filename?: str }
+    """
+    directory = str(body.get("directory") or "").strip()
+    report = body.get("report")
+    if not directory:
+        return {"ok": False, "error": "directory is required"}
+    if report is None:
+        return {"ok": False, "error": "report is required"}
+
+    root = Path(directory).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        return {"ok": False, "error": f"directory does not exist or is not a folder: {root}"}
+
+    raw_name = str(body.get("filename") or "").strip()
+    if not raw_name:
+        participant = ""
+        if isinstance(report, dict):
+            participant = str(report.get("participantId") or "").strip()
+        safe_pid = re.sub(r"[^\w.-]+", "_", participant) or "participant"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        raw_name = f"vibetrace-experiment-{safe_pid}-{stamp}.json"
+    # Prevent path traversal — filename only
+    filename = Path(raw_name).name
+    if not filename.endswith(".json"):
+        filename = f"{filename}.json"
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return {"ok": False, "error": "invalid filename"}
+
+    target = root / filename
+    try:
+        target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "error": f"failed to write report: {e}"}
+
+    print(f"[memory-worker] experiment-report saved path={target}")
+    return {"ok": True, "path": str(target), "filename": filename}
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "memory-worker-py/0.1"
 
@@ -4997,6 +5038,15 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 result = distill_feedback_skill(body)
+                self._send_json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
+        if self.path == "/experiment-report":
+            try:
+                body = self._read_json()
+                result = save_experiment_report(body if isinstance(body, dict) else {})
                 self._send_json(200 if result.get("ok") else 400, result)
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})

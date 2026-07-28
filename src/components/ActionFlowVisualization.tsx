@@ -14,6 +14,7 @@ import { effectiveStatusColors, resolveActionBlockColors, statusColors } from '.
 import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './ActionFlowContextMenu'
 import { actionKey } from '../utils/actionKey'
+import { experimentTelemetry } from '../experiment/telemetry'
 
 /** Prefer below anchors so tooltips do not cover SubtaskCard title rows above the flow. */
 const ACTION_FLOW_TOOLTIP_PLACE = 'bottom'
@@ -1387,6 +1388,7 @@ export default function ActionFlowVisualization({
    */
   const [tooltipMounted, setTooltipMounted] = useState(false)
   const [scrollClientWidth, setScrollClientWidth] = useState(0)
+  const pendingTipKindRef = useRef<'action' | 'flow-end' | null>(null)
   useEffect(() => {
     setTooltipMounted(true)
   }, [])
@@ -1806,7 +1808,14 @@ export default function ActionFlowVisualization({
           .attr('stroke-width', 1.5)
           .style('cursor', endTip ? 'pointer' : 'default')
         if (endTip) {
-          circle.attr('data-tooltip-id', tooltipId).attr('data-tooltip-html', endTip).attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
+          circle
+            .attr('data-tooltip-id', tooltipId)
+            .attr('data-tooltip-html', endTip)
+            .attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
+            .attr('data-vt-tip', 'flow-end')
+          circle.on('mouseenter', () => {
+            pendingTipKindRef.current = 'flow-end'
+          })
         }
         return
       }
@@ -1878,6 +1887,10 @@ export default function ActionFlowVisualization({
         .attr('data-tooltip-id', tooltipId)
         .attr('data-tooltip-html', buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs))
         .attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
+        .attr('data-vt-tip', 'action')
+      actionTarget.on('mouseenter', () => {
+        pendingTipKindRef.current = 'action'
+      })
       if (onSelectAction) {
         actionTarget.on('click', (ev: MouseEvent) => {
           ev.stopPropagation()
@@ -2416,6 +2429,11 @@ export default function ActionFlowVisualization({
           /** Inner `overflow:auto` can bubble `scroll` globally and dismiss tooltips prematurely */
           globalCloseEvents={{ scroll: false, resize: true, escape: true }}
           arrowColor="#f8fafc"
+          afterShow={() => {
+            const kind = pendingTipKindRef.current
+            if (kind === 'flow-end') experimentTelemetry.onFlowEndSummaryTooltipShow()
+            else experimentTelemetry.onActionTooltipShow(undefined, 'timeline')
+          }}
         />
       )}
     </div>
