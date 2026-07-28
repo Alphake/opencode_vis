@@ -1348,6 +1348,8 @@ interface Props {
   actionTypePaletteId?: ActionTypePaletteId
   /** Experiment: attribute tooltip views to this subtask panel. */
   telemetrySubtaskId?: string
+  /** Fired when a flow tooltip opens/closes — parent can slow live redraw while the user is reading. */
+  onTooltipOpenChange?: (open: boolean) => void
 }
 
 export default function ActionFlowVisualization({
@@ -1376,6 +1378,7 @@ export default function ActionFlowVisualization({
   forkAnchorActionKey = null,
   actionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID,
   telemetrySubtaskId,
+  onTooltipOpenChange,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -1394,9 +1397,31 @@ export default function ActionFlowVisualization({
   const pendingTipKindRef = useRef<'action' | 'flow-end' | null>(null)
   const telemetrySubtaskIdRef = useRef(telemetrySubtaskId)
   telemetrySubtaskIdRef.current = telemetrySubtaskId
+  const onTooltipOpenChangeRef = useRef(onTooltipOpenChange)
+  onTooltipOpenChangeRef.current = onTooltipOpenChange
+  /** Ignore mouseleave fired when D3 tears down hovered anchors mid-rebuild. */
+  const rebuildingFlowRef = useRef(false)
   useEffect(() => {
     setTooltipMounted(true)
   }, [])
+  useEffect(() => {
+    return () => {
+      onTooltipOpenChangeRef.current?.(false)
+    }
+  }, [])
+
+  const bindTooltipOpenTracking = (
+    sel: d3.Selection<SVGGraphicsElement, unknown, null, undefined>,
+  ) => {
+    sel
+      .on('mouseenter.tipOpen', () => {
+        onTooltipOpenChangeRef.current?.(true)
+      })
+      .on('mouseleave.tipOpen', () => {
+        if (rebuildingFlowRef.current) return
+        onTooltipOpenChangeRef.current?.(false)
+      })
+  }
   const layoutEndOpts = useMemo(
     () => ({
       includeEndNode: showFlowEndNode,
@@ -1424,6 +1449,7 @@ export default function ActionFlowVisualization({
     const svg = svgRef.current
     if (!svg) return
     const root = d3.select(svg)
+    rebuildingFlowRef.current = true
     root.selectAll('*').remove()
 
     const maxTok = Math.max(1, ...actions.map(a => a.tokenEstimate))
@@ -1823,6 +1849,9 @@ export default function ActionFlowVisualization({
             const sid = telemetrySubtaskIdRef.current
             if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.flow_end')
           })
+          bindTooltipOpenTracking(
+            circle as unknown as d3.Selection<SVGGraphicsElement, unknown, null, undefined>,
+          )
         }
         return
       }
@@ -1900,6 +1929,7 @@ export default function ActionFlowVisualization({
         const sid = telemetrySubtaskIdRef.current
         if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.timeline')
       })
+      bindTooltipOpenTracking(actionTarget)
       if (onSelectAction) {
         actionTarget.on('click', (ev: MouseEvent) => {
           ev.stopPropagation()
@@ -2243,6 +2273,8 @@ export default function ActionFlowVisualization({
         scrollRef.current.scrollTo({ left: targetLeft, behavior: 'smooth' })
       }
     }
+
+    rebuildingFlowRef.current = false
   }, [
     actions,
     durationMode,
@@ -2439,6 +2471,7 @@ export default function ActionFlowVisualization({
           globalCloseEvents={{ scroll: false, resize: true, escape: true }}
           arrowColor="#f8fafc"
           afterShow={() => {
+            onTooltipOpenChangeRef.current?.(true)
             const kind = pendingTipKindRef.current
             if (kind === 'flow-end') {
               experimentTelemetry.onFlowEndSummaryTooltipShow(undefined, telemetrySubtaskId)

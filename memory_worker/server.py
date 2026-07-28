@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -41,6 +42,10 @@ if _TRACE_PARSER_SPEC is None or _TRACE_PARSER_SPEC.loader is None:
     raise RuntimeError("failed to load memory_worker/trace_parser.py")
 trace_parser = importlib.util.module_from_spec(_TRACE_PARSER_SPEC)
 _TRACE_PARSER_SPEC.loader.exec_module(trace_parser)
+
+# skill_evolve package lives under memory_worker/; ensure importable without install.
+if str(WORKER_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKER_ROOT))
 
 
 def load_env_file(path: Path, *, override: bool = False) -> None:
@@ -87,6 +92,9 @@ SKILL_SEARCH_ROOTS_EXTRA = split_env_paths(os.environ.get("SKILL_SEARCH_ROOTS_EX
 MW_ANALYZER_MODE = (os.environ.get("MW_ANALYZER_MODE") or "opencode").strip().lower()
 MW_WRITER_MODE = (os.environ.get("MW_WRITER_MODE") or "opencode").strip().lower()
 MW_TASK_SWITCH_MODE = (os.environ.get("MW_TASK_SWITCH_MODE") or "opencode").strip().lower()
+# skill_evolve = vibetrace-skill online distill; legacy = analyzer+writer
+# chinese branch default: legacy (analyzer+writer). Set MW_SKILL_PIPELINE=skill_evolve to opt in.
+MW_SKILL_PIPELINE = (os.environ.get("MW_SKILL_PIPELINE") or "legacy").strip().lower()
 MW_SESSION_STRATEGY = (os.environ.get("MW_SESSION_STRATEGY") or "new").strip().lower()
 MW_SESSION_TITLE_PREFIX = (os.environ.get("MW_SESSION_TITLE_PREFIX") or "[mw-internal]").strip()
 MW_CORS_ORIGINS = [x.strip() for x in (os.environ.get("MW_CORS_ORIGINS") or "http://localhost:5173;http://127.0.0.1:5173").split(";") if x.strip()]
@@ -1155,6 +1163,10 @@ def _skill_records_from_pipeline_result(result: dict[str, Any]) -> list[dict[str
         writer = item.get("result") if isinstance(item.get("result"), dict) else {}
         skill_name = str(writer.get("skillName") or suggestion.get("skill_name") or "").strip()
         target_dir = str(writer.get("targetDir") or "").strip()
+        if not target_dir:
+            removed = writer.get("removedPaths")
+            if isinstance(removed, list) and removed:
+                target_dir = str(removed[0] or "").strip()
         status = str(writer.get("status") or "").strip() or "unknown"
         if not skill_name and not target_dir:
             continue
@@ -1166,6 +1178,7 @@ def _skill_records_from_pipeline_result(result: dict[str, Any]) -> list[dict[str
                 "operation": str(writer.get("operation") or suggestion.get("operation") or ""),
                 "rationale": str(suggestion.get("rationale") or ""),
                 "createdAt": now_iso(),
+                "engine": str(writer.get("engine") or result.get("engine") or suggestion.get("engine") or ""),
             }
         )
     return records
@@ -1304,7 +1317,7 @@ def _history_entry_from_pipeline_suggestion(
         task_label = str(task_segment.get("summary") or task_segment.get("title") or task_segment.get("description") or "").strip()
     return {
         "id": f"pipeline:{run_dir}:{created_at}",
-        "source": "pipeline",
+        "source": "skill_evolve" if str(suggestion.get("engine") or "") == "skill_evolve" else "pipeline",
         "channel": "task_switch",
         "operation": operation,
         "rationale": rationale,
@@ -1317,6 +1330,7 @@ def _history_entry_from_pipeline_suggestion(
         "taskLabel": task_label,
         "runDir": run_dir,
         "skillName": str(suggestion.get("skill_name") or "").strip(),
+        "engine": str(suggestion.get("engine") or ""),
     }
 
 
@@ -1589,6 +1603,43 @@ def save_task_skill_md(payload: dict[str, Any]) -> dict[str, Any]:
         "skillName": skill_name,
         "historyEntry": entry,
     }
+
+
+def mark_task_skill_status(
+    session_id: str,
+    task_segment: dict[str, Any],
+    *,
+    status: str,
+    pipeline_run_dir: str = "",
+    error: str = "",
+) -> None:
+    """Mark a task skill index entry (e.g. distilling) so the Skill Panel can poll."""
+    task_id = str(task_segment.get("taskId") or "").strip()
+    if not session_id or not task_id:
+        return
+    with _task_switch_lock:
+        index = _load_task_skill_index()
+        tasks = index.setdefault("tasks", {})
+        key = _task_skill_key(session_id, task_id)
+        existing = tasks.get(key) if isinstance(tasks.get(key), dict) else {}
+        skills = [x for x in existing.get("skills", []) if isinstance(x, dict)]
+        entry: dict[str, Any] = {
+            **existing,
+            "sessionId": session_id,
+            "taskId": task_id,
+            "taskSegment": task_segment or existing.get("taskSegment") or {},
+            "status": status,
+            "skills": skills,
+            "updatedAt": now_iso(),
+        }
+        if pipeline_run_dir:
+            entry["pipelineRunDir"] = pipeline_run_dir
+        if error:
+            entry["error"] = error
+        elif "error" in entry and status in {"distilling", "ready", "none"}:
+            entry.pop("error", None)
+        tasks[key] = entry
+        _save_task_skill_index(index)
 
 
 def register_task_skill_result(
@@ -2985,6 +3036,14 @@ def _complete_task_switch_extraction(
                 },
             )
             append_log(switch_log_file, "task_switch.extraction.failed", {"reason": "trace_build_failed"})
+            failed_segment = _task_segment_summary(previous_task_turns)
+            if failed_segment.get("taskId"):
+                mark_task_skill_status(
+                    session_id,
+                    failed_segment,
+                    status="none",
+                    error="trace_build_failed",
+                )
             return
 
         if fork_meta:
@@ -3071,6 +3130,17 @@ def _complete_task_switch_extraction(
     except Exception as e:
         append_log(switch_log_file, "task_switch.extraction.failed", {"error": str(e)})
         write_json(switch_run_dir / "04-pipeline-result.json", {"ok": False, "error": str(e)})
+        try:
+            failed_segment = _task_segment_summary(previous_task_turns)
+            if failed_segment.get("taskId"):
+                mark_task_skill_status(
+                    session_id,
+                    failed_segment,
+                    status="error",
+                    error=str(e),
+                )
+        except Exception:
+            pass
 
 
 def _message_index_by_id(messages: list[dict[str, Any]], message_id: str) -> int:
@@ -3667,6 +3737,18 @@ def _run_user_prompt_task_switch_worker(
         task_switched=True,
         task_switch_run_dir=str(switch_run_dir),
     )
+    if extracted_segment.get("taskId"):
+        mark_task_skill_status(
+            session_id,
+            extracted_segment,
+            status="distilling",
+            pipeline_run_dir="",
+        )
+        append_log(
+            switch_log_file,
+            "task_switch.skill_index.distilling",
+            {"taskId": extracted_segment.get("taskId")},
+        )
 
     threading.Thread(
         target=_complete_task_switch_extraction,
@@ -4724,7 +4806,7 @@ def run_pipeline(trace: dict[str, Any], directory_override: str | None = None, p
     run_dir.mkdir(parents=True, exist_ok=True)
     log_file = run_dir / "00-run.log"
 
-    append_log(log_file, "pipeline.start", {"runId": run_id})
+    append_log(log_file, "pipeline.start", {"runId": run_id, "skillPipeline": MW_SKILL_PIPELINE})
     write_json(run_dir / "01-trace.json", trace)
     append_log(log_file, "trace.saved", {"tracePath": str(run_dir / "01-trace.json")})
 
@@ -4735,8 +4817,111 @@ def run_pipeline(trace: dict[str, Any], directory_override: str | None = None, p
     effective_directory = directory_override or trace_dir or OPENCODE_DIRECTORY
     pool_summary = build_pool_summary(Path(effective_directory))
     write_json(run_dir / "02-pool-summary.json", pool_summary)
-    append_log(log_file, "pool_summary.generated", {"skillCount": len(pool_summary.get("skills") or []), "effectiveDirectory": effective_directory})
+    append_log(
+        log_file,
+        "pool_summary.generated",
+        {
+            "skillCount": len(pool_summary.get("skills") or []),
+            "effectiveDirectory": effective_directory,
+        },
+    )
 
+    if MW_SKILL_PIPELINE in {"skill_evolve", "evolve", "vibetrace-skill"}:
+        return _run_skill_evolve_pipeline(
+            trace,
+            run_id=run_id,
+            run_dir=run_dir,
+            log_file=log_file,
+            effective_directory=effective_directory,
+            parent_session_id=parent_session_id,
+            pool_summary=pool_summary,
+        )
+
+    return _run_legacy_analyzer_writer_pipeline(
+        trace,
+        run_id=run_id,
+        run_dir=run_dir,
+        log_file=log_file,
+        effective_directory=effective_directory,
+        parent_session_id=parent_session_id,
+        pool_summary=pool_summary,
+    )
+
+
+def _run_skill_evolve_pipeline(
+    trace: dict[str, Any],
+    *,
+    run_id: str,
+    run_dir: Path,
+    log_file: Path,
+    effective_directory: str,
+    parent_session_id: str | None,
+    pool_summary: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        from skill_evolve import run_skill_evolve_pipeline
+    except Exception as e:
+        append_log(log_file, "skill_evolve.import.failed", {"error": str(e)})
+        return {
+            "ok": False,
+            "runId": run_id,
+            "runDir": str(run_dir),
+            "error": f"skill_evolve import failed: {e}",
+            "engine": "skill_evolve",
+        }
+
+    skill_roots = configured_skill_roots(Path(effective_directory))
+
+    def complete_provider(
+        prompt: str,
+        model: str,
+        timeout_sec: int,
+        variant: str | None,
+        label: str,
+    ) -> str:
+        # model/variant currently follow OpenCode session defaults; label drives log filenames.
+        del model, variant, timeout_sec
+        llm_out = opencode_generate_text(
+            prompt,
+            run_dir,
+            log_file,
+            label,
+            directory=effective_directory,
+            parent_session_id=parent_session_id,
+            retry_with_new_session=True,
+            max_attempts=MW_ANALYZER_SESSION_ATTEMPTS,
+        )
+        return str(llm_out.get("rawText") or "")
+
+    result = run_skill_evolve_pipeline(
+        trace,
+        run_dir=run_dir,
+        log_file=log_file,
+        skill_roots=skill_roots,
+        skill_write_root=SKILL_WRITE_ROOT,
+        write_json=write_json,
+        append_log=append_log,
+        complete_provider=complete_provider,
+        directory=effective_directory,
+        parent_session_id=parent_session_id,
+    )
+    # Keep pool summary path consistent for callers / UI debugging.
+    if not result.get("poolSummaryPath"):
+        result["poolSummaryPath"] = str(run_dir / "02-pool-summary.json")
+    result["poolSummary"] = pool_summary
+    return result
+
+
+def _run_legacy_analyzer_writer_pipeline(
+    trace: dict[str, Any],
+    *,
+    run_id: str,
+    run_dir: Path,
+    log_file: Path,
+    effective_directory: str,
+    parent_session_id: str | None,
+    pool_summary: dict[str, Any],
+) -> dict[str, Any]:
     try:
         analyzer_output = run_analyzer(
             trace,
@@ -4864,6 +5049,7 @@ def run_pipeline(trace: dict[str, Any], directory_override: str | None = None, p
         "parentSessionID": parent_session_id or "",
         "analyzerSessionID": analyzer_session_id,
         "writerSessionID": "",
+        "engine": "legacy",
     }
     writer_session_id = ""
     for item in writer_results:
@@ -4890,6 +5076,7 @@ def run_pipeline(trace: dict[str, Any], directory_override: str | None = None, p
         "writerResults": writer_results,
         "analyzerSessionID": analyzer_session_id,
         "writerSessionID": writer_session_id,
+        "engine": "legacy",
     }
 
 
@@ -4986,6 +5173,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "opencodeDirectory": OPENCODE_DIRECTORY,
                     "skillWriteRoot": str(SKILL_WRITE_ROOT),
                     "analyzerMode": MW_ANALYZER_MODE,
+                    "skillPipeline": MW_SKILL_PIPELINE,
                     "taskSwitchMode": MW_TASK_SWITCH_MODE,
                     "taskSwitchContract": "segments.v1",
                     "taskSwitchStatePath": str(TASK_SWITCH_STATE_PATH),

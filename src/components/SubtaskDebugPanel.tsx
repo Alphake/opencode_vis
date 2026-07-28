@@ -243,6 +243,27 @@ export default function SubtaskDebugPanel({
   const actionTypePaletteId: ActionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID
   const [childSessionMessages, setChildSessionMessages] = useState<Record<string, OcMessage[]>>({})
   const summaryViewportRef = useRef<HTMLDivElement | null>(null)
+  /** Follow the newest panel while generating; pause when the user scrolls up to read history. */
+  const stickTrajectoryToBottomRef = useRef(true)
+  const TRAJECTORY_NEAR_BOTTOM_PX = 120
+
+  const scrollTrajectoryToBottom = (behavior: ScrollBehavior = 'auto') => {
+    if (flowLayoutMode === 'summary') return
+    const el = listScrollRef?.current
+    if (!el) return
+    if (behavior === 'smooth') {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    } else {
+      el.scrollTop = el.scrollHeight
+    }
+  }
+
+  const updateStickTrajectoryFromScroll = () => {
+    const el = listScrollRef?.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickTrajectoryToBottomRef.current = distanceFromBottom <= TRAJECTORY_NEAR_BOTTOM_PX
+  }
 
   useEffect(() => {
     if (!onPanelBecameVisible) return
@@ -264,6 +285,42 @@ export default function SubtaskDebugPanel({
     nodes.forEach((node) => observer.observe(node))
     return () => observer.disconnect()
   }, [visibleSubtasks, flowLayoutMode, onPanelBecameVisible, listScrollRef])
+
+  /** New panels while pinned to bottom: keep the newest card in view. */
+  const prevVisibleCountRef = useRef(visibleSubtasks.length)
+  useEffect(() => {
+    if (flowLayoutMode === 'summary') return
+    const prev = prevVisibleCountRef.current
+    const next = visibleSubtasks.length
+    prevVisibleCountRef.current = next
+    if (next <= prev) return
+    if (!stickTrajectoryToBottomRef.current) return
+    requestAnimationFrame(() => {
+      scrollTrajectoryToBottom('smooth')
+    })
+  }, [visibleSubtasks.length, flowLayoutMode, listScrollRef])
+
+  /** Keep following while pinned as cards grow (streaming tools / duration ticks). */
+  useEffect(() => {
+    if (flowLayoutMode === 'summary') return
+    if (!stickTrajectoryToBottomRef.current || visibleSubtasks.length === 0) return
+    requestAnimationFrame(() => {
+      if (!stickTrajectoryToBottomRef.current) return
+      scrollTrajectoryToBottom()
+    })
+  }, [visibleSubtasks, messages, flowLayoutMode, listScrollRef])
+
+  useEffect(() => {
+    if (flowLayoutMode === 'summary') return
+    const el = listScrollRef?.current
+    if (!el || typeof MutationObserver === 'undefined') return
+    const observer = new MutationObserver(() => {
+      if (!stickTrajectoryToBottomRef.current) return
+      scrollTrajectoryToBottom()
+    })
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+    return () => observer.disconnect()
+  }, [flowLayoutMode, listScrollRef, sessionId])
   const [summaryViewportSize, setSummaryViewportSize] = useState({ width: 0, height: 0 })
   const displayTaskTabs =
     taskTabs.length > 0
@@ -423,6 +480,102 @@ export default function SubtaskDebugPanel({
       cancelled = true
     }
   }, [canShowSkillDock, sessionDirectory, sessionId, sessionTaskIdsKey])
+
+  const anySkillDistilling = sessionTaskIds.some((taskId) => skillStatusByTaskId[taskId] === 'distilling')
+
+  // Poll while distilling (and briefly after new task tabs appear) so users see skills without switching tabs.
+  useEffect(() => {
+    if (!canShowSkillDock || !sessionId || sessionTaskIds.length === 0) return
+
+    let cancelled = false
+    let attempts = 0
+    const taskIds = [...sessionTaskIds]
+    const startedAt = Date.now()
+    const GRACE_MS = 45_000
+    const MAX_MS = 4 * 60_000
+
+    const applyEntries = (
+      entries: Array<{
+        taskId: string
+        result: Awaited<ReturnType<typeof fetchTaskSkills>> | null
+        error: string | null
+      }>,
+    ) => {
+      setSkillsByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          if (entry.result) next[entry.taskId] = entry.result.skills ?? []
+        }
+        return next
+      })
+      setSkillStatusByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          next[entry.taskId] = entry.result?.status || (entry.error ? 'error' : prev[entry.taskId] || 'none')
+        }
+        return next
+      })
+      setSkillDiscoveredCountByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          if (entry.result) next[entry.taskId] = entry.result.discoveredCount ?? 0
+        }
+        return next
+      })
+      setSkillErrorByTaskId((prev) => {
+        const next = { ...prev }
+        for (const entry of entries) {
+          next[entry.taskId] = entry.error || ''
+        }
+        return next
+      })
+      return entries.map((entry) => entry.result?.status || (entry.error ? 'error' : 'none'))
+    }
+
+    const pollOnce = async () => {
+      const entries = await Promise.all(
+        taskIds.map(async (taskId) => {
+          try {
+            const result = await fetchTaskSkills(sessionId, taskId, sessionDirectory)
+            return { taskId, result, error: null as string | null }
+          } catch (err: unknown) {
+            return {
+              taskId,
+              result: null,
+              error: err instanceof Error ? err.message : String(err),
+            }
+          }
+        }),
+      )
+      if (cancelled) return [] as string[]
+      return applyEntries(entries)
+    }
+
+    const timer = window.setInterval(() => {
+      void (async () => {
+        if (cancelled) return
+        attempts += 1
+        const elapsed = Date.now() - startedAt
+        if (elapsed > MAX_MS) {
+          window.clearInterval(timer)
+          return
+        }
+        const statuses = await pollOnce()
+        if (cancelled) return
+        const stillDistilling = statuses.some((s) => s === 'distilling')
+        const inGrace = elapsed < GRACE_MS
+        if (!stillDistilling && !inGrace) {
+          window.clearInterval(timer)
+        }
+        void attempts
+      })()
+    }, 20_000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [anySkillDistilling, canShowSkillDock, sessionDirectory, sessionId, sessionTaskIdsKey])
 
   const summarySegments = useMemo(
     () =>
@@ -1165,7 +1318,10 @@ export default function SubtaskDebugPanel({
       >
         <div
           ref={listScrollRef}
-          onScroll={() => experimentTelemetry.onScroll('trajectory', sessionId)}
+          onScroll={() => {
+            updateStickTrajectoryFromScroll()
+            experimentTelemetry.onScroll('trajectory', sessionId)
+          }}
           style={{
             height: '100%',
             width: '100%',
@@ -1301,16 +1457,22 @@ export default function SubtaskDebugPanel({
               }}
             >
               {sessionSkillLoading
-                ? 'loading'
+                ? '加载中'
                 : sessionSkillStatus === 'ready'
-                ? 'skill ready'
+                ? '已就绪'
                 : sessionSkillStatus === 'distilling'
-                ? 'distilling'
+                ? '正在沉淀…'
                 : sessionSkillStatus === 'error'
-                ? 'error'
-                : 'none'}
+                ? '沉淀失败'
+                : '暂无'}
             </span>
           </div>
+
+          {sessionSkillStatus === 'distilling' || sessionSkillLoading ? (
+            <div style={{ fontSize: 10, color: '#92400E', lineHeight: 1.4 }}>
+              正在根据上一任务的 trace 沉淀 skill，完成后会自动出现在下方，无需手动刷新。
+            </div>
+          ) : null}
 
           {sessionSkills.length > 0 || sessionSkillError || (!sessionSkillLoading && sessionTaskIds.length > 0) ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minHeight: 0, maxHeight: 'min(160px, 28vh)', overflowY: 'auto' }}>

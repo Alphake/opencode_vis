@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { MappedAction, OcMessage } from '../types/opencode'
-import type { AssistantSubtask } from '../utils/subtaskGrouping'
+import { messageHasAgentStepFinishStop, type AssistantSubtask } from '../utils/subtaskGrouping'
 import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
 import { buildFlowEndSummary } from '../utils/flowEndSummary'
 import {
@@ -239,6 +239,8 @@ export default function SubtaskCard({
   onOpenFeedbackComment,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
+  /** While reading a flow tooltip, slow live redraw so the tip is not torn down every 2s. */
+  const [flowTooltipOpen, setFlowTooltipOpen] = useState(false)
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [filterMode, setFilterMode] = useState<FilterMode>('duration')
   const [snapshotBusy, setSnapshotBusy] = useState(false)
@@ -340,11 +342,13 @@ export default function SubtaskCard({
 
   useEffect(() => {
     if (!hasRunningTaskWithChild) return
+    /** Same cadence as the live duration tick so child rails stay in sync; slow while reading a tooltip. */
+    const intervalMs = flowTooltipOpen ? 5000 : 3200
     const id = window.setInterval(() => {
       void loadChildBranches()
-    }, 3200)
+    }, intervalMs)
     return () => window.clearInterval(id)
-  }, [hasRunningTaskWithChild, loadChildBranches])
+  }, [hasRunningTaskWithChild, loadChildBranches, flowTooltipOpen])
 
   const flowActions = useMemo(() => {
     const merged = [...parentFlowActions, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
@@ -557,21 +561,69 @@ export default function SubtaskCard({
     [flowActions],
   )
 
+  const FLOW_TICK_MS = 2000
+  const FLOW_TICK_WHILE_TOOLTIP_MS = 5000
+
   useEffect(() => {
     if (!hasActiveRunningAction) return
     /**
-     * 2s heartbeat: bumps `parentFlowActions`/`flowActions` references so ActionFlowVisualization’s D3 effect
-     * rebuilds (~one visible flash per tick). 1 Hz felt too frantic during streamed generation — 2s balances
-     * “live duration” readability with calmer visuals.
+     * Heartbeat bumps `parentFlowActions`/`flowActions` so ActionFlowVisualization’s D3 effect rebuilds.
+     * Default 2s; while a tooltip is open, 5s so the user can finish reading before the next wipe.
      */
-    const id = window.setInterval(() => setNowTick(Date.now()), 2000)
+    const intervalMs = flowTooltipOpen ? FLOW_TICK_WHILE_TOOLTIP_MS : FLOW_TICK_MS
+    const id = window.setInterval(() => setNowTick(Date.now()), intervalMs)
     return () => window.clearInterval(id)
-  }, [hasActiveRunningAction])
+  }, [hasActiveRunningAction, flowTooltipOpen])
+
+  const handleFlowTooltipOpenChange = useCallback((open: boolean) => {
+    setFlowTooltipOpen((prev) => {
+      if (prev === open) return prev
+      return open
+    })
+  }, [])
+
+  const wasFlowTooltipOpenRef = useRef(false)
+  useEffect(() => {
+    const wasOpen = wasFlowTooltipOpenRef.current
+    wasFlowTooltipOpenRef.current = flowTooltipOpen
+    if (wasOpen && !flowTooltipOpen && hasActiveRunningAction) {
+      // Tooltip / hover ended: catch up once, then the 2s interval resumes.
+      setNowTick(Date.now())
+    }
+  }, [flowTooltipOpen, hasActiveRunningAction])
 
   const durationLabel = formatDurationMs(m.durationMs)
   const changesLabel = String(m.mutatedFileCount)
-  /** Hide the golden end circle while tools are active; show when this panel’s trace finishes. */
-  const showFlowEndNode = !hasActiveRunningAction && flowActions.length > 0
+  /**
+   * Golden end circle only after this panel’s trace is confirmed finished — not as soon as the first
+   * Think/Response appears (those parts are always mapped as `completed` while the turn may still be live).
+   * Finished when: no running/pending tools, and either the last assistant turn stopped (`finish: stop` /
+   * step-finish stop) or a later message has already sealed this panel.
+   */
+  const showFlowEndNode = useMemo(() => {
+    if (flowActions.length === 0 || hasActiveRunningAction) return false
+
+    const assistantIndices = subtask.assistantMessageIndices
+    if (assistantIndices.length === 0) return false
+    const lastIdx = assistantIndices[assistantIndices.length - 1]!
+    const lastMsg = messages[lastIdx]
+    if (!lastMsg || lastMsg.info.role !== 'assistant') return false
+
+    if (messageHasAgentStepFinishStop(lastMsg)) return true
+    if (lastMsg.info.finish?.trim().toLowerCase() === 'stop') return true
+
+    const spanEnd = Math.max(lastIdx, ...(subtask.userMessageIndices ?? []))
+    for (let i = spanEnd + 1; i < messages.length; i++) {
+      if (messages[i]) return true
+    }
+    return false
+  }, [
+    flowActions.length,
+    hasActiveRunningAction,
+    messages,
+    subtask.assistantMessageIndices,
+    subtask.userMessageIndices,
+  ])
 
   /**
    * Stabilize `flowEndSummary` identity — inline object literals each render fooled ActionFlowVisualization’s first
@@ -1057,6 +1109,7 @@ export default function SubtaskCard({
               ghostFlowEndSummary={ghostFlowEndSummary}
               viewportMaxHeight={FLOW_VIEWPORT_MAX_HEIGHT}
               telemetrySubtaskId={subtask.subtask_id}
+              onTooltipOpenChange={handleFlowTooltipOpenChange}
             />
           )
         })()}

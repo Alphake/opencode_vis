@@ -114,6 +114,7 @@ export interface TaskSkillRecord {
   rationale?: string
   createdAt?: string
   feedbackRunDir?: string
+  engine?: string
 }
 
 export interface SkillDistillChange {
