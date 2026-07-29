@@ -118,6 +118,20 @@ def trace_digest(t: Trace, label: str) -> str:
         lines.append(
             f"- action summary: total={t.n_actions}, errors={error_count}, by_tool: {counts}"
         )
+        if error_count:
+            lines.append(
+                "- error actions (for fix-playbook distillation — pair with later recovery or user feedback):"
+            )
+            shown = 0
+            for action in t.actions:
+                if not action.is_error or shown >= 5:
+                    continue
+                inp = str(action.input)[:120].replace("\n", " ")
+                out = (action.output or "").strip().replace("\n", " ")[:160]
+                lines.append(f"  {action.index}. [{action.tool}] {inp}")
+                if out:
+                    lines.append(f"     error: {out}")
+                shown += 1
     if skill_uses := _skill_uses(t):
         lines.append(f"- skills used: {'; '.join(skill_uses)}")
 
@@ -149,13 +163,15 @@ def trace_digest(t: Trace, label: str) -> str:
 
 def evidence_digest(e: Evidence) -> str:
     problem = (e.instance.get("problem_statement", "") or "")[:MAX_PROBLEM_CHARS]
-    repo = str(e.instance.get("repo") or "(unknown)")
-    difficulty = str(e.instance.get("difficulty") or "(unknown)")
+    workspace = str(e.instance.get("workspace") or e.instance.get("repo") or "(unknown)")
     blocks = [
-        "## Task\n"
-        f"- repository: {repo}\n"
-        f"- difficulty: {difficulty}\n"
-        f"- request (truncated):\n{problem}"
+        "## User intent (PRIMARY — weight this most in distiller/scorer reasoning)\n"
+        f"{problem or '(no user prompt captured)'}\n\n"
+        f"- workspace: {workspace}\n"
+        "- Treat the user request above as the main signal for whether a skill should exist "
+        "and what `Use when` cues should say. Trace actions are supporting evidence only.\n"
+        "- **User feedback messages** and **error→fix arcs** in the trace are strong evidence "
+        "for fix-playbook skills — including fixes the user supplied."
     ]
     if e.kind != "pair":
         blocks.append(trace_digest(e.primary, "Trace tau"))

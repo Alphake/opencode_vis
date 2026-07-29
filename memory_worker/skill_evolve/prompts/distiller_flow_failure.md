@@ -1,9 +1,13 @@
 ## Evidence Method: Failed Single Trace
 
-Treat the trace as negative evidence. It does not establish that its repair approach is correct.
+Treat the trace as evidence about **errors, recovery, and verified fixes** for similar future user requests.
 
-1. Identify only attributable failed decisions, wasted actions, unsafe scope, missing stop conditions, or repository-native build and testing procedures that were independently useful.
-2. A new skill may preserve a focused build, test, avoidance, recovery, or stopping rule only when pre-action cues and the work it removes are explicit.
-3. Prefer revising or removing an invoked harmful skill when the trace supports that causal attribution.
-4. Never encode the failed implementation, inferred repair, unverified diagnosis, or a longer generic investigation workflow as positive guidance.
-5. Emit nothing when the only lesson is that the task failed or when a safe transferable action is not independently supported.
+1. Restate user intent first. Check **feedback messages** — user may have supplied the fix directly.
+2. Identify error actions (`[x ...]` in retained actions), tool failures, and what changed before success (if any).
+3. **Eligible to emit CREATE/REVISE** when you can document:
+   - **Symptom** (error text, HTTP code, user complaint)
+   - **Verified fix** that worked — whether discovered by agent **or given by user**
+   - **Avoid** — failed attempts in trace (do not encode as positive steps)
+4. Prefer revising/removing a harmful invoked skill when causally supported.
+5. Never encode the **broken attempt alone** as positive guidance; always pair with the fix that evidence supports.
+6. Emit nothing only when errors are one-off noise with no symptom pattern and no verified recovery.

@@ -37,8 +37,10 @@
    - `NONE`：跳过。
 3. 对于 `SKILL.md`：
    - 必须含 frontmatter：`name` 与 `description`。
-   - `description` 应具体说明触发场景、用途、输入/输出。
+   - `description` 应具体说明触发场景、用途、输入/输出；**协作/工作流类 skill 的触发条件须贴近用户原话**（如「协商 git 流程」「每改一版 commit」）。
    - 正文应含：能力概述、用法、分步流程、注意/约束、交付标准/检查清单。
+   - **协作流程 skill**：忠实写入 analyzer 给出的协作节奏与命令模板，保留用户 review/确认节点，不要删减为泛泛的「git 最佳实践」。
+   - **错误/fix 类 skill**：`section_steps` 写 trace 中**已验证**的有效修复；`section_cautions` 写失败尝试与用户/feedback 强调的禁止项。
 4. 对于脚本或代码文件：
    - 不要输出明显语法错误。
    - 若信息不足以写出可靠脚本，写最小占位并注明 TODO。

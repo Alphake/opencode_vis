@@ -1,8 +1,11 @@
 ## Evidence Method: Fork Pair
 
-Treat `tau-` as the failed attempt and `tau+` as a verifier-passing recovery continuation forked from its session and workspace after user feedback. `tau+` is not an independent full trajectory, and its action indices do not align with `tau-`.
+Treat `tau-` as the attempt before user feedback and `tau+` as the continuation after feedback. Indices do not align between traces.
 
-1. Identify the feedback-addressed gap and the earliest recovery decision in `tau+` that corrected attributable behavior in `tau-`; never compare actions by equal index.
-2. Keep only corrections that could have been triggered before the costly or harmful behavior on a future task.
-3. Express only the transferable decision contrast as: under condition C, follow A+ and avoid A-; include verification and a done condition.
-4. Emit nothing when the correction depends on the same root cause or repair recurring, or is otherwise task-specific, generic, or causally unclear.
+1. Read **user intent** and **feedback messages** first — user corrections are **primary fix evidence**.
+2. Identify what failed or went wrong in `tau-` (errors, wrong approach, user dissatisfaction).
+3. Identify what changed in `tau+` that fixed it — often exactly what the user asked for.
+4. Distill: under symptom/trigger C, **avoid** approach A- (from tau-), **follow** approach A+ (from tau+ / user instruction).
+5. Include `## Avoid` for the failed path and `## Fix` for the recovery — both are valuable.
+6. Pair evidence is ideal for fix playbooks and collaboration skills; **do emit** when user supplied the correction.
+7. Emit nothing only when the correction is one-off with no similar future user phrasing.
