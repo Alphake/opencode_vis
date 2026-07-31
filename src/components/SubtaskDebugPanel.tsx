@@ -1,6 +1,13 @@
 import { Fragment, type RefObject, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Tooltip } from 'react-tooltip'
-import type { MappedAction, OcMessage, OcMessagePart } from '../types/opencode'
+import type {
+  MappedAction,
+  OcMessage,
+  OcMessagePart,
+  OcPendingPermissionRequest,
+  OcPermissionTraceEvent,
+  OcSessionCompactionEvent,
+} from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
 import SubtaskCard from './SubtaskCard'
@@ -190,6 +197,12 @@ interface SubtaskDebugPanelProps {
   errorDiagnosisBySubtaskId?: Record<string, MemoryWorkerErrorDiagnosis>
   /** First time a subtask card scrolls into view (≥35% visible). */
   onPanelBecameVisible?: (subtaskId: string) => void
+  /** Live OpenCode permission ask for this session (SSE / hydrate). */
+  pendingPermission?: OcPendingPermissionRequest | null
+  /** Permission asks kept on the trajectory after Allow/Reject. */
+  permissionTraces?: OcPermissionTraceEvent[]
+  /** Live SSE compaction marker for this session. */
+  recentCompaction?: OcSessionCompactionEvent | null
 }
 
 export default function SubtaskDebugPanel({
@@ -211,6 +224,9 @@ export default function SubtaskDebugPanel({
   sessionId,
   errorDiagnosisBySubtaskId = {},
   onPanelBecameVisible,
+  pendingPermission = null,
+  permissionTraces = [],
+  recentCompaction = null,
 }: SubtaskDebugPanelProps) {
   const summaryTooltipSafeId = useId().replace(/:/g, '')
   const summaryTooltipId = `subtask-summary-tip-${summaryTooltipSafeId}`
@@ -1338,7 +1354,49 @@ export default function SubtaskDebugPanel({
           ) : visibleSubtasks.length === 0 ? (
             <span style={{ color: '#AAA', fontSize: 11 }}>No subtasks</span>
           ) : (
-            visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => {
+            (() => {
+              const permMsgId = pendingPermission?.tool?.messageID
+              let permissionCardSourceIndex: number | null = null
+              if (pendingPermission) {
+                if (permMsgId) {
+                  for (const { subtask: st, sourceIndex } of visibleSubtasks) {
+                    if (st.assistantMessageIndices.some((i) => messages[i]?.info?.id === permMsgId)) {
+                      permissionCardSourceIndex = sourceIndex
+                      break
+                    }
+                  }
+                }
+                if (permissionCardSourceIndex === null) {
+                  permissionCardSourceIndex =
+                    visibleSubtasks[visibleSubtasks.length - 1]?.sourceIndex ?? null
+                }
+              }
+              const compactionCardSourceIndex =
+                recentCompaction != null
+                  ? (visibleSubtasks[visibleSubtasks.length - 1]?.sourceIndex ?? null)
+                  : null
+              const lastSourceIndex =
+                visibleSubtasks[visibleSubtasks.length - 1]?.sourceIndex ?? null
+              const claimedTraceIds = new Set<string>()
+              const tracesBySourceIndex = new Map<number, OcPermissionTraceEvent[]>()
+              for (const { subtask: st, sourceIndex } of visibleSubtasks) {
+                const msgIds = new Set(
+                  st.assistantMessageIndices
+                    .map((i) => messages[i]?.info?.id)
+                    .filter((id): id is string => Boolean(id)),
+                )
+                const matched = permissionTraces.filter(
+                  (t) => t.tool?.messageID && msgIds.has(t.tool.messageID),
+                )
+                for (const t of matched) claimedTraceIds.add(t.id)
+                if (matched.length) tracesBySourceIndex.set(sourceIndex, matched)
+              }
+              const orphanTraces = permissionTraces.filter((t) => !claimedTraceIds.has(t.id))
+              if (lastSourceIndex != null && orphanTraces.length > 0) {
+                const prev = tracesBySourceIndex.get(lastSourceIndex) ?? []
+                tracesBySourceIndex.set(lastSourceIndex, [...prev, ...orphanTraces])
+              }
+              return visibleSubtasks.map(({ subtask: st, sourceIndex }, si) => {
               const currentUserIndex = firstUserMessageIndex(st)
               const previous = si > 0 ? visibleSubtasks[si - 1] : null
               const previousUserIndex = previous ? firstUserMessageIndex(previous.subtask) : null
@@ -1348,6 +1406,9 @@ export default function SubtaskDebugPanel({
                 currentUserIndex !== previousUserIndex
               const feedbackSelected = feedbackMode && selectedFeedbackIndexSet.has(sourceIndex)
               const hasPanelFeedback = Boolean(panelFeedbackByIndex[sourceIndex]?.trim())
+              const showPendingPermission = permissionCardSourceIndex === sourceIndex
+              const showRecentCompaction = compactionCardSourceIndex === sourceIndex
+              const cardPermissionTraces = tracesBySourceIndex.get(sourceIndex) ?? []
 
               return (
                 <Fragment
@@ -1406,11 +1467,17 @@ export default function SubtaskDebugPanel({
                     hasFeedbackComment={hasPanelFeedback}
                     onToggleFeedbackSelection={() => toggleFeedbackPanel(sourceIndex)}
                     onOpenFeedbackComment={() => openPanelFeedbackEditor(sourceIndex)}
+                    pendingPermission={pendingPermission}
+                    showPendingPermission={showPendingPermission}
+                    permissionTraces={cardPermissionTraces}
+                    recentCompaction={recentCompaction}
+                    showRecentCompaction={showRecentCompaction}
                   />
                   </div>
                 </Fragment>
               )
             })
+            })()
           )}
         </div>
       </div>

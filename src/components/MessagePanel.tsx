@@ -1,14 +1,16 @@
 import { useState, useEffect, useMemo, useRef, type RefObject } from 'react'
-import type { OcMessage, OcPendingQuestionRequest, OcTodo } from '../types/opencode'
+import type { OcMessage, OcPendingPermissionRequest, OcPendingQuestionRequest, OcPermissionReply, OcTodo } from '../types/opencode'
 import type { CanonicalTodo, LatestTodowriteBatchProgress } from '../utils/todoRegistry'
 import MessageBubble from './MessageBubble'
 import TodoPanel from './TodoPanel'
 import MessageInput, { type MessageSendPayload } from './MessageInput'
 import QuestionPromptPanel from './QuestionPromptPanel'
+import PermissionPromptPanel from './PermissionPromptPanel'
 import { actionFlowPalette } from '../styles/actionFlowPalette'
 import type { OcComposerModelOption } from '../services/opencodeApi'
 import { messagesHaveOpenQuestionWithInput } from '../utils/questionPart'
 import { collectStaleToolCallIDs } from '../utils/actionMapping'
+import { messageHasAgentStepFinishStop } from '../utils/subtaskGrouping'
 import ScrollNodeRail, { type ScrollNodeMarker } from './ScrollNodeRail'
 import { experimentTelemetry } from '../experiment/telemetry'
 
@@ -51,6 +53,10 @@ interface MessagePanelProps {
   onQuestionReply?: (answers: string[][]) => Promise<void>
   onQuestionReject?: () => Promise<void>
   questionSubmitting?: boolean
+  /** OpenCode permission asks (SSE `permission.asked`) */
+  pendingPermission?: OcPendingPermissionRequest | null
+  onPermissionReply?: (reply: OcPermissionReply, message?: string) => Promise<void>
+  permissionSubmitting?: boolean
   /** Workspace directory header (`x-opencode-directory`) for inline submits */
   sessionDirectory?: string
   /** Bubble-level question completion hook */
@@ -96,6 +102,9 @@ export default function MessagePanel({
   onQuestionReply,
   onQuestionReject,
   questionSubmitting,
+  pendingPermission,
+  onPermissionReply,
+  permissionSubmitting,
   sessionDirectory,
   onQuestionAnswered,
   composerModelRef = '',
@@ -113,6 +122,9 @@ export default function MessagePanel({
   const blockComposerForQuestion =
     hasInlineQuestion ||
     Boolean(pendingQuestion && pendingQuestion.sessionID === sessionId)
+  const blockComposerForPermission = Boolean(
+    pendingPermission && pendingPermission.sessionID === sessionId,
+  )
 
   const assistantIndices = messages
     .map((m, i) => (m.info.role === 'assistant' ? i : -1))
@@ -129,6 +141,22 @@ export default function MessagePanel({
       return !hasLaterAssistant
     })
   })
+  /** Latest assistant turn still streaming (no completed timestamp yet) — allow stop even between tools. */
+  const lastMessage = messages[messages.length - 1]
+  const lastAssistantStopped =
+    lastMessage?.info.role === 'assistant' &&
+    (lastMessage.info.finish?.trim().toLowerCase() === 'stop' ||
+      messageHasAgentStepFinishStop(lastMessage))
+  const hasIncompleteAssistant =
+    lastMessage?.info.role === 'assistant' &&
+    typeof lastMessage.info.time?.completed !== 'number' &&
+    !lastAssistantStopped
+  const agentBusy =
+    hasRunningTool ||
+    hasIncompleteAssistant ||
+    waitingForAssistantReply ||
+    blockComposerForPermission ||
+    blockComposerForQuestion
 
   const staleToolCallIds = useMemo(() => collectStaleToolCallIDs(messages), [messages])
   const transcriptAnchorNowMs = Date.now()
@@ -312,37 +340,6 @@ export default function MessagePanel({
         </div>
       )}
 
-      {waitingForAssistantReply && !loading && (
-        <div
-          style={{
-            flexShrink: 0,
-            padding: '8px 16px',
-            fontSize: 12,
-            color: '#4338ca',
-            background: 'linear-gradient(90deg, #eef2ff 0%, #faf5ff 100%)',
-            borderBottom: '1px solid #c7d2fe',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-          }}
-        >
-          <span
-            aria-hidden
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              background: '#6366f1',
-              flexShrink: 0,
-            }}
-          />
-          <span style={{ fontWeight: 600 }}>Waiting for the model…</span>
-          <span style={{ color: '#64748b', fontWeight: 400 }}>
-            Polling in the background — if nothing appears, check OpenCode logs or upstream queue delays.
-          </span>
-        </div>
-      )}
-
       {/* Messages (scrollable) */}
       <div
         style={{
@@ -430,6 +427,17 @@ export default function MessagePanel({
         </div>
       )}
 
+      {pendingPermission &&
+        pendingPermission.sessionID === sessionId &&
+        onPermissionReply && (
+        <PermissionPromptPanel
+          request={pendingPermission}
+          disabled={loading}
+          submitting={permissionSubmitting}
+          onReply={onPermissionReply}
+        />
+      )}
+
       {pendingQuestion &&
         pendingQuestion.sessionID === sessionId &&
         onQuestionReply &&
@@ -447,9 +455,9 @@ export default function MessagePanel({
       <div style={{ flexShrink: 0 }}>
         <MessageInput
           onSend={onSendMessage}
-          disabled={!sessionId || loading || questionSubmitting || blockComposerForQuestion}
+          disabled={!sessionId || loading || questionSubmitting || permissionSubmitting || blockComposerForQuestion || blockComposerForPermission}
           onAbort={onAbortMessage}
-          isRunning={hasRunningTool}
+          isRunning={agentBusy}
           aborting={aborting}
           sessionId={sessionId}
           composerModelRef={composerModelRef}

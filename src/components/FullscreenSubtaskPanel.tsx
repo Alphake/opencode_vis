@@ -1,6 +1,12 @@
 import { useEffect, useRef } from 'react'
 import type { RefObject } from 'react'
-import type { MappedAction, OcMessage } from '../types/opencode'
+import type {
+  MappedAction,
+  OcMessage,
+  OcPendingPermissionRequest,
+  OcPermissionTraceEvent,
+  OcSessionCompactionEvent,
+} from '../types/opencode'
 import type { AssistantSubtask } from '../utils/subtaskGrouping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
 import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
@@ -28,6 +34,9 @@ interface Props {
   sessionId?: string
   errorDiagnosisBySubtaskId?: Record<string, MemoryWorkerErrorDiagnosis>
   onPanelBecameVisible?: (subtaskId: string) => void
+  pendingPermission?: OcPendingPermissionRequest | null
+  permissionTraces?: OcPermissionTraceEvent[]
+  recentCompaction?: OcSessionCompactionEvent | null
 }
 
 /**
@@ -54,6 +63,9 @@ export default function FullscreenSubtaskPanel({
   sessionId,
   errorDiagnosisBySubtaskId,
   onPanelBecameVisible,
+  pendingPermission = null,
+  permissionTraces = [],
+  recentCompaction = null,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -197,6 +209,9 @@ export default function FullscreenSubtaskPanel({
             sessionId={sessionId}
             errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
             onPanelBecameVisible={onPanelBecameVisible}
+            pendingPermission={pendingPermission}
+            permissionTraces={permissionTraces}
+            recentCompaction={recentCompaction}
           />
         </div>
       </div>

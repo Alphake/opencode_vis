@@ -67,7 +67,10 @@ export default function MessageInput({
 
   const canSend =
     (text.trim().length > 0 || files.length > 0) && !sending && !disabled
-  const canAbort = Boolean(isRunning && onAbort && !aborting && !disabled)
+  // Abort must NOT depend on `disabled`: composer is disabled during permission/question
+  // prompts, but those are exactly when the user often needs to stop the agent.
+  const showAbort = Boolean(isRunning && onAbort)
+  const canAbort = Boolean(showAbort && !aborting)
 
   const groupedModelOptions = useMemo(() => {
     const groups = new Map<string, { providerName: string; options: OcComposerModelOption[] }>()
@@ -309,8 +312,9 @@ export default function MessageInput({
 
           <button
             type="button"
-            onClick={() => void (canAbort ? handleAbort() : handleSend())}
-            disabled={canAbort ? false : !canSend}
+            onClick={() => void (showAbort ? handleAbort() : handleSend())}
+            disabled={showAbort ? !canAbort : !canSend}
+            title={showAbort ? (aborting ? 'Stopping…' : 'Stop') : undefined}
             style={{
               width: 32,
               height: 32,
@@ -318,14 +322,14 @@ export default function MessageInput({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              background: canAbort ? '#FFECEC' : (canSend ? '#8B5CF6' : '#F5F5F5'),
+              background: showAbort ? '#FFECEC' : (canSend ? '#8B5CF6' : '#F5F5F5'),
               border: 'none',
               borderRadius: 6,
-              cursor: canAbort || canSend ? 'pointer' : 'not-allowed',
-              opacity: sending ? 0.7 : 1,
+              cursor: (showAbort ? canAbort : canSend) ? 'pointer' : 'not-allowed',
+              opacity: sending || aborting ? 0.7 : 1,
             }}
           >
-            {canAbort ? (
+            {showAbort ? (
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#D94A4A" strokeWidth="2">
                 <rect x="6" y="6" width="12" height="12" rx="1.5" />
               </svg>

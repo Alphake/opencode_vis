@@ -18,6 +18,9 @@ import {
   deleteSession,
   replyToQuestion,
   rejectQuestion,
+  getPendingPermissions,
+  replyToPermission,
+  normalizePermissionRequest,
   subscribeGlobalEvents,
   type OcComposerModelOption,
 } from './services/opencodeApi'
@@ -27,7 +30,16 @@ import {
   directoryKey,
   sameDirectory,
 } from './utils/sessionFolders'
-import type { MappedAction, OcMessage, OcPendingQuestionRequest, OcTodo } from './types/opencode'
+import type {
+  MappedAction,
+  OcMessage,
+  OcPendingPermissionRequest,
+  OcPendingQuestionRequest,
+  OcPermissionReply,
+  OcPermissionTraceEvent,
+  OcSessionCompactionEvent,
+  OcTodo,
+} from './types/opencode'
 import type { TurnTrace } from './types/trace'
 import type { MessageSendPayload } from './components/MessageInput'
 import Sidebar from './components/Sidebar'
@@ -45,7 +57,14 @@ import {
 } from './utils/subtaskLinkage'
 import { actionKeyMessageId } from './utils/actionKey'
 import { firstFlowAnchorKeyForSubtaskSegment } from './utils/actionMapping'
-import { parseActionRelatedSseEvent } from './utils/opencodeSse'
+import {
+  isCompactionEventType,
+  isPermissionAskEventType,
+  isPermissionReplyEventType,
+  parseActionRelatedSseEvent,
+  parsePendingPermissionFromSse,
+  sseEventTypeFromRaw,
+} from './utils/opencodeSse'
 import {
   archivedCompletedList,
   buildSessionTodoModel,
@@ -103,6 +122,9 @@ declare global {
     __vibetraceDebug?: {
       getMessages: () => Promise<OcMessage[]>
       latestTrace: () => TurnTrace | null
+      pendingPermission: () => OcPendingPermissionRequest | null
+      recentCompaction: () => OcSessionCompactionEvent | null
+      hydratePermissions: () => Promise<OcPendingPermissionRequest[]>
     }
   }
 }
@@ -378,6 +400,15 @@ function App() {
   /** Pending question requests keyed by session (from SSE `question.asked`) */
   const [pendingQuestions, setPendingQuestions] = useState<Record<string, OcPendingQuestionRequest>>({})
   const [questionSubmitting, setQuestionSubmitting] = useState(false)
+  /** Pending permission asks keyed by session (from SSE `permission.asked`) */
+  const [pendingPermissions, setPendingPermissions] = useState<Record<string, OcPendingPermissionRequest>>({})
+  const [permissionSubmitting, setPermissionSubmitting] = useState(false)
+  /** Permission asks kept on the action-flow trail after Allow / Reject / Always */
+  const [permissionTracesBySessionId, setPermissionTracesBySessionId] = useState<
+    Record<string, OcPermissionTraceEvent[]>
+  >({})
+  /** Latest SSE compaction marker per session (merged into action flow until message parts catch up) */
+  const [sessionCompactions, setSessionCompactions] = useState<Record<string, OcSessionCompactionEvent>>({})
   const [aborting, setAborting] = useState(false)
   const [analysisAction, setAnalysisAction] = useState<(MappedAction & { row: number }) | null>(null)
   /** Fork workflow: prompt → capture subtask panel snapshot → call OpenCode fork */
@@ -692,7 +723,64 @@ function App() {
 
   const pendingQuestionsRef = useRef(pendingQuestions)
   pendingQuestionsRef.current = pendingQuestions
+  const pendingPermissionsRef = useRef(pendingPermissions)
+  pendingPermissionsRef.current = pendingPermissions
   const autoAbortedRunningKeysRef = useRef<Set<string>>(new Set())
+  /** Bumped on abort so in-flight post-send polls stop treating the turn as active. */
+  const abortGenerationRef = useRef(0)
+
+  const upsertPermissionTrace = useCallback((req: OcPendingPermissionRequest) => {
+    const askedAt = req.askedAt ?? Date.now()
+    setPermissionTracesBySessionId((prev) => {
+      const list = prev[req.sessionID] ?? []
+      const idx = list.findIndex((t) => t.id === req.id)
+      if (idx >= 0) {
+        const cur = list[idx]!
+        if (cur.status !== 'pending') return prev
+        const next = [...list]
+        next[idx] = {
+          ...cur,
+          permission: req.permission,
+          patterns: req.patterns,
+          tool: req.tool ?? cur.tool,
+          askedAt: cur.askedAt || askedAt,
+        }
+        return { ...prev, [req.sessionID]: next }
+      }
+      const row: OcPermissionTraceEvent = {
+        id: req.id,
+        sessionID: req.sessionID,
+        permission: req.permission,
+        patterns: req.patterns,
+        askedAt,
+        status: 'pending',
+        tool: req.tool,
+      }
+      return { ...prev, [req.sessionID]: [...list, row] }
+    })
+  }, [])
+
+  const resolvePermissionTrace = useCallback(
+    (sessionID: string, requestID: string, reply?: OcPermissionReply) => {
+      setPermissionTracesBySessionId((prev) => {
+        const list = prev[sessionID]
+        if (!list?.length) return prev
+        const idx = list.findIndex((t) => t.id === requestID)
+        if (idx < 0) return prev
+        const cur = list[idx]!
+        if (cur.status !== 'pending' && cur.reply) return prev
+        const next = [...list]
+        next[idx] = {
+          ...cur,
+          reply,
+          repliedAt: Date.now(),
+          status: reply === 'reject' ? 'error' : 'completed',
+        }
+        return { ...prev, [sessionID]: next }
+      })
+    },
+    [],
+  )
 
   const activeSessionDirectory = useMemo(
     () => sessions.find(s => s.id === selectedSessionId)?.directory,
@@ -1083,19 +1171,36 @@ function App() {
         return msgs
       },
       latestTrace: () => latestTurnTrace,
+      pendingPermission: () =>
+        selectedSessionIdRef.current
+          ? pendingPermissionsRef.current[selectedSessionIdRef.current] ?? null
+          : null,
+      recentCompaction: () =>
+        selectedSessionIdRef.current
+          ? sessionCompactions[selectedSessionIdRef.current] ?? null
+          : null,
+      hydratePermissions: async () => {
+        const sid = selectedSessionIdRef.current
+        if (!sid) return []
+        const dir = sessionsRef.current.find((s) => s.id === sid)?.directory
+        const list = await getPendingPermissions(dir, { sessionID: sid })
+        console.info('[VibeTrace][permission] manual hydrate', list)
+        return list
+      },
     }
     return () => {
       delete window.__vibetraceDebug
     }
-  }, [latestTurnTrace])
+  }, [latestTurnTrace, sessionCompactions])
 
   // Subscribe to global SSE events
   useEffect(() => {
     const unsubscribe = subscribeGlobalEvents((event) => {
       const payload = event?.payload || event
-      const eventType = payload?.type
+      const eventType = sseEventTypeFromRaw(event) ?? payload?.type
       if (!eventType) return
-      const isNoisyDelta = eventType === 'message.part.delta'
+      const isNoisyDelta =
+        eventType === 'message.part.delta' || eventType === 'session.next.compaction.delta'
       if (!isNoisyDelta) debugLog('[VibeTrace][SSE event]', eventType, event)
 
       if (eventType === 'question.asked') {
@@ -1130,6 +1235,83 @@ function App() {
         }
       }
 
+      if (isPermissionAskEventType(eventType)) {
+        const fromHelper = parsePendingPermissionFromSse(event)
+        const props = (payload.properties ?? payload) as Record<string, unknown>
+        const root = event as { directory?: string }
+        const dir = typeof root.directory === 'string' ? root.directory : undefined
+        const sessionHint =
+          (typeof props.sessionID === 'string' && props.sessionID) ||
+          (typeof props.sessionId === 'string' && props.sessionId) ||
+          undefined
+        const normalized =
+          fromHelper ??
+          normalizePermissionRequest(props, {
+            directory: dir,
+            askedAt: Date.now(),
+            sessionID: sessionHint,
+          })
+        if (normalized) {
+          console.info('[VibeTrace][permission] captured', {
+            eventType,
+            id: normalized.id,
+            permission: normalized.permission,
+            sessionID: normalized.sessionID,
+            patterns: normalized.patterns.slice(0, 3),
+          })
+          upsertPermissionTrace({
+            ...normalized,
+            directory: normalized.directory ?? dir,
+            askedAt: normalized.askedAt ?? Date.now(),
+          })
+          setPendingPermissions((prev) => ({
+            ...prev,
+            [normalized.sessionID]: {
+              ...normalized,
+              directory: normalized.directory ?? dir,
+              askedAt: normalized.askedAt ?? Date.now(),
+            },
+          }))
+        } else {
+          console.warn('[VibeTrace][permission] SSE ask parse failed', eventType, event)
+        }
+      }
+
+      if (isPermissionReplyEventType(eventType)) {
+        const props = (payload.properties ?? payload) as {
+          sessionID?: string
+          sessionId?: string
+          requestID?: string
+          id?: string
+          reply?: string
+        }
+        const sid = props?.sessionID ?? props?.sessionId
+        const requestID = props?.requestID ?? props?.id
+        const replyRaw = props?.reply
+        const reply =
+          replyRaw === 'once' || replyRaw === 'always' || replyRaw === 'reject'
+            ? replyRaw
+            : undefined
+        if (sid && requestID) {
+          resolvePermissionTrace(sid, requestID, reply)
+          setPendingPermissions((prev) => {
+            const cur = prev[sid]
+            if (cur?.id === requestID) {
+              const { [sid]: _, ...rest } = prev
+              return rest
+            }
+            return prev
+          })
+        } else if (sid) {
+          // Reply without request id — clear any pending for that session
+          setPendingPermissions((prev) => {
+            if (!(sid in prev)) return prev
+            const { [sid]: _, ...rest } = prev
+            return rest
+          })
+        }
+      }
+
       if (eventType.startsWith('question')) {
         const props = payload.properties as { sessionID?: string } | undefined
         const sid = props?.sessionID
@@ -1139,9 +1321,105 @@ function App() {
         }
       }
 
+      if (eventType.startsWith('permission')) {
+        const props = (payload.properties ?? payload) as { sessionID?: string; sessionId?: string }
+        const sid = props?.sessionID ?? props?.sessionId
+        if (sid && sid === selectedSessionIdRef.current) {
+          const dir = sessionsRef.current.find((s) => s.id === sid)?.directory
+          getMessages(sid, `SSE:${eventType}`, dir).then(setMessages).catch(() => {})
+          // REST fallback — some builds emit ask events that normalize poorly
+          getPendingPermissions(dir, { sessionID: sid })
+            .then((list) => {
+              if (selectedSessionIdRef.current !== sid || list.length === 0) return
+              for (const item of list) {
+                upsertPermissionTrace({
+                  ...item,
+                  directory: item.directory ?? dir,
+                  askedAt: item.askedAt ?? Date.now(),
+                })
+              }
+              const latest = list[list.length - 1]!
+              setPendingPermissions((prev) => ({
+                ...prev,
+                [sid]: {
+                  ...latest,
+                  directory: latest.directory ?? dir,
+                  askedAt: latest.askedAt ?? Date.now(),
+                },
+              }))
+              console.info('[VibeTrace][permission] hydrated after SSE', {
+                sessionID: sid,
+                id: latest.id,
+                permission: latest.permission,
+              })
+            })
+            .catch(() => {})
+        }
+      }
+
+      if (isCompactionEventType(eventType)) {
+        const parsed = parseActionRelatedSseEvent(event)
+        const props = payload.properties as { sessionID?: string; sessionId?: string; text?: string; reason?: string } | undefined
+        const sid =
+          parsed?.sessionID ??
+          props?.sessionID ??
+          props?.sessionId ??
+          selectedSessionIdRef.current
+        if (sid) {
+          const status =
+            parsed?.compaction?.status ??
+            (eventType === 'session.next.compaction.started' ||
+            eventType === 'session.next.compaction.delta'
+              ? 'running'
+              : 'completed')
+          const detail =
+            parsed?.compaction?.detail ??
+            (typeof props?.text === 'string' && props.text.trim()
+              ? props.text.trim().slice(0, 120)
+              : eventType)
+          const marker: OcSessionCompactionEvent = {
+            sessionID: sid,
+            time: parsed?.time ?? Date.now(),
+            status,
+            detail,
+          }
+          setSessionCompactions((prev) => ({ ...prev, [sid]: marker }))
+          console.info('[VibeTrace][compaction] captured', marker)
+          if (status === 'completed' && (!sid || sid === selectedSessionIdRef.current)) {
+            setCompactionControlHint(
+              `Context compacted · ${new Date().toLocaleTimeString(undefined, {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })}`,
+            )
+          }
+          if (sid === selectedSessionIdRef.current) {
+            const dir = sessionsRef.current.find((s) => s.id === sid)?.directory
+            getMessages(sid, `SSE:${eventType}`, dir).then(setMessages).catch(() => {})
+          }
+        }
+      }
+
       if (eventType === 'message.part.delta') {
         // Very high-frequency token stream event; avoid fan-out REST refresh storms.
         return
+      }
+
+      // message.part.updated may carry a compaction part before session.compacted fires
+      if (eventType === 'message.part.updated') {
+        const part = (payload.properties as { part?: { type?: string; sessionID?: string } } | undefined)?.part
+        if (part?.type === 'compaction' && part.sessionID) {
+          const sid = part.sessionID
+          const marker: OcSessionCompactionEvent = {
+            sessionID: sid,
+            time: Date.now(),
+            status: 'completed',
+            detail: 'compaction part',
+          }
+          setSessionCompactions((prev) => ({ ...prev, [sid]: marker }))
+          console.info('[VibeTrace][compaction] captured from message.part.updated', marker)
+        }
       }
 
       if (eventType.startsWith('message') || eventType.startsWith('session')) {
@@ -1170,31 +1448,95 @@ function App() {
           getTodos(selectedSessionId, dir).then(setTodos).catch(() => {})
         }
       }
-
-      if (eventType === 'session.compacted') {
-        const props = payload.properties as { sessionID?: string; sessionId?: string } | undefined
-        let sid = props?.sessionID ?? props?.sessionId
-        if (!sid) {
-          const parsed = parseActionRelatedSseEvent(event)
-          sid = parsed?.sessionID
-        }
-        if (!sid || sid === selectedSessionIdRef.current) {
-          setCompactionControlHint(
-            `Context compacted · ${new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`,
-          )
-        }
-      }
     })
 
     return unsubscribe
-  }, [selectedSessionId, refreshSessions])
+  }, [selectedSessionId, refreshSessions, upsertPermissionTrace, resolvePermissionTrace])
+
+  /**
+   * REST poll fallback while the agent is still running.
+   * Does NOT stop just because one permission dialog is open — a turn can ask multiple times.
+   * Idle sessions do not poll; SSE + session-load hydrate remain primary.
+   */
+  const permissionPollArmed = useMemo(() => {
+    if (!selectedSessionId) return false
+    if (waitingForAssistantReply) return true
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (!m || m.info.role !== 'assistant') continue
+      return m.parts.some(
+        (p) => p.type === 'tool' && (p.state?.status === 'running' || p.state?.status === 'pending'),
+      )
+    }
+    return false
+  }, [selectedSessionId, waitingForAssistantReply, messages])
+
+  useEffect(() => {
+    if (!selectedSessionId || !permissionPollArmed) return
+    let cancelled = false
+    const poll = async () => {
+      const sid = selectedSessionIdRef.current
+      if (!sid || cancelled) return
+      const dir = sessionsRef.current.find((s) => s.id === sid)?.directory
+      try {
+        const list = await getPendingPermissions(dir, { sessionID: sid })
+        if (cancelled || selectedSessionIdRef.current !== sid) return
+        if (list.length === 0) return
+        for (const item of list) {
+          upsertPermissionTrace({
+            ...item,
+            directory: item.directory ?? dir,
+            askedAt: item.askedAt ?? Date.now(),
+          })
+        }
+        const cur = pendingPermissionsRef.current[sid]
+        const stillOpen = cur ? list.find((p) => p.id === cur.id) : undefined
+        const next = stillOpen ?? list[0]!
+        setPendingPermissions((prev) => {
+          const existing = prev[sid]
+          if (existing?.id === next.id) {
+            return {
+              ...prev,
+              [sid]: {
+                ...existing,
+                ...next,
+                directory: next.directory ?? existing.directory ?? dir,
+                askedAt: existing.askedAt ?? next.askedAt ?? Date.now(),
+              },
+            }
+          }
+          console.info('[VibeTrace][permission] poll captured', {
+            sessionID: sid,
+            id: next.id,
+            permission: next.permission,
+          })
+          return {
+            ...prev,
+            [sid]: {
+              ...next,
+              directory: next.directory ?? dir,
+              askedAt: next.askedAt ?? Date.now(),
+            },
+          }
+        })
+      } catch {
+        /* endpoint may be unavailable on older OpenCode builds */
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [selectedSessionId, permissionPollArmed, upsertPermissionTrace])
 
   // Load messages + todos + panel analysis + task tabs when session changes
   const loadSessionData = useCallback(async (sessionId: string, directory?: string) => {
     if (!sessionId) return
     setLoading(true)
     try {
-      const [msgs, td, panelBatch, taskSegmentBatch] = await Promise.all([
+      const [msgs, td, panelBatch, taskSegmentBatch, pendingPerms] = await Promise.all([
         getMessages(sessionId, 'initial load / session switch', directory),
         getTodos(sessionId, directory),
         fetchPanelAnalysisForSession(sessionId).catch((err) => {
@@ -1205,10 +1547,43 @@ function App() {
           console.warn('[VibeTrace][task-segments] worker hydrate failed', { sessionId, err })
           return { ok: false, sessionId, count: 0, tabs: [] }
         }),
+        getPendingPermissions(directory, { sessionID: sessionId }).catch((err) => {
+          console.warn('[VibeTrace][permission] hydrate failed', { sessionId, err })
+          return [] as Awaited<ReturnType<typeof getPendingPermissions>>
+        }),
       ])
       if (selectedSessionIdRef.current !== sessionId) return
       setMessages(msgs)
       setTodos(td)
+      if (pendingPerms.length > 0) {
+        for (const item of pendingPerms) {
+          upsertPermissionTrace({
+            ...item,
+            directory: item.directory ?? directory,
+            askedAt: item.askedAt ?? Date.now(),
+          })
+        }
+        const latest = pendingPerms[pendingPerms.length - 1]!
+        setPendingPermissions((prev) => ({
+          ...prev,
+          [sessionId]: {
+            ...latest,
+            directory: latest.directory ?? directory,
+            askedAt: latest.askedAt ?? Date.now(),
+          },
+        }))
+        console.info('[VibeTrace][permission] hydrated pending', {
+          sessionId,
+          id: latest.id,
+          permission: latest.permission,
+        })
+      } else {
+        setPendingPermissions((prev) => {
+          if (!(sessionId in prev)) return prev
+          const { [sessionId]: _, ...rest } = prev
+          return rest
+        })
+      }
       if (panelBatch.items?.length) {
         mergePanelAnalysisItems(sessionId, panelBatch.items)
         console.info('[VibeTrace][panel-analysis] hydrated from worker', {
@@ -1234,7 +1609,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [mergePanelAnalysisItems])
+  }, [mergePanelAnalysisItems, upsertPermissionTrace])
 
   useEffect(() => {
     void loadSessionData(selectedSessionId, activeSessionDirectory)
@@ -1691,6 +2066,33 @@ function App() {
     }
   }, [selectedSessionId])
 
+  const handlePermissionReply = useCallback(async (reply: OcPermissionReply, message?: string) => {
+    const pp = pendingPermissionsRef.current[selectedSessionId]
+    if (!pp) return
+    setPermissionSubmitting(true)
+    try {
+      await replyToPermission(pp.id, reply, {
+        sessionID: pp.sessionID,
+        directory: pp.directory,
+        message,
+      })
+      resolvePermissionTrace(pp.sessionID, pp.id, reply)
+      setPendingPermissions((prev) => {
+        const { [pp.sessionID]: _, ...rest } = prev
+        return rest
+      })
+      const dir = sessionsRef.current.find((s) => s.id === selectedSessionId)?.directory
+      const msgs = await getMessages(selectedSessionId, 'after permission reply', dir)
+      setMessages(msgs)
+    } catch (err) {
+      window.alert(
+        `Failed to reply to permission.\n${err instanceof Error ? err.message : String(err)}\n\nEnsure OpenCode exposes POST /permission/{requestID}/reply.`,
+      )
+    } finally {
+      setPermissionSubmitting(false)
+    }
+  }, [selectedSessionId, resolvePermissionTrace])
+
   /** Inline question answered in a bubble: mirror bottom panel refresh + clear SSE pending bucket */
   const handleQuestionAnswered = useCallback(async () => {
     if (!selectedSessionId) return
@@ -1737,15 +2139,26 @@ function App() {
           })
           .catch((err) => console.warn('[VibeTrace][task-switch prompt failed]', err))
         scheduleMwInternalSessionRefresh(refreshSessions)
-        await sendMessage(sid, text, dir, { imageParts: images, model: composerModelRef.trim() || undefined })
-        const msgs = await getMessages(sid, 'after POST /message completes', dir)
-        setMessages(msgs)
-        const last = msgs[msgs.length - 1]
-        if (last?.info.role === 'user') {
-          setWaitingForAssistantReply(true)
-          try {
-            await pollUntilAssistantMessage(sid, dir, () => selectedSessionIdRef.current === sid, setMessages)
-          } finally {
+        const gen = abortGenerationRef.current
+        // Show stop immediately — POST /message often blocks for the whole agent turn.
+        setWaitingForAssistantReply(true)
+        try {
+          await sendMessage(sid, text, dir, { imageParts: images, model: composerModelRef.trim() || undefined })
+          if (abortGenerationRef.current !== gen || selectedSessionIdRef.current !== sid) return
+          const msgs = await getMessages(sid, 'after POST /message completes', dir)
+          if (abortGenerationRef.current !== gen || selectedSessionIdRef.current !== sid) return
+          setMessages(msgs)
+          const last = msgs[msgs.length - 1]
+          if (last?.info.role === 'user') {
+            await pollUntilAssistantMessage(
+              sid,
+              dir,
+              () => selectedSessionIdRef.current === sid && abortGenerationRef.current === gen,
+              setMessages,
+            )
+          }
+        } finally {
+          if (abortGenerationRef.current === gen) {
             setWaitingForAssistantReply(false)
           }
         }
@@ -1758,14 +2171,41 @@ function App() {
 
   const handleAbortMessage = useCallback(async () => {
     if (!selectedSessionId) return
-    const dir = sessions.find(s => s.id === selectedSessionId)?.directory
+    const sid = selectedSessionId
+    const dir = sessions.find(s => s.id === sid)?.directory
+    abortGenerationRef.current += 1
+    setWaitingForAssistantReply(false)
+    // Clear local permission/question prompts — abort cancels the turn that asked for them.
+    setPendingPermissions((prev) => {
+      if (!(sid in prev)) return prev
+      const { [sid]: _, ...rest } = prev
+      return rest
+    })
+    setPermissionTracesBySessionId((prev) => {
+      const list = prev[sid]
+      if (!list?.some((t) => t.status === 'pending')) return prev
+      return {
+        ...prev,
+        [sid]: list.map((t) =>
+          t.status === 'pending'
+            ? { ...t, status: 'error' as const, reply: 'reject' as const, repliedAt: Date.now() }
+            : t,
+        ),
+      }
+    })
+    setPendingQuestions((prev) => {
+      if (!(sid in prev)) return prev
+      const { [sid]: _, ...rest } = prev
+      return rest
+    })
     setAborting(true)
     try {
-      await abortSession(selectedSessionId, dir)
+      await abortSession(sid, dir)
       const [list, msgs] = await Promise.all([
         refreshSessions(),
-        getMessages(selectedSessionId, 'after abort refresh', dir),
+        getMessages(sid, 'after abort refresh', dir),
       ])
+      if (selectedSessionIdRef.current !== sid) return
       setSessions(list)
       setMessages(msgs)
     } finally {
@@ -2094,16 +2534,21 @@ function App() {
               setMessages(msgsAfterSend)
               const lastFork = msgsAfterSend[msgsAfterSend.length - 1]
               if (lastFork?.info.role === 'user') {
+                const gen = abortGenerationRef.current
                 setWaitingForAssistantReply(true)
                 try {
                   await pollUntilAssistantMessage(
                     forked.id,
                     forked.directory,
-                    () => selectedSessionIdRef.current === forked.id,
+                    () =>
+                      selectedSessionIdRef.current === forked.id &&
+                      abortGenerationRef.current === gen,
                     setMessages,
                   )
                 } finally {
-                  setWaitingForAssistantReply(false)
+                  if (abortGenerationRef.current === gen) {
+                    setWaitingForAssistantReply(false)
+                  }
                 }
               }
             } catch (err) {
@@ -2221,6 +2666,11 @@ function App() {
               onQuestionReply={handleQuestionReply}
               onQuestionReject={handleQuestionReject}
               questionSubmitting={questionSubmitting}
+              pendingPermission={
+                selectedSessionId ? pendingPermissions[selectedSessionId] ?? null : null
+              }
+              onPermissionReply={handlePermissionReply}
+              permissionSubmitting={permissionSubmitting}
               sessionDirectory={activeSessionDirectory}
               onQuestionAnswered={handleQuestionAnswered}
               composerModelRef={composerModelRef}
@@ -2442,6 +2892,15 @@ function App() {
               sessionId={selectedSessionId}
               errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
               onPanelBecameVisible={handlePanelBecameVisible}
+              pendingPermission={
+                selectedSessionId ? pendingPermissions[selectedSessionId] ?? null : null
+              }
+              permissionTraces={
+                selectedSessionId ? permissionTracesBySessionId[selectedSessionId] ?? [] : []
+              }
+              recentCompaction={
+                selectedSessionId ? sessionCompactions[selectedSessionId] ?? null : null
+              }
               onSelectTaskTab={
                 selectedSessionId
                   ? (id) => handleSelectTaskSegment(selectedSessionId, id)
@@ -2493,6 +2952,15 @@ function App() {
           sessionId={selectedSessionId}
           errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
           onPanelBecameVisible={handlePanelBecameVisible}
+          pendingPermission={
+            selectedSessionId ? pendingPermissions[selectedSessionId] ?? null : null
+          }
+          permissionTraces={
+            selectedSessionId ? permissionTracesBySessionId[selectedSessionId] ?? [] : []
+          }
+          recentCompaction={
+            selectedSessionId ? sessionCompactions[selectedSessionId] ?? null : null
+          }
           onSelectTaskTab={
             selectedSessionId
               ? (id) => handleSelectTaskSegment(selectedSessionId, id)

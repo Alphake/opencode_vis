@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import type { MappedAction, OcMessage } from '../types/opencode'
+import type {
+  MappedAction,
+  OcMessage,
+  OcPendingPermissionRequest,
+  OcPermissionTraceEvent,
+  OcSessionCompactionEvent,
+} from '../types/opencode'
 import { messageHasAgentStepFinishStop, type AssistantSubtask } from '../utils/subtaskGrouping'
 import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
 import { buildFlowEndSummary } from '../utils/flowEndSummary'
@@ -12,6 +18,9 @@ import {
   detectParallelCallMapping,
   extractChildSessionIdFromToolPart,
   isSubagentToolName,
+  mappedActionFromCompactionEvent,
+  mappedActionFromPermissionTrace,
+  mergeActions,
 } from '../utils/actionMapping'
 import type { ForkFromActionContext, ForkPanelSnapshotBundle } from '../utils/forkPanelSnapshot'
 import { mergeMessagesForActionTooltipLookup } from '../utils/actionTooltipMapping'
@@ -159,6 +168,14 @@ interface SubtaskCardProps {
   hasFeedbackComment?: boolean
   onToggleFeedbackSelection?: () => void
   onOpenFeedbackComment?: () => void
+  /** Live permission ask from SSE — dialog is owned by MessagePanel; flow uses `permissionTraces` */
+  pendingPermission?: OcPendingPermissionRequest | null
+  showPendingPermission?: boolean
+  /** Permission asks for this card (pending + answered) — stay on the trajectory */
+  permissionTraces?: OcPermissionTraceEvent[]
+  /** Live SSE compaction marker — merged when this card should host it and messages lack a compaction part */
+  recentCompaction?: OcSessionCompactionEvent | null
+  showRecentCompaction?: boolean
 }
 
 type ColorByMode = 'tokens' | 'type'
@@ -237,6 +254,11 @@ export default function SubtaskCard({
   hasFeedbackComment = false,
   onToggleFeedbackSelection,
   onOpenFeedbackComment,
+  pendingPermission = null,
+  showPendingPermission = false,
+  permissionTraces = [],
+  recentCompaction = null,
+  showRecentCompaction = false,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
   /** While reading a flow tooltip, slow live redraw so the tip is not torn down every 2s. */
@@ -351,9 +373,49 @@ export default function SubtaskCard({
   }, [hasRunningTaskWithChild, loadChildBranches, flowTooltipOpen])
 
   const flowActions = useMemo(() => {
-    const merged = [...parentFlowActions, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
+    const sseExtra: (MappedAction & { row: number })[] = []
+    for (const t of permissionTraces) {
+      sseExtra.push(mappedActionFromPermissionTrace(t, nowTick))
+    }
+    // Fallback if traces lag behind a brand-new ask still only in pendingPermission
+    if (
+      showPendingPermission &&
+      pendingPermission &&
+      !permissionTraces.some((t) => t.id === pendingPermission.id)
+    ) {
+      sseExtra.push(
+        mappedActionFromPermissionTrace(
+          {
+            id: pendingPermission.id,
+            permission: pendingPermission.permission,
+            patterns: pendingPermission.patterns,
+            askedAt: pendingPermission.askedAt ?? nowTick,
+            status: 'pending',
+            tool: pendingPermission.tool,
+            sessionID: pendingPermission.sessionID,
+          },
+          nowTick,
+        ),
+      )
+    }
+    const hasCompactionPart = parentFlowActions.some((a) => a.actionType === 'Compaction')
+    if (showRecentCompaction && recentCompaction && !hasCompactionPart) {
+      sseExtra.push(mappedActionFromCompactionEvent(recentCompaction, nowTick))
+    }
+    const withSse = mergeActions(parentFlowActions, sseExtra)
+    const merged = [...withSse, ...childBranchActions].sort((a, b) => a.sortTime - b.sortTime)
     return applyParallelLayoutFromCalls(merged, parallelByCallId)
-  }, [parentFlowActions, childBranchActions, parallelByCallId])
+  }, [
+    parentFlowActions,
+    childBranchActions,
+    parallelByCallId,
+    permissionTraces,
+    showPendingPermission,
+    pendingPermission,
+    showRecentCompaction,
+    recentCompaction,
+    nowTick,
+  ])
 
   const durationDomain = useMemo(() => {
     const vals = flowActions
