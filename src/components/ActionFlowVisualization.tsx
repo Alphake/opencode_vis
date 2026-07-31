@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useId, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useId, useMemo, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import * as d3 from 'd3'
-import { flip, offset, shift } from '@floating-ui/dom'
-import { Tooltip } from 'react-tooltip'
+import { autoUpdate, computePosition, flip, offset, shift } from '@floating-ui/dom'
 import type { MappedAction, OcMessage } from '../types/opencode'
 import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
 import { buildCompactMappedActionTooltipHtml } from '../utils/actionTooltipMapping'
@@ -15,10 +15,13 @@ import { appendActionFlowIcon, getActionFlowIconSvg } from './actionFlowIcons'
 import ActionFlowContextMenu, { type ActionFlowContextMenuState } from './ActionFlowContextMenu'
 import { actionKey } from '../utils/actionKey'
 import { experimentTelemetry } from '../experiment/telemetry'
+import {
+  claimActionFlowPinnedTip,
+  subscribeActionFlowPinnedTip,
+} from '../utils/actionFlowPinnedTipBus'
 
-/** Prefer below anchors so tooltips do not cover SubtaskCard title rows above the flow. */
-const ACTION_FLOW_TOOLTIP_PLACE = 'bottom'
-const ACTION_FLOW_TOOLTIP_MIDDLEWARES = [
+/** Prefer below anchors so pinned tips do not cover SubtaskCard title rows above the flow. */
+const ACTION_FLOW_TIP_MIDDLEWARES = [
   offset(10),
   flip({
     fallbackPlacements: [
@@ -35,6 +38,10 @@ const ACTION_FLOW_TOOLTIP_MIDDLEWARES = [
   }),
   shift({ padding: 8 }),
 ]
+
+type PinnedFlowTip =
+  | { kind: 'action'; actionKey: string; html: string }
+  | { kind: 'flow-end'; endRegion: 'main' | 'fork-new-branch'; html: string }
 
 type FlowNode =
   | { kind: 'end'; row: number; sessionRegion: 'main' | 'fork-new-branch' }
@@ -1318,9 +1325,9 @@ interface Props {
   showGhostEndNode?: boolean
   /** Fork-compare: show new-branch terminator (defaults to `showFlowEndNode`). */
   showForkBranchEndNode?: boolean
-  /** Hover HTML for the terminator; pair with `showFlowEndNode`. */
+  /** Click-pinned tip HTML for the terminator; pair with `showFlowEndNode`. */
   flowEndSummary?: FlowEndSummary
-  /** Fork-compare ghost rail: tooltip for the muted legacy terminator. */
+  /** Fork-compare ghost rail: tip for the muted legacy terminator. */
   ghostFlowEndSummary?: FlowEndSummary | null
   /** Drop inner chrome when embedded inside split containers */
   embedded?: boolean
@@ -1348,7 +1355,7 @@ interface Props {
   actionTypePaletteId?: ActionTypePaletteId
   /** Experiment: attribute tooltip views to this subtask panel. */
   telemetrySubtaskId?: string
-  /** Fired when a flow tooltip opens/closes — parent can slow live redraw while the user is reading. */
+  /** Fired when a flow tip opens/closes — parent can slow live redraw while the user is reading. */
   onTooltipOpenChange?: (open: boolean) => void
 }
 
@@ -1382,46 +1389,175 @@ export default function ActionFlowVisualization({
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const pinnedTipElRef = useRef<HTMLDivElement | null>(null)
   const [contextMenu, setContextMenu] = useState<ActionFlowContextMenuState | null>(null)
+  /**
+   * Click-pinned tip (not hover tooltip): React state survives D3 full redraws so live trajectory
+   * ticks do not dismiss the popup. Position re-anchors to the matching node after each rebuild.
+   */
+  const [pinnedTip, setPinnedTip] = useState<PinnedFlowTip | null>(null)
   const reactId = useId().replace(/:/g, '')
   const markerId = `action-flow-arrow-${reactId}`
-  const tooltipId = `action-flow-tip-${reactId}`
-  /**
-   * react-tooltip v5 performs its initial DOM scan inside `useEffect` (after paint) while D3 renders in `useLayoutEffect`.
-   * In practice tooltip’s `[anchorsBySelect, activeAnchor]` handler fires right after scanning, resetting observers;
-   * if the mouse already hovers during that teardown window `mouseenter` may never register.
-   * Mount tooltips after the first paint batch so anchors exist before the observer spins up.
-   */
-  const [tooltipMounted, setTooltipMounted] = useState(false)
   const [scrollClientWidth, setScrollClientWidth] = useState(0)
-  const pendingTipKindRef = useRef<'action' | 'flow-end' | null>(null)
   const telemetrySubtaskIdRef = useRef(telemetrySubtaskId)
   telemetrySubtaskIdRef.current = telemetrySubtaskId
   const onTooltipOpenChangeRef = useRef(onTooltipOpenChange)
   onTooltipOpenChangeRef.current = onTooltipOpenChange
-  /** Ignore mouseleave fired when D3 tears down hovered anchors mid-rebuild. */
-  const rebuildingFlowRef = useRef(false)
-  useEffect(() => {
-    setTooltipMounted(true)
+  const onSelectActionRef = useRef(onSelectAction)
+  onSelectActionRef.current = onSelectAction
+  const pinnedTipRef = useRef(pinnedTip)
+  pinnedTipRef.current = pinnedTip
+  /** Bumped at end of each D3 rebuild so floating-ui can rebind to new anchor nodes. */
+  const [flowDrawGen, setFlowDrawGen] = useState(0)
+
+  const closePinnedTip = useCallback(() => {
+    setPinnedTip((prev) => {
+      if (prev == null) return prev
+      onTooltipOpenChangeRef.current?.(false)
+      return null
+    })
   }, [])
+
+  const openPinnedTip = useCallback(
+    (next: PinnedFlowTip) => {
+      const prev = pinnedTipRef.current
+      const same =
+        prev != null &&
+        prev.kind === next.kind &&
+        (prev.kind === 'action'
+          ? next.kind === 'action' && prev.actionKey === next.actionKey
+          : next.kind === 'flow-end' && prev.endRegion === next.endRegion)
+      if (same) {
+        closePinnedTip()
+        return
+      }
+      claimActionFlowPinnedTip(reactId)
+      onTooltipOpenChangeRef.current?.(true)
+      setPinnedTip(next)
+    },
+    [reactId, closePinnedTip],
+  )
+
+  useEffect(() => {
+    return subscribeActionFlowPinnedTip(reactId, closePinnedTip)
+  }, [reactId, closePinnedTip])
+
   useEffect(() => {
     return () => {
       onTooltipOpenChangeRef.current?.(false)
     }
   }, [])
 
-  const bindTooltipOpenTracking = (
-    sel: d3.Selection<SVGGraphicsElement, unknown, null, undefined>,
-  ) => {
-    sel
-      .on('mouseenter.tipOpen', () => {
-        onTooltipOpenChangeRef.current?.(true)
+  const pinnedTipKey =
+    pinnedTip == null
+      ? null
+      : pinnedTip.kind === 'action'
+        ? `action:${pinnedTip.actionKey}`
+        : `flow-end:${pinnedTip.endRegion}`
+
+  /** Refresh tip HTML while pinned so live ticks update content without closing. */
+  useEffect(() => {
+    if (!pinnedTipKey || !pinnedTip) return
+    if (pinnedTip.kind === 'action') {
+      const key = pinnedTip.actionKey
+      const act = actions.find((a) => actionKey(a) === key)
+      if (!act) return
+      const html = buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs)
+      setPinnedTip((prev) => {
+        if (!prev || prev.kind !== 'action' || prev.actionKey !== key) return prev
+        if (prev.html === html) return prev
+        return { kind: 'action', actionKey: key, html }
       })
-      .on('mouseleave.tipOpen', () => {
-        if (rebuildingFlowRef.current) return
-        onTooltipOpenChangeRef.current?.(false)
+      return
+    }
+    const endRegion = pinnedTip.endRegion
+    const isGhostEnd = endRegion === 'main' && actions.some(isNewBranchAction)
+    const endSummary = isGhostEnd ? ghostFlowEndSummary : flowEndSummary
+    if (!endSummary) return
+    const html = buildFlowEndTooltipHtml(endSummary)
+    setPinnedTip((prev) => {
+      if (!prev || prev.kind !== 'flow-end' || prev.endRegion !== endRegion) return prev
+      if (prev.html === html) return prev
+      return { kind: 'flow-end', endRegion, html }
+    })
+  }, [actions, tooltipMessages, flowEndSummary, ghostFlowEndSummary, pinnedTipKey])
+
+  /** Keep the pinned tip glued to its action/end node across redraw + scroll. */
+  useEffect(() => {
+    if (!pinnedTipKey) return
+    const tip = pinnedTipRef.current
+    const tipEl = pinnedTipElRef.current
+    const svg = svgRef.current
+    if (!tip || !tipEl || !svg) return
+
+    const findAnchor = (): Element | null => {
+      if (tip.kind === 'action') {
+        const esc =
+          typeof CSS !== 'undefined' && CSS.escape
+            ? CSS.escape(tip.actionKey)
+            : tip.actionKey.replace(/"/g, '\\"')
+        return (
+          svg.querySelector(`[data-vt-tip="action"][data-vt-action-key="${esc}"]`) ??
+          svg.querySelector(`g.afv-action[data-action-key="${esc}"]`)
+        )
+      }
+      return svg.querySelector(`[data-vt-tip="flow-end"][data-vt-end-region="${tip.endRegion}"]`)
+    }
+
+    const firstPlace = tipEl.dataset.placed !== '1'
+    if (firstPlace) tipEl.style.visibility = 'hidden'
+    let stop: (() => void) | undefined
+    const bind = () => {
+      stop?.()
+      stop = undefined
+      const anchor = findAnchor()
+      if (!anchor) return
+      stop = autoUpdate(anchor, tipEl, () => {
+        void computePosition(anchor, tipEl, {
+          placement: 'bottom',
+          strategy: 'fixed',
+          middleware: ACTION_FLOW_TIP_MIDDLEWARES,
+        }).then(({ x, y }) => {
+          tipEl.style.left = `${x}px`
+          tipEl.style.top = `${y}px`
+          tipEl.style.visibility = 'visible'
+          tipEl.dataset.placed = '1'
+        })
       })
-  }
+    }
+    bind()
+    return () => stop?.()
+  }, [pinnedTipKey, flowDrawGen])
+
+
+
+
+  /** Outside click / Escape dismisses the pinned tip (clicks on tip or its anchor are ignored). */
+  useEffect(() => {
+    if (!pinnedTip) return
+    const onPointerDown = (ev: PointerEvent) => {
+      const t = ev.target as Node | null
+      if (!t) return
+      if (pinnedTipElRef.current?.contains(t)) return
+      const el = t instanceof Element ? t : t.parentElement
+      if (el?.closest?.('[data-vt-tip]')) return
+      closePinnedTip()
+    }
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') closePinnedTip()
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [pinnedTip, closePinnedTip])
+
+  const openPinnedTipRef = useRef(openPinnedTip)
+  openPinnedTipRef.current = openPinnedTip
+  const closePinnedTipRef = useRef(closePinnedTip)
+  closePinnedTipRef.current = closePinnedTip
   const layoutEndOpts = useMemo(
     () => ({
       includeEndNode: showFlowEndNode,
@@ -1449,7 +1585,6 @@ export default function ActionFlowVisualization({
     const svg = svgRef.current
     if (!svg) return
     const root = d3.select(svg)
-    rebuildingFlowRef.current = true
     root.selectAll('*').remove()
 
     const maxTok = Math.max(1, ...actions.map(a => a.tokenEstimate))
@@ -1839,19 +1974,21 @@ export default function ActionFlowVisualization({
           .attr('stroke-width', 1.5)
           .style('cursor', endTip ? 'pointer' : 'default')
         if (endTip) {
+          const endRegion = node.sessionRegion
           circle
-            .attr('data-tooltip-id', tooltipId)
-            .attr('data-tooltip-html', endTip)
-            .attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
             .attr('data-vt-tip', 'flow-end')
-          circle.on('mouseenter', () => {
-            pendingTipKindRef.current = 'flow-end'
-            const sid = telemetrySubtaskIdRef.current
-            if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.flow_end')
+            .attr('data-vt-end-region', endRegion)
+          circle.on('click', (ev: MouseEvent) => {
+            ev.stopPropagation()
+            const prev = pinnedTipRef.current
+            const closing = prev?.kind === 'flow-end' && prev.endRegion === endRegion
+            openPinnedTipRef.current({ kind: 'flow-end', endRegion, html: endTip })
+            if (!closing) {
+              const sid = telemetrySubtaskIdRef.current
+              if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.flow_end')
+              experimentTelemetry.onFlowEndSummaryTooltipShow(undefined, sid)
+            }
           })
-          bindTooltipOpenTracking(
-            circle as unknown as d3.Selection<SVGGraphicsElement, unknown, null, undefined>,
-          )
         }
         return
       }
@@ -1914,28 +2051,27 @@ export default function ActionFlowVisualization({
         null,
         undefined
       >
+      const tipHtml = buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs)
       actionTarget
         .style('cursor', 'pointer')
         /**
-         * `UserRequest` uses a hollow circle — default hit-testing ignores transparent interiors, breaking tooltips centered on the ring.
+         * `UserRequest` uses a hollow circle — default hit-testing ignores transparent interiors, breaking tip hit targets on the ring.
          */
         .attr('pointer-events', 'all')
-        .attr('data-tooltip-id', tooltipId)
-        .attr('data-tooltip-html', buildCompactMappedActionTooltipHtml(act, tooltipMessages, formatDurationMs))
-        .attr('data-tooltip-place', ACTION_FLOW_TOOLTIP_PLACE)
         .attr('data-vt-tip', 'action')
-      actionTarget.on('mouseenter', () => {
-        pendingTipKindRef.current = 'action'
-        const sid = telemetrySubtaskIdRef.current
-        if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.timeline')
+        .attr('data-vt-action-key', ak)
+      actionTarget.on('click', (ev: MouseEvent) => {
+        ev.stopPropagation()
+        const prev = pinnedTipRef.current
+        const closing = prev?.kind === 'action' && prev.actionKey === ak
+        openPinnedTipRef.current({ kind: 'action', actionKey: ak, html: tipHtml })
+        if (!closing) {
+          const sid = telemetrySubtaskIdRef.current
+          if (sid) experimentTelemetry.onPanelView(sid, undefined, 'tooltip.timeline')
+          experimentTelemetry.onActionTooltipShow(undefined, 'timeline', sid)
+        }
+        onSelectActionRef.current?.(ak)
       })
-      bindTooltipOpenTracking(actionTarget)
-      if (onSelectAction) {
-        actionTarget.on('click', (ev: MouseEvent) => {
-          ev.stopPropagation()
-          onSelectAction(ak)
-        })
-      }
       /** Persist filter dim flags so reused DOM nodes do not flicker stale opacity */
       actionG.attr('data-filter-dim', matchesHighlight ? '0' : '1')
       const canContext =
@@ -2274,7 +2410,9 @@ export default function ActionFlowVisualization({
       }
     }
 
-    rebuildingFlowRef.current = false
+    if (pinnedTipRef.current) {
+      setFlowDrawGen((g) => g + 1)
+    }
   }, [
     actions,
     durationMode,
@@ -2285,7 +2423,6 @@ export default function ActionFlowVisualization({
     autoScrollFirstFilteredMatch,
     tooltipMessages,
     markerId,
-    tooltipId,
     mockBranchForkActionIndex,
     onForkFromAction,
     onAnalyzeFromAction,
@@ -2401,7 +2538,10 @@ export default function ActionFlowVisualization({
   const scrollInner = (
     <div
       className={hideScrollbar ? 'action-flow-scroll--hide-scrollbar' : undefined}
-      onClick={() => onSelectAction?.(null)}
+      onClick={() => {
+        onSelectActionRef.current?.(null)
+        closePinnedTipRef.current()
+      }}
       style={{
         boxSizing: 'border-box',
         overflowX: 'auto',
@@ -2454,34 +2594,18 @@ export default function ActionFlowVisualization({
           {scrollInner}
         </div>
       )}
-      {tooltipMounted && (
-        <Tooltip
-          id={tooltipId}
-          anchorSelect={`[data-tooltip-id="${tooltipId}"]`}
-          className="action-flow-react-tooltip"
-          variant="light"
-          positionStrategy="fixed"
-          place={ACTION_FLOW_TOOLTIP_PLACE}
-          middlewares={ACTION_FLOW_TOOLTIP_MIDDLEWARES}
-          delayShow={150}
-          delayHide={220}
-          opacity={1}
-          clickable
-          /** Inner `overflow:auto` can bubble `scroll` globally and dismiss tooltips prematurely */
-          globalCloseEvents={{ scroll: false, resize: true, escape: true }}
-          arrowColor="#f8fafc"
-          afterShow={() => {
-            onTooltipOpenChangeRef.current?.(true)
-            const kind = pendingTipKindRef.current
-            if (kind === 'flow-end') {
-              experimentTelemetry.onFlowEndSummaryTooltipShow(undefined, telemetrySubtaskId)
-            } else {
-              experimentTelemetry.onActionTooltipShow(undefined, 'timeline', telemetrySubtaskId)
-            }
-          }}
-        />
-      )}
     </div>
+    {pinnedTip &&
+      createPortal(
+        <div
+          ref={pinnedTipElRef}
+          className="action-flow-react-tooltip action-flow-pinned-tip"
+          role="dialog"
+          onClick={(ev) => ev.stopPropagation()}
+          dangerouslySetInnerHTML={{ __html: pinnedTip.html }}
+        />,
+        document.body,
+      )}
     <ActionFlowContextMenu
       menu={contextMenu}
       onClose={() => setContextMenu(null)}

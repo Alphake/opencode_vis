@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, type RefObject } from 'react'
+import { useState, useEffect, useMemo, useRef, type RefObject, type WheelEvent } from 'react'
 import type { OcMessage, OcPendingPermissionRequest, OcPendingQuestionRequest, OcPermissionReply, OcTodo } from '../types/opencode'
 import type { CanonicalTodo, LatestTodowriteBatchProgress } from '../utils/todoRegistry'
 import MessageBubble from './MessageBubble'
@@ -57,6 +57,8 @@ interface MessagePanelProps {
   pendingPermission?: OcPendingPermissionRequest | null
   onPermissionReply?: (reply: OcPermissionReply, message?: string) => Promise<void>
   permissionSubmitting?: boolean
+  /** How many asks are queued for this session (head is shown in the panel). */
+  pendingPermissionQueueSize?: number
   /** Workspace directory header (`x-opencode-directory`) for inline submits */
   sessionDirectory?: string
   /** Bubble-level question completion hook */
@@ -105,6 +107,7 @@ export default function MessagePanel({
   pendingPermission,
   onPermissionReply,
   permissionSubmitting,
+  pendingPermissionQueueSize = 0,
   sessionDirectory,
   onQuestionAnswered,
   composerModelRef = '',
@@ -178,7 +181,13 @@ export default function MessagePanel({
 
   /** Stick to bottom while streaming; pause when the user scrolls up to read history. */
   const stickToBottomRef = useRef(true)
+  const [pinnedToLatest, setPinnedToLatest] = useState(true)
   const NEAR_BOTTOM_PX = 96
+
+  const setStickToBottom = (pinned: boolean) => {
+    stickToBottomRef.current = pinned
+    setPinnedToLatest((prev) => (prev === pinned ? prev : pinned))
+  }
 
   const scrollMessagesToBottom = (behavior: ScrollBehavior = 'auto') => {
     const el = messageListScrollRef?.current
@@ -190,11 +199,23 @@ export default function MessagePanel({
     }
   }
 
+  const jumpToLatest = () => {
+    setStickToBottom(true)
+    requestAnimationFrame(() => {
+      scrollMessagesToBottom('smooth')
+    })
+  }
+
   const updateStickToBottomFromScroll = () => {
     const el = messageListScrollRef?.current
     if (!el) return
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    stickToBottomRef.current = distanceFromBottom <= NEAR_BOTTOM_PX
+    setStickToBottom(distanceFromBottom <= NEAR_BOTTOM_PX)
+  }
+
+  /** Intentional upward scroll immediately releases auto-follow (more reliable than scrollTop during streaming). */
+  const handleMessageListWheel = (e: WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY < 0) setStickToBottom(false)
   }
 
   /** Jump to latest turn after session load — mw-internal prompts are huge and bury the answer at the top. */
@@ -203,7 +224,7 @@ export default function MessagePanel({
     const finishedLoad = wasLoadingRef.current && !loading
     wasLoadingRef.current = loading
     if (!finishedLoad || !sessionId || messages.length === 0) return
-    stickToBottomRef.current = true
+    setStickToBottom(true)
     requestAnimationFrame(() => {
       scrollMessagesToBottom()
     })
@@ -224,7 +245,7 @@ export default function MessagePanel({
     const startedWaiting = !wasWaitingRef.current && waitingForAssistantReply
     wasWaitingRef.current = waitingForAssistantReply
     if (!startedWaiting) return
-    stickToBottomRef.current = true
+    setStickToBottom(true)
     requestAnimationFrame(() => {
       scrollMessagesToBottom()
     })
@@ -241,6 +262,11 @@ export default function MessagePanel({
     observer.observe(el, { childList: true, subtree: true, characterData: true })
     return () => observer.disconnect()
   }, [messageListScrollRef, sessionId])
+
+  /** Reset pin when switching sessions. */
+  useEffect(() => {
+    setStickToBottom(true)
+  }, [sessionId])
 
   return (
     <div
@@ -354,6 +380,7 @@ export default function MessagePanel({
             updateStickToBottomFromScroll()
             experimentTelemetry.onScroll('chat', sessionId || undefined)
           }}
+          onWheel={handleMessageListWheel}
           style={{
             height: '100%',
             overflowY: 'auto',
@@ -406,6 +433,42 @@ export default function MessagePanel({
             })
           )}
         </div>
+        {!pinnedToLatest && !loading && messages.length > 0 ? (
+          <button
+            type="button"
+            aria-label="Jump to latest message"
+            title="Jump to latest"
+            onClick={jumpToLatest}
+            style={{
+              position: 'absolute',
+              right: 28,
+              bottom: 16,
+              zIndex: 2,
+              width: 36,
+              height: 36,
+              borderRadius: 18,
+              border: '1px solid #E5E5E5',
+              background: '#FFFFFF',
+              color: '#333',
+              boxShadow: '0 2px 10px rgba(0,0,0,0.10)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 0,
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M8 3v9M4.5 8.5 8 12l3.5-3.5"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        ) : null}
         {messageListScrollRef ? (
           <ScrollNodeRail scrollContainerRef={messageListScrollRef} markers={userPromptMarkers} right={8} />
         ) : null}
@@ -434,6 +497,7 @@ export default function MessagePanel({
           request={pendingPermission}
           disabled={loading}
           submitting={permissionSubmitting}
+          queueSize={pendingPermissionQueueSize}
           onReply={onPermissionReply}
         />
       )}

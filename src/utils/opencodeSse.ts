@@ -10,20 +10,17 @@ export function sseSessionIdFromEvent(raw: unknown): string | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const o = raw as Record<string, unknown>
   const payload = (o.payload as Record<string, unknown> | undefined) ?? o
-  const props = payload.properties
-  if (props && typeof props === 'object') {
-    const pr = props as { sessionID?: unknown; sessionId?: unknown }
-    if (typeof pr.sessionID === 'string') return pr.sessionID
-    if (typeof pr.sessionId === 'string') return pr.sessionId
-    const nested = (props as { request?: unknown }).request
-    if (nested && typeof nested === 'object') {
-      const nr = nested as { sessionID?: unknown; sessionId?: unknown }
-      if (typeof nr.sessionID === 'string') return nr.sessionID
-      if (typeof nr.sessionId === 'string') return nr.sessionId
+  const bags: Record<string, unknown>[] = [payload]
+  for (const key of ['properties', 'data', 'request'] as const) {
+    const nested = payload[key]
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      bags.push(nested as Record<string, unknown>)
     }
   }
-  if (typeof payload.sessionID === 'string') return payload.sessionID
-  if (typeof payload.sessionId === 'string') return payload.sessionId
+  for (const bag of bags) {
+    if (typeof bag.sessionID === 'string') return bag.sessionID
+    if (typeof bag.sessionId === 'string') return bag.sessionId
+  }
   return extractSessionId(payload)
 }
 
@@ -84,10 +81,13 @@ export function parseActionRelatedSseEvent(raw: unknown): OcSseActionEvent | nul
   const rootDir = typeof o.directory === 'string' ? o.directory : undefined
 
   if (isPermission) {
+    // OpenCode 1.18+ durable events put the ask under `data`; older bus events use `properties`.
     const props =
-      (payload.properties && typeof payload.properties === 'object'
-        ? payload.properties
-        : payload) as Record<string, unknown>
+      (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+        ? payload.data
+        : payload.properties && typeof payload.properties === 'object'
+          ? payload.properties
+          : payload) as Record<string, unknown>
     const sessionFromEnvelope =
       (typeof props.sessionID === 'string' && props.sessionID) ||
       (typeof props.sessionId === 'string' && props.sessionId) ||
@@ -96,6 +96,10 @@ export function parseActionRelatedSseEvent(raw: unknown): OcSseActionEvent | nul
       (typeof o.sessionID === 'string' && o.sessionID) ||
       extractSessionId(payload)
     const permission = normalizePermissionRequest(props, {
+      directory: rootDir,
+      askedAt: time,
+      sessionID: sessionFromEnvelope,
+    }) ?? normalizePermissionRequest(payload, {
       directory: rootDir,
       askedAt: time,
       sessionID: sessionFromEnvelope,

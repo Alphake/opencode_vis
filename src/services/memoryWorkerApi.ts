@@ -396,7 +396,7 @@ export interface SaveExperimentReportResult {
   error?: string
 }
 
-/** Persist an experiment report JSON into the user's workspace folder root. */
+/** Persist an experiment report JSON into `{workspace}/vibetrace-behavior/`. */
 export async function saveExperimentReport(
   req: SaveExperimentReportRequest,
 ): Promise<SaveExperimentReportResult> {

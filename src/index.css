@@ -193,7 +193,7 @@ body {
   pointer-events: none;
 }
 
-/* Action-flow react-tooltip: light surface, grows with content instead of forcing scroll */
+/* Action-flow tip surface (click-pinned popover + legacy summary tooltip): light, content-sized */
 .action-flow-react-tooltip {
   z-index: 10050 !important;
   min-width: 260px;
@@ -211,6 +211,15 @@ body {
   line-height: 1.45 !important;
   color: #0f172a !important;
   background: #f8fafc !important;
+}
+
+.action-flow-pinned-tip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  margin: 0;
+  /* Let clicks reach other flow nodes underneath so switching tips works */
+  pointer-events: none;
 }
 
 .action-flow-react-tooltip .action-tip-root {

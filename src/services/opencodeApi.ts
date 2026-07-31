@@ -581,6 +581,31 @@ function normalizePendingPermissionList(raw: unknown): OcPendingPermissionItem[]
   return out
 }
 
+/**
+ * OpenCode emits permission asks in several envelopes:
+ * - BusEvent: `{ type, properties: PermissionRequest }`
+ * - Durable/global: `{ type, data: PermissionRequest, location?, durable? }`
+ * - Nested: `{ request: PermissionRequest }`
+ * Prefer unwrapping before reading id/session fields so v1 `data` events are not dropped.
+ */
+function unwrapPermissionEnvelope(
+  raw: Record<string, unknown>,
+  extras?: { directory?: string; askedAt?: number; sessionID?: string },
+): OcPendingPermissionItem | null {
+  for (const key of ['data', 'properties', 'request', 'permission'] as const) {
+    const nested = raw[key]
+    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) continue
+    const nestedObj = nested as Record<string, unknown>
+    // Skip opaque metadata bags that are not request-shaped
+    if (key === 'permission' && typeof nestedObj.id !== 'string' && typeof nestedObj.sessionID !== 'string') {
+      continue
+    }
+    const fromNested = normalizePermissionRequest(nestedObj, extras)
+    if (fromNested) return fromNested
+  }
+  return null
+}
+
 /** Normalize PermissionNext / v2 / loose SSE property shapes into OcPendingPermissionRequest */
 export function normalizePermissionRequest(
   raw: unknown,
@@ -589,19 +614,17 @@ export function normalizePermissionRequest(
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
 
-  // Some clients wrap the request: { request: PermissionRequest }
-  const nested = o.request
-  if (nested && typeof nested === 'object') {
-    const fromNested = normalizePermissionRequest(nested, extras)
-    if (fromNested) return fromNested
-  }
+  const unwrapped = unwrapPermissionEnvelope(o, extras)
+  if (unwrapped) return unwrapped
 
-  const id =
+  const idRaw =
     (typeof o.id === 'string' && o.id) ||
     (typeof o.requestID === 'string' && o.requestID) ||
     (typeof o.permissionID === 'string' && o.permissionID) ||
     (typeof o.permissionId === 'string' && o.permissionId) ||
     null
+  // Durable envelopes also carry an event id (`evt_…`); only `per…` ids are permission asks.
+  const id = idRaw && !idRaw.startsWith('evt_') ? idRaw : null
   const sessionID =
     (typeof o.sessionID === 'string' && o.sessionID) ||
     (typeof o.sessionId === 'string' && o.sessionId) ||
@@ -671,29 +694,31 @@ export async function getPendingPermissions(
   const headers = withDirectoryHeaders({}, directory)
 
   const candidates: string[] = []
-  if (options?.sessionID) {
-    const qs = directory ? `?directory=${encodeURIComponent(directory)}` : ''
-    candidates.push(`${BASE}/api/session/${encodeURIComponent(options.sessionID)}/permission${qs}`)
-    candidates.push(`${BASE}/session/${encodeURIComponent(options.sessionID)}/permission${qs}`)
-  }
+  // Prefer the global pending list — session-scoped `/api/session/.../permission`
+  // often returns `{ data: [] }` even while an ask is still live (OpenCode 1.18).
   {
     const params = new URLSearchParams()
     if (directory) params.set('directory', directory)
     if (options?.sessionID) params.set('sessionID', options.sessionID)
     const qs = params.toString()
-    candidates.push(qs ? `${BASE}/api/permission/request?${qs}` : `${BASE}/api/permission/request`)
     candidates.push(qs ? `${BASE}/permission?${qs}` : `${BASE}/permission`)
+    candidates.push(qs ? `${BASE}/api/permission/request?${qs}` : `${BASE}/api/permission/request`)
   }
-  // Global list without session filter (last resort)
   if (options?.sessionID) {
+    const qs = directory ? `?directory=${encodeURIComponent(directory)}` : ''
+    candidates.push(`${BASE}/api/session/${encodeURIComponent(options.sessionID)}/permission${qs}`)
+    candidates.push(`${BASE}/session/${encodeURIComponent(options.sessionID)}/permission${qs}`)
+    // Global list without session query (filter client-side)
     const params = new URLSearchParams()
     if (directory) params.set('directory', directory)
-    const qs = params.toString()
-    candidates.push(qs ? `${BASE}/api/permission/request?${qs}` : `${BASE}/api/permission/request`)
-    candidates.push(qs ? `${BASE}/permission?${qs}` : `${BASE}/permission`)
+    const gqs = params.toString()
+    candidates.push(gqs ? `${BASE}/permission?${gqs}` : `${BASE}/permission`)
+    candidates.push(gqs ? `${BASE}/api/permission/request?${gqs}` : `${BASE}/api/permission/request`)
   }
 
   let lastErr = ''
+  const byId = new Map<string, OcPendingPermissionItem>()
+  let sawOk = false
   for (const url of candidates) {
     try {
       const res = await fetch(url, { headers })
@@ -701,21 +726,28 @@ export async function getPendingPermissions(
         lastErr = `${res.status} ${await res.text()}`
         continue
       }
+      sawOk = true
       const data = await res.json()
       let list = normalizePendingPermissionList(data)
       if (options?.sessionID) {
         list = list.filter((p) => p.sessionID === options.sessionID)
       }
-      return list.map((p) => ({
-        ...p,
-        directory: p.directory ?? directory,
-        askedAt: p.askedAt ?? Date.now(),
-      }))
+      for (const item of list) {
+        byId.set(item.id, {
+          ...item,
+          directory: item.directory ?? directory,
+          askedAt: item.askedAt ?? Date.now(),
+        })
+      }
+      // Keep scanning: an earlier endpoint may be empty while a later one has asks.
     } catch (e) {
       lastErr = e instanceof Error ? e.message : String(e)
     }
   }
-  throw new Error(`getPendingPermissions failed: ${lastErr || 'no endpoint'}`)
+  if (!sawOk && byId.size === 0) {
+    throw new Error(`getPendingPermissions failed: ${lastErr || 'no endpoint'}`)
+  }
+  return [...byId.values()]
 }
 
 export async function replyToPermission(

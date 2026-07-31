@@ -1,4 +1,5 @@
 import { STORAGE_KEYS } from '../config/storageKeys'
+import { directoryKey, normalizeSessionDirectory } from '../utils/sessionFolders'
 import {
   emptyCounters,
   emptyFirstInteractionAt,
@@ -17,6 +18,20 @@ const MAX_EVENTS = 2000
 
 type Listener = (snap: ExperimentSnapshot | null) => void
 
+type StoredActiveV2 = {
+  v: 2 | 3
+  /** One Start for the whole study; switching workspaces auto-opens a per-folder bucket. */
+  studyActive?: boolean
+  participantId?: string
+  byDirectory: Record<string, ExperimentSnapshot>
+}
+
+type LoadedStore = {
+  studyActive: boolean
+  participantId: string
+  byDirectory: Map<string, ExperimentSnapshot>
+}
+
 function nowIso(): string {
   return new Date().toISOString()
 }
@@ -29,44 +44,94 @@ function newId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${rand}`
 }
 
-function loadSnapshot(): ExperimentSnapshot | null {
-  try {
-    const raw = localStorage.getItem(LS_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as ExperimentSnapshot
-    if (!parsed?.active || !parsed.experimentId) return null
-    return {
-      ...parsed,
-      counters: { ...emptyCounters(), ...parsed.counters },
-      firstInteractionAt: {
-        ...emptyFirstInteractionAt(),
-        ...(parsed.firstInteractionAt || {}),
-      },
-      sessionIds: Array.isArray(parsed.sessionIds) ? parsed.sessionIds : [],
-      seenTrajectoryIds: Array.isArray(parsed.seenTrajectoryIds) ? parsed.seenTrajectoryIds : [],
-      seenTaskTabIds: Array.isArray(parsed.seenTaskTabIds) ? parsed.seenTaskTabIds : [],
-      seenSubtaskIds: Array.isArray(parsed.seenSubtaskIds) ? parsed.seenSubtaskIds : [],
-      events: Array.isArray(parsed.events) ? parsed.events : [],
-      focusStartedAt: null,
-      focusPanel: null,
-    }
-  } catch {
-    return null
+function normalizeSnap(parsed: ExperimentSnapshot): ExperimentSnapshot {
+  return {
+    ...parsed,
+    counters: { ...emptyCounters(), ...parsed.counters },
+    firstInteractionAt: {
+      ...emptyFirstInteractionAt(),
+      ...(parsed.firstInteractionAt || {}),
+    },
+    sessionIds: Array.isArray(parsed.sessionIds) ? parsed.sessionIds : [],
+    seenTrajectoryIds: Array.isArray(parsed.seenTrajectoryIds) ? parsed.seenTrajectoryIds : [],
+    seenTaskTabIds: Array.isArray(parsed.seenTaskTabIds) ? parsed.seenTaskTabIds : [],
+    seenSubtaskIds: Array.isArray(parsed.seenSubtaskIds) ? parsed.seenSubtaskIds : [],
+    events: Array.isArray(parsed.events) ? parsed.events : [],
+    focusStartedAt: null,
+    focusPanel: null,
   }
 }
 
-function persist(snap: ExperimentSnapshot | null) {
+function loadStore(): LoadedStore {
+  const byDirectory = new Map<string, ExperimentSnapshot>()
+  let studyActive = false
+  let participantId = 'P01'
   try {
-    if (!snap) {
+    const raw = localStorage.getItem(LS_KEY)
+    if (!raw) return { studyActive, participantId, byDirectory }
+    const parsed = JSON.parse(raw) as StoredActiveV2 | ExperimentSnapshot
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      ((parsed as StoredActiveV2).v === 2 || (parsed as StoredActiveV2).v === 3)
+    ) {
+      const stored = parsed as StoredActiveV2
+      const by = stored.byDirectory || {}
+      for (const [key, snap] of Object.entries(by)) {
+        if (!snap?.active || !snap.experimentId) continue
+        const dirKey = key || directoryKey(snap.directory)
+        if (!dirKey) continue
+        byDirectory.set(dirKey, normalizeSnap(snap))
+      }
+      const first = byDirectory.values().next().value as ExperimentSnapshot | undefined
+      participantId =
+        (typeof stored.participantId === 'string' && stored.participantId.trim()) ||
+        first?.participantId ||
+        participantId
+      studyActive = Boolean(stored.studyActive) || byDirectory.size > 0
+      return { studyActive, participantId, byDirectory }
+    }
+    // Migrate v1 single-snapshot draft
+    const legacy = parsed as ExperimentSnapshot
+    if (legacy?.active && legacy.experimentId) {
+      const key = directoryKey(legacy.directory)
+      if (key) {
+        byDirectory.set(key, normalizeSnap(legacy))
+        studyActive = true
+        participantId = legacy.participantId || participantId
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { studyActive, participantId, byDirectory }
+}
+
+function persist(store: {
+  studyActive: boolean
+  participantId: string
+  byDirectory: Map<string, ExperimentSnapshot>
+}) {
+  try {
+    if (!store.studyActive && store.byDirectory.size === 0) {
       localStorage.removeItem(LS_KEY)
       return
     }
-    const toStore: ExperimentSnapshot = {
-      ...snap,
-      focusStartedAt: null,
-      focusPanel: null,
+    const record: Record<string, ExperimentSnapshot> = {}
+    for (const [key, snap] of store.byDirectory) {
+      record[key] = {
+        ...snap,
+        focusStartedAt: null,
+        focusPanel: null,
+      }
     }
-    localStorage.setItem(LS_KEY, JSON.stringify(toStore))
+    const stored: StoredActiveV2 = {
+      v: 3,
+      studyActive: store.studyActive,
+      participantId: store.participantId,
+      byDirectory: record,
+    }
+    localStorage.setItem(LS_KEY, JSON.stringify(stored))
   } catch {
     /* ignore quota */
   }
@@ -128,42 +193,147 @@ function buildDerived(
   }
 }
 
+function snapToReport(snap: ExperimentSnapshot, notes?: string): ExperimentReport {
+  const endedAt = nowIso()
+  const startedMs = Date.parse(snap.startedAt)
+  const endedMs = Date.parse(endedAt)
+  return {
+    schemaVersion: 'experiment.report.v1',
+    participantId: snap.participantId,
+    experimentId: snap.experimentId,
+    directory: snap.directory,
+    startedAt: snap.startedAt,
+    endedAt,
+    durationMs: Number.isFinite(startedMs) && Number.isFinite(endedMs) ? Math.max(0, endedMs - startedMs) : 0,
+    sessionIds: [...snap.sessionIds],
+    counters: { ...snap.counters },
+    firstInteractionAt: { ...snap.firstInteractionAt },
+    derived: buildDerived(snap.counters, snap.startedAt, snap.firstInteractionAt),
+    events: [...snap.events],
+    notes: notes?.trim() || undefined,
+  }
+}
+
 class ExperimentTelemetry {
-  private snap: ExperimentSnapshot | null = loadSnapshot()
+  private store = loadStore()
+  private byDirectory = this.store.byDirectory
+  private studyActive = this.store.studyActive
+  private participantId = this.store.participantId
+  /** directoryKey of the workspace currently shown in the UI — events route here. */
+  private currentKey = ''
   private listeners = new Set<Listener>()
   private scrollTimers: Record<string, number | null> = { chat: null, trajectory: null }
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn)
-    fn(this.snap)
+    fn(this.getSnapshot())
     return () => this.listeners.delete(fn)
   }
 
   private emit() {
-    persist(this.snap)
-    for (const fn of this.listeners) fn(this.snap)
+    persist({
+      studyActive: this.studyActive,
+      participantId: this.participantId,
+      byDirectory: this.byDirectory,
+    })
+    const snap = this.getSnapshot()
+    for (const fn of this.listeners) fn(snap)
+  }
+
+  /**
+   * Bind event routing to the workspace the user is viewing.
+   * Always-on: selecting a folder starts/continues recording and opens a per-folder bucket.
+   */
+  setCurrentDirectory(directory: string) {
+    const nextKey = directoryKey(directory)
+    if (nextKey === this.currentKey) {
+      if (nextKey) {
+        this.studyActive = true
+        if (!this.participantId.trim()) this.participantId = 'P01'
+        this.ensureBucketForDirectory(directory)
+        this.emit()
+      }
+      return
+    }
+    this.flushFocus()
+    this.currentKey = nextKey
+    if (nextKey) {
+      this.studyActive = true
+      if (!this.participantId.trim()) this.participantId = 'P01'
+      this.ensureBucketForDirectory(directory)
+    }
+    this.emit()
+  }
+
+  /** Resume always-on recording after returning to the tab (localStorage + current folder). */
+  resumeIfNeeded(directory: string) {
+    if (!directory.trim()) return
+    this.setCurrentDirectory(directory)
+  }
+
+  setParticipantId(participantId: string) {
+    const next = participantId.trim() || 'P01'
+    if (next === this.participantId) return
+    this.participantId = next
+    for (const snap of this.byDirectory.values()) {
+      if (snap.active) snap.participantId = next
+    }
+    this.emit()
+  }
+
+  getCurrentDirectoryKey(): string {
+    return this.currentKey
   }
 
   getSnapshot(): ExperimentSnapshot | null {
-    return this.snap
+    if (!this.currentKey) return null
+    const snap = this.byDirectory.get(this.currentKey)
+    return snap?.active ? snap : null
   }
 
+  /** True when the current workspace folder is recording. */
   isActive(): boolean {
-    return Boolean(this.snap?.active)
+    return Boolean(this.getSnapshot())
   }
 
-  start(opts: { participantId: string; directory: string }): ExperimentSnapshot {
-    const participantId = opts.participantId.trim() || 'P00'
-    const directory = opts.directory.trim()
-    if (!directory) {
-      throw new Error('Select a workspace folder before starting the experiment.')
-    }
+  /** True while always-on study is running (auto-starts when a folder is selected). */
+  isStudyActive(): boolean {
+    return this.studyActive
+  }
+
+  getParticipantId(): string {
+    return this.participantId
+  }
+
+  /** Snapshot every active folder as a report without ending recording. */
+  snapshotReports(notes?: string): ExperimentReport[] {
     this.flushFocus()
-    this.snap = {
+    const reports: ExperimentReport[] = []
+    for (const snap of this.byDirectory.values()) {
+      if (!snap.active) continue
+      this.flushFocusFor(snap)
+      reports.push(snapToReport(snap, notes))
+    }
+    this.emit()
+    return reports
+  }
+
+  /** True if any workspace folder still has an active recording. */
+  hasAnyActive(): boolean {
+    for (const snap of this.byDirectory.values()) {
+      if (snap.active) return true
+    }
+    return false
+  }
+
+  private createBucket(directory: string, participantId: string): ExperimentSnapshot {
+    const normalized = normalizeSessionDirectory(directory)
+    const key = directoryKey(normalized)
+    const snap: ExperimentSnapshot = {
       active: true,
       participantId,
       experimentId: newId('exp'),
-      directory,
+      directory: normalized,
       startedAt: nowIso(),
       sessionIds: [],
       seenTrajectoryIds: [],
@@ -175,73 +345,129 @@ class ExperimentTelemetry {
       focusStartedAt: null,
       focusPanel: null,
     }
-    this.track('experiment.start', undefined, { participantId, directory })
-    this.emit()
-    return this.snap
+    this.byDirectory.set(key, snap)
+    this.trackOn(snap, 'experiment.start', undefined, { participantId, directory: normalized })
+    return snap
   }
 
-  /** Build final report and clear active state. Caller writes the file. */
-  end(notes?: string): ExperimentReport | null {
-    if (!this.snap?.active) return null
-    this.flushFocus()
-    const endedAt = nowIso()
-    const startedMs = Date.parse(this.snap.startedAt)
-    const endedMs = Date.parse(endedAt)
-    this.track('experiment.end', undefined, { notes: notes || undefined })
-    const report: ExperimentReport = {
-      schemaVersion: 'experiment.report.v1',
-      participantId: this.snap.participantId,
-      experimentId: this.snap.experimentId,
-      directory: this.snap.directory,
-      startedAt: this.snap.startedAt,
-      endedAt,
-      durationMs: Number.isFinite(startedMs) && Number.isFinite(endedMs) ? Math.max(0, endedMs - startedMs) : 0,
-      sessionIds: [...this.snap.sessionIds],
-      counters: { ...this.snap.counters },
-      firstInteractionAt: { ...this.snap.firstInteractionAt },
-      derived: buildDerived(this.snap.counters, this.snap.startedAt, this.snap.firstInteractionAt),
-      events: [...this.snap.events],
-      notes: notes?.trim() || undefined,
+  /** Open a per-folder draft if the study is running and this workspace has none yet. */
+  private ensureBucketForDirectory(directory: string): ExperimentSnapshot | null {
+    const normalized = normalizeSessionDirectory(directory)
+    const key = directoryKey(normalized)
+    if (!key || !this.studyActive) return null
+    const existing = this.byDirectory.get(key)
+    if (existing?.active) return existing
+    return this.createBucket(normalized, this.participantId)
+  }
+
+  /** One Start for the whole study; later workspace switches auto-start their own buckets. */
+  start(opts: { participantId: string; directory: string }): ExperimentSnapshot {
+    const participantId = opts.participantId.trim() || 'P00'
+    const directory = normalizeSessionDirectory(opts.directory)
+    const key = directoryKey(directory)
+    if (!key) {
+      throw new Error('Select a workspace folder before starting the experiment.')
     }
-    this.snap = null
+    this.flushFocus()
+    this.studyActive = true
+    this.participantId = participantId
+    this.currentKey = key
+    const existing = this.byDirectory.get(key)
+    const snap = existing?.active ? existing : this.createBucket(directory, participantId)
+    this.emit()
+    return snap
+  }
+
+  /** End the current workspace only (keeps study active so other folders still record). */
+  end(notes?: string, directory?: string): ExperimentReport | null {
+    const key = directory !== undefined ? directoryKey(directory) : this.currentKey
+    if (!key) return null
+    const snap = this.byDirectory.get(key)
+    if (!snap?.active) return null
+    if (key === this.currentKey) this.flushFocus()
+    else this.flushFocusFor(snap)
+    this.trackOn(snap, 'experiment.end', undefined, { notes: notes || undefined })
+    const report = snapToReport(snap, notes)
+    this.byDirectory.delete(key)
+    if (this.byDirectory.size === 0) this.studyActive = false
     this.emit()
     return report
   }
 
+  /** End every active workspace recording and clear the study (manual End only). */
+  endAll(notes?: string): ExperimentReport[] {
+    this.flushFocus()
+    const reports: ExperimentReport[] = []
+    for (const [key, snap] of [...this.byDirectory.entries()]) {
+      if (!snap.active) continue
+      this.flushFocusFor(snap)
+      this.trackOn(snap, 'experiment.end', undefined, { notes: notes || undefined })
+      reports.push(snapToReport(snap, notes))
+      this.byDirectory.delete(key)
+    }
+    this.studyActive = false
+    this.emit()
+    return reports
+  }
+
+  /**
+   * Flush in-flight focus timers and persist drafts to localStorage.
+   * Used on tab hide / unload — does NOT end the study (swipe-away / app switch must not stop recording).
+   */
+  checkpointDraft() {
+    if (!this.studyActive && this.byDirectory.size === 0) return
+    this.flushFocus()
+    this.emit()
+  }
+
   track(event: ExperimentEventName, sessionId?: string, props?: Record<string, unknown>) {
-    if (!this.snap?.active) return
+    const snap = this.getSnapshot()
+    if (!snap) return
+    this.trackOn(snap, event, sessionId, props)
+    this.emit()
+  }
+
+  private trackOn(
+    snap: ExperimentSnapshot,
+    event: ExperimentEventName,
+    sessionId?: string,
+    props?: Record<string, unknown>,
+  ) {
+    if (!snap.active) return
     const entry: ExperimentEvent = {
       ts: nowIso(),
       event,
       sessionId: sessionId || undefined,
-      directory: this.snap.directory,
+      directory: snap.directory,
       props: props && Object.keys(props).length ? props : undefined,
     }
-    this.snap.events.push(entry)
-    if (this.snap.events.length > MAX_EVENTS) {
-      this.snap.events.splice(0, this.snap.events.length - MAX_EVENTS)
+    snap.events.push(entry)
+    if (snap.events.length > MAX_EVENTS) {
+      snap.events.splice(0, snap.events.length - MAX_EVENTS)
     }
-    this.emit()
   }
 
   private bump(key: keyof ExperimentCounters, by = 1) {
-    if (!this.snap?.active) return
-    this.snap.counters[key] = (this.snap.counters[key] || 0) + by
+    const snap = this.getSnapshot()
+    if (!snap) return
+    snap.counters[key] = (snap.counters[key] || 0) + by
   }
 
   /** Record first click/scroll/send for a UI region (idempotent). */
   private markFirst(region: ExperimentRegion, via: string) {
-    if (!this.snap?.active) return
-    if (this.snap.firstInteractionAt[region]) return
+    const snap = this.getSnapshot()
+    if (!snap) return
+    if (snap.firstInteractionAt[region]) return
     const at = nowIso()
-    this.snap.firstInteractionAt[region] = at
+    snap.firstInteractionAt[region] = at
     this.track('region.first', undefined, { region, via })
   }
 
   private noteSession(sessionId: string | undefined) {
-    if (!this.snap?.active || !sessionId) return
-    if (!this.snap.sessionIds.includes(sessionId)) {
-      this.snap.sessionIds.push(sessionId)
+    const snap = this.getSnapshot()
+    if (!snap || !sessionId) return
+    if (!snap.sessionIds.includes(sessionId)) {
+      snap.sessionIds.push(sessionId)
     }
   }
 
@@ -298,10 +524,11 @@ class ExperimentTelemetry {
 
   /** Record that the user viewed a generated subtask panel (deduped by subtask id). */
   onPanelView(subtaskId: string, sessionId?: string, via?: string) {
-    if (!this.isActive() || !subtaskId) return
-    if (this.snap!.seenTrajectoryIds.includes(subtaskId)) return
-    this.snap!.seenTrajectoryIds.push(subtaskId)
-    this.snap!.counters.trajectoriesViewed = this.snap!.seenTrajectoryIds.length
+    const snap = this.getSnapshot()
+    if (!snap || !subtaskId) return
+    if (snap.seenTrajectoryIds.includes(subtaskId)) return
+    snap.seenTrajectoryIds.push(subtaskId)
+    snap.counters.trajectoriesViewed = snap.seenTrajectoryIds.length
     this.markFirst('trajectory', via ? `panel.view:${via}` : 'panel.view')
     this.track('panel.view', sessionId, { subtaskId, via, firstView: true })
   }
@@ -315,8 +542,9 @@ class ExperimentTelemetry {
 
   /** User selected a subtask card (trajectory view). Prefer onPanelView via linkedSubtaskIndex effect. */
   onTrajectoryView(subtaskId: string, sessionId?: string) {
-    if (!this.isActive() || !subtaskId) return
-    const revisit = this.snap!.seenTrajectoryIds.includes(subtaskId)
+    const snap = this.getSnapshot()
+    if (!snap || !subtaskId) return
+    const revisit = snap.seenTrajectoryIds.includes(subtaskId)
     this.onPanelView(subtaskId, sessionId, revisit ? 'card_revisit' : 'card')
     this.onTrajectoryClick(sessionId, { subtaskId, revisit, firstView: !revisit })
   }
@@ -341,10 +569,11 @@ class ExperimentTelemetry {
   }
 
   onTaskTabSeen(taskTabId: string, sessionId?: string) {
-    if (!this.isActive() || !taskTabId) return
-    if (this.snap!.seenTaskTabIds.includes(taskTabId)) return
-    this.snap!.seenTaskTabIds.push(taskTabId)
-    this.snap!.counters.taskTabsSeen = this.snap!.seenTaskTabIds.length
+    const snap = this.getSnapshot()
+    if (!snap || !taskTabId) return
+    if (snap.seenTaskTabIds.includes(taskTabId)) return
+    snap.seenTaskTabIds.push(taskTabId)
+    snap.counters.taskTabsSeen = snap.seenTaskTabIds.length
     this.track('task_tab.seen', sessionId, { taskTabId })
   }
 
@@ -379,44 +608,54 @@ class ExperimentTelemetry {
 
   /** Observe generated subtask / trace panels (unique ids). */
   onSubtasksObserved(subtaskIds: string[], sessionId?: string) {
-    if (!this.isActive()) return
+    const snap = this.getSnapshot()
+    if (!snap) return
     let added = 0
     for (const id of subtaskIds) {
-      if (!id || this.snap!.seenSubtaskIds.includes(id)) continue
-      this.snap!.seenSubtaskIds.push(id)
+      if (!id || snap.seenSubtaskIds.includes(id)) continue
+      snap.seenSubtaskIds.push(id)
       added += 1
     }
     if (added === 0) return
-    this.snap!.counters.subtaskPanelsGenerated = this.snap!.seenSubtaskIds.length
-    this.track('subtask.generated', sessionId, { added, total: this.snap!.seenSubtaskIds.length })
+    snap.counters.subtaskPanelsGenerated = snap.seenSubtaskIds.length
+    this.track('subtask.generated', sessionId, { added, total: snap.seenSubtaskIds.length })
   }
 
   enterPanelFocus(panel: 'chat' | 'trajectory') {
     if (!this.isActive()) return
     this.flushFocus()
-    this.snap!.focusPanel = panel
-    this.snap!.focusStartedAt = Date.now()
+    const snap = this.getSnapshot()
+    if (!snap) return
+    snap.focusPanel = panel
+    snap.focusStartedAt = Date.now()
   }
 
   leavePanelFocus(panel: 'chat' | 'trajectory') {
     if (!this.isActive()) return
-    if (this.snap!.focusPanel === panel) this.flushFocus()
+    const snap = this.getSnapshot()
+    if (snap?.focusPanel === panel) this.flushFocus()
   }
 
   private flushFocus() {
-    if (!this.snap?.active || !this.snap.focusPanel || !this.snap.focusStartedAt) {
-      if (this.snap) {
-        this.snap.focusPanel = null
-        this.snap.focusStartedAt = null
-      }
+    const snap = this.getSnapshot()
+    if (snap) this.flushFocusFor(snap)
+  }
+
+  private flushFocusFor(snap: ExperimentSnapshot) {
+    if (!snap.active || !snap.focusPanel || !snap.focusStartedAt) {
+      snap.focusPanel = null
+      snap.focusStartedAt = null
       return
     }
-    const ms = Math.max(0, Date.now() - this.snap.focusStartedAt)
-    if (this.snap.focusPanel === 'chat') this.bump('chatPanelFocusMs', ms)
-    else this.bump('trajectoryPanelFocusMs', ms)
-    this.track('panel.focus', undefined, { panel: this.snap.focusPanel, ms })
-    this.snap.focusPanel = null
-    this.snap.focusStartedAt = null
+    const ms = Math.max(0, Date.now() - snap.focusStartedAt)
+    if (snap.focusPanel === 'chat') {
+      snap.counters.chatPanelFocusMs = (snap.counters.chatPanelFocusMs || 0) + ms
+    } else {
+      snap.counters.trajectoryPanelFocusMs = (snap.counters.trajectoryPanelFocusMs || 0) + ms
+    }
+    this.trackOn(snap, 'panel.focus', undefined, { panel: snap.focusPanel, ms })
+    snap.focusPanel = null
+    snap.focusStartedAt = null
   }
 }
 

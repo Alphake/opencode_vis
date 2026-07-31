@@ -261,7 +261,7 @@ export default function SubtaskCard({
   showRecentCompaction = false,
 }: SubtaskCardProps) {
   const [nowTick, setNowTick] = useState(() => Date.now())
-  /** While reading a flow tooltip, slow live redraw so the tip is not torn down every 2s. */
+  /** While a flow tip is pinned open, slow live redraw so content is easier to read. */
   const [flowTooltipOpen, setFlowTooltipOpen] = useState(false)
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [filterMode, setFilterMode] = useState<FilterMode>('duration')

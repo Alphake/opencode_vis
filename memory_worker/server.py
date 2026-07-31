@@ -5080,8 +5080,12 @@ def _run_legacy_analyzer_writer_pipeline(
     }
 
 
+# Per-workspace folder for always-on behavior reports (hand this folder back to researchers).
+EXPERIMENT_BEHAVIOR_DIRNAME = "vibetrace-behavior"
+
+
 def save_experiment_report(body: dict[str, Any]) -> dict[str, Any]:
-    """Write an experiment report JSON into the user's workspace folder root.
+    """Write an experiment report JSON into {workspace}/vibetrace-behavior/.
 
     Expected body: { directory: str, report: object, filename?: str }
     """
@@ -5095,6 +5099,12 @@ def save_experiment_report(body: dict[str, Any]) -> dict[str, Any]:
     root = Path(directory).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         return {"ok": False, "error": f"directory does not exist or is not a folder: {root}"}
+
+    out_dir = root / EXPERIMENT_BEHAVIOR_DIRNAME
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "error": f"failed to create behavior folder: {e}"}
 
     raw_name = str(body.get("filename") or "").strip()
     if not raw_name:
@@ -5111,14 +5121,19 @@ def save_experiment_report(body: dict[str, Any]) -> dict[str, Any]:
     if ".." in filename or "/" in filename or "\\" in filename:
         return {"ok": False, "error": "invalid filename"}
 
-    target = root / filename
+    target = out_dir / filename
     try:
         target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except OSError as e:
         return {"ok": False, "error": f"failed to write report: {e}"}
 
     print(f"[memory-worker] experiment-report saved path={target}")
-    return {"ok": True, "path": str(target), "filename": filename}
+    return {
+        "ok": True,
+        "path": str(target),
+        "filename": filename,
+        "folder": EXPERIMENT_BEHAVIOR_DIRNAME,
+    }
 
 
 class AppHandler(BaseHTTPRequestHandler):
