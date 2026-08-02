@@ -1,4 +1,13 @@
-import { Fragment, type RefObject, useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  Fragment,
+  type RefObject,
+  type WheelEvent,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { Tooltip } from 'react-tooltip'
 import type {
   MappedAction,
@@ -195,6 +204,8 @@ interface SubtaskDebugPanelProps {
   onSelectTaskTab?: (id: string) => void
   sessionId?: string
   errorDiagnosisBySubtaskId?: Record<string, MemoryWorkerErrorDiagnosis>
+  /** Fired when a panel trajectory seals — triggers independent Trace summary / error diagnosis. */
+  onPanelSealed?: (subtaskId: string) => void
   /** First time a subtask card scrolls into view (≥35% visible). */
   onPanelBecameVisible?: (subtaskId: string) => void
   /** Live OpenCode permission ask for this session (SSE / hydrate). */
@@ -223,6 +234,7 @@ export default function SubtaskDebugPanel({
   onSelectTaskTab,
   sessionId,
   errorDiagnosisBySubtaskId = {},
+  onPanelSealed,
   onPanelBecameVisible,
   pendingPermission = null,
   permissionTraces = [],
@@ -234,7 +246,7 @@ export default function SubtaskDebugPanel({
   const pendingSummaryTipRef = useRef(false)
   const pendingSummarySubtaskIdRef = useRef<string | null>(null)
   const [colorBy, setColorBy] = useState<'tokens' | 'type'>('type')
-  const [legendExpanded, setLegendExpanded] = useState(false)
+  const [legendExpanded, setLegendExpanded] = useState(true)
   const [skillsByTaskId, setSkillsByTaskId] = useState<Record<string, TaskSkillRecord[]>>({})
   const [skillStatusByTaskId, setSkillStatusByTaskId] = useState<Record<string, string>>({})
   const [skillDiscoveredCountByTaskId, setSkillDiscoveredCountByTaskId] = useState<Record<string, number>>({})
@@ -259,9 +271,16 @@ export default function SubtaskDebugPanel({
   const actionTypePaletteId: ActionTypePaletteId = DEFAULT_ACTION_TYPE_PALETTE_ID
   const [childSessionMessages, setChildSessionMessages] = useState<Record<string, OcMessage[]>>({})
   const summaryViewportRef = useRef<HTMLDivElement | null>(null)
-  /** Follow the newest panel while generating; pause when the user scrolls up to read history. */
+  /**
+   * Follow the newest panel while generating; pause when the user scrolls up or
+   * selects a historical trajectory (same stick-to-bottom pattern as MessagePanel).
+   */
   const stickTrajectoryToBottomRef = useRef(true)
   const TRAJECTORY_NEAR_BOTTOM_PX = 120
+
+  const setStickTrajectoryToBottom = (pinned: boolean) => {
+    stickTrajectoryToBottomRef.current = pinned
+  }
 
   const scrollTrajectoryToBottom = (behavior: ScrollBehavior = 'auto') => {
     if (flowLayoutMode === 'summary') return
@@ -278,8 +297,27 @@ export default function SubtaskDebugPanel({
     const el = listScrollRef?.current
     if (!el) return
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    stickTrajectoryToBottomRef.current = distanceFromBottom <= TRAJECTORY_NEAR_BOTTOM_PX
+    setStickTrajectoryToBottom(distanceFromBottom <= TRAJECTORY_NEAR_BOTTOM_PX)
   }
+
+  /** Intentional upward scroll immediately releases auto-follow (more reliable than scrollTop during streaming). */
+  const handleTrajectoryListWheel = (e: WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY < 0) setStickTrajectoryToBottom(false)
+  }
+
+  /** Selecting a historical card pauses follow so App's scrollIntoView is not yanked back to the latest. */
+  useEffect(() => {
+    if (linkedSubtaskIndex === null || visibleSubtasks.length === 0) return
+    const latestSourceIndex = visibleSubtasks[visibleSubtasks.length - 1]?.sourceIndex
+    if (latestSourceIndex !== undefined && linkedSubtaskIndex !== latestSourceIndex) {
+      setStickTrajectoryToBottom(false)
+    }
+  }, [linkedSubtaskIndex, visibleSubtasks])
+
+  /** New session: resume auto-follow until the user scrolls up again. */
+  useEffect(() => {
+    setStickTrajectoryToBottom(true)
+  }, [sessionId])
 
   useEffect(() => {
     if (!onPanelBecameVisible) return
@@ -312,6 +350,7 @@ export default function SubtaskDebugPanel({
     if (next <= prev) return
     if (!stickTrajectoryToBottomRef.current) return
     requestAnimationFrame(() => {
+      if (!stickTrajectoryToBottomRef.current) return
       scrollTrajectoryToBottom('smooth')
     })
   }, [visibleSubtasks.length, flowLayoutMode, listScrollRef])
@@ -978,6 +1017,7 @@ export default function SubtaskDebugPanel({
           globalCloseEvents={{ scroll: false, resize: true, escape: true }}
           arrowColor="#f8fafc"
           afterShow={() => {
+            experimentTelemetry.enterPanelFocus('tooltip')
             if (pendingSummaryTipRef.current) {
               experimentTelemetry.onActionTooltipShow(
                 sessionId,
@@ -985,6 +1025,9 @@ export default function SubtaskDebugPanel({
                 pendingSummarySubtaskIdRef.current || undefined,
               )
             }
+          }}
+          afterHide={() => {
+            experimentTelemetry.leavePanelFocus('tooltip', 'trajectory')
           }}
         />
       )}
@@ -1238,6 +1281,15 @@ export default function SubtaskDebugPanel({
           <div
             role="tablist"
             aria-label="Task segments"
+            onPointerEnter={() => experimentTelemetry.enterPanelFocus('task')}
+            onPointerLeave={(e) => {
+              const related = e.relatedTarget as Node | null
+              const column = (e.currentTarget as HTMLElement).closest(
+                '[data-exp-focus="trajectory-column"]',
+              )
+              const stay = Boolean(column && related && column.contains(related))
+              experimentTelemetry.leavePanelFocus('task', stay ? 'trajectory' : undefined)
+            }}
             style={{
               display: 'flex',
               flexWrap: 'nowrap',
@@ -1338,6 +1390,7 @@ export default function SubtaskDebugPanel({
             updateStickTrajectoryFromScroll()
             experimentTelemetry.onScroll('trajectory', sessionId)
           }}
+          onWheel={handleTrajectoryListWheel}
           style={{
             height: '100%',
             width: '100%',
@@ -1445,6 +1498,14 @@ export default function SubtaskDebugPanel({
                         toggleFeedbackPanel(sourceIndex)
                         return
                       }
+                      const latestSourceIndex =
+                        visibleSubtasks[visibleSubtasks.length - 1]?.sourceIndex
+                      if (
+                        latestSourceIndex !== undefined &&
+                        sourceIndex !== latestSourceIndex
+                      ) {
+                        setStickTrajectoryToBottom(false)
+                      }
                       onSelectSubtask(sourceIndex)
                     }}
                     onForkFromAction={onForkFromAction}
@@ -1462,6 +1523,7 @@ export default function SubtaskDebugPanel({
                     onColorByChange={setColorBy}
                     actionTypePaletteId={actionTypePaletteId}
                     errorDiagnosis={errorDiagnosisBySubtaskId[st.subtask_id]}
+                    onPanelSealed={onPanelSealed}
                     feedbackMode={feedbackMode}
                     isFeedbackSelected={feedbackSelected}
                     hasFeedbackComment={hasPanelFeedback}
@@ -1483,6 +1545,15 @@ export default function SubtaskDebugPanel({
       </div>
       {canShowSkillDock ? (
         <div
+          onPointerEnter={() => experimentTelemetry.enterPanelFocus('skill')}
+          onPointerLeave={(e) => {
+            const related = e.relatedTarget as Node | null
+            const column = (e.currentTarget as HTMLElement).closest(
+              '[data-exp-focus="trajectory-column"]',
+            )
+            const stay = Boolean(column && related && column.contains(related))
+            experimentTelemetry.leavePanelFocus('skill', stay ? 'trajectory' : undefined)
+          }}
           style={{
             flexShrink: 0,
             marginTop: 8,
@@ -2007,6 +2078,8 @@ export default function SubtaskDebugPanel({
           aria-modal="true"
           aria-label="Skill detail"
           onClick={closeSkillDetail}
+          onPointerEnter={() => experimentTelemetry.enterPanelFocus('skill')}
+          onPointerLeave={() => experimentTelemetry.leavePanelFocus('skill', 'trajectory')}
           style={{
             position: 'fixed',
             inset: 0,

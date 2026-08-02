@@ -413,7 +413,7 @@ ${item.runDir ? `<div style="font-size:10px;line-height:1.4;color:#9A3412;margin
 function buildFlowEndPlaceholderHtml(esc: (s: string) => string): string {
   return `<div style="border-top:1px solid #E5E7EB;margin-top:10px;padding-top:10px;">
 <div style="font-size:12px;font-weight:700;color:#6B7280;margin-bottom:4px;">Trace summary</div>
-<div style="font-size:11px;line-height:1.45;color:#6B7280;">${esc('A one-line summary is generated automatically after this assistant turn completes; error diagnosis is appended when failures occur. Restored from local cache or memory worker after refresh.')}</div>
+<div style="font-size:11px;line-height:1.45;color:#6B7280;">${esc('A one-line summary is generated automatically after this panel trajectory seals; error diagnosis is appended when failures occur. Restored from local cache or memory worker after refresh.')}</div>
 </div>`
 }
 

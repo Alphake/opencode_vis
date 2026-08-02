@@ -9,6 +9,7 @@ import type {
 import { applySessionDemoOverlay } from '../caseStudy/applySessionDemoOverlay'
 import { isCaseStudyDemoEnabled } from '../caseStudy'
 import { normalizeSessionDirectory, sameDirectory } from '../utils/sessionFolders'
+import { resolveVibeTraceDefaultModelRef } from '../config/opencodeDefaults'
 
 /**
  * OpenCode HTTP base URL — injected at build time by `vite.config.ts`:
@@ -423,17 +424,18 @@ export async function sendMessage(
     },
   }))
   const parts: UserMessagePartBody[] = [...imageParts, { type: 'text', text }]
+  // Always send an explicit model. Priority: caller (dropdown) → VibeTrace default.
   const modelRef =
-    (options?.model && options.model.trim()) ||
-    (typeof import.meta.env.VITE_OPENCODE_DEFAULT_MODEL === 'string' && import.meta.env.VITE_OPENCODE_DEFAULT_MODEL.trim()) ||
-    undefined
-  const modelBody = modelRef ? parseModelRefToBody(modelRef) : undefined
+    (options?.model && options.model.trim()) || resolveVibeTraceDefaultModelRef()
+  const modelBody = parseModelRefToBody(modelRef)
+  if (!modelBody) {
+    throw new Error(`Invalid model ref for sendMessage: ${modelRef}`)
+  }
   const agent =
     (options?.agent && options.agent.trim()) ||
     (typeof import.meta.env.VITE_OPENCODE_DEFAULT_AGENT === 'string' && import.meta.env.VITE_OPENCODE_DEFAULT_AGENT.trim()) ||
     undefined
-  const reqBody: Record<string, unknown> = { parts }
-  if (modelBody) reqBody.model = modelBody
+  const reqBody: Record<string, unknown> = { parts, model: modelBody }
   if (agent) reqBody.agent = agent
 
   const res = await fetch(url, {

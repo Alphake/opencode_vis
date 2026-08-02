@@ -24,7 +24,7 @@ interface MessageInputProps {
   composerModelOptions?: OcComposerModelOption[]
   composerModelsLoading?: boolean
   composerModelsError?: string | null
-  /** Shown when composer selection is empty — mirrors `VITE_OPENCODE_DEFAULT_MODEL`. */
+  /** Shown when composer selection is empty — VibeTrace default model ref. */
   envBootstrapModel?: string | null
 }
 
@@ -47,6 +47,7 @@ export default function MessageInput({
   composerModelOptions = [],
   composerModelsLoading = false,
   composerModelsError = null,
+  envBootstrapModel = null,
 }: MessageInputProps) {
   const [text, setText] = useState('')
   const [files, setFiles] = useState<File[]>([])
@@ -297,7 +298,13 @@ export default function MessageInput({
                 color: '#333',
               }}
             >
-              <option value="">{composerModelsLoading ? 'Loading models…' : 'Default model'}</option>
+              <option value="">
+                {composerModelsLoading
+                  ? 'Loading models…'
+                  : envBootstrapModel
+                    ? `Default (${envBootstrapModel})`
+                    : 'Default model'}
+              </option>
               {groupedModelOptions.map((group) => (
                 <optgroup key={group.providerName} label={group.providerName}>
                   {group.options.map((o) => (

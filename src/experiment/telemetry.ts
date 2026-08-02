@@ -3,15 +3,45 @@ import { directoryKey, normalizeSessionDirectory } from '../utils/sessionFolders
 import {
   emptyCounters,
   emptyFirstInteractionAt,
+  EXPERIMENT_FOCUS_PANELS,
   EXPERIMENT_REGIONS,
+  FOCUS_PANEL_COUNTER_KEY,
+  totalFocusMs,
+  VIBETRACE_FOCUS_PANELS,
   type ExperimentCounters,
   type ExperimentEvent,
   type ExperimentEventName,
+  type ExperimentFocusPanel,
   type ExperimentRegion,
   type ExperimentReport,
   type ExperimentSnapshot,
   type FirstInteractionAt,
+  type PanelFocusShares,
+  type SolvePhaseFocusMs,
 } from './types'
+
+const IDLE_GAP_CAP_MS = 5 * 60 * 1000
+
+const INTERACTIVE_EVENTS = new Set<ExperimentEventName>([
+  'chat.turn',
+  'chat.scroll',
+  'trajectory.scroll',
+  'trajectory.click',
+  'todo.panel_click',
+  'todo.click',
+  'tooltip.action',
+  'tooltip.flow_end_summary',
+  'panel.view',
+  'trajectory.view',
+  'skill.panel_click',
+  'task_tab.select',
+  'fork.complete',
+  'skill.distill',
+  'panel.focus',
+  'session.create',
+  'agent.turn_start',
+  'agent.turn_end',
+])
 
 const LS_KEY = STORAGE_KEYS.experimentActive
 const MAX_EVENTS = 2000
@@ -59,6 +89,220 @@ function normalizeSnap(parsed: ExperimentSnapshot): ExperimentSnapshot {
     events: Array.isArray(parsed.events) ? parsed.events : [],
     focusStartedAt: null,
     focusPanel: null,
+    firstUserTurnAt:
+      typeof parsed.firstUserTurnAt === 'string' && parsed.firstUserTurnAt
+        ? parsed.firstUserTurnAt
+        : null,
+    lastResultAt:
+      typeof parsed.lastResultAt === 'string' && parsed.lastResultAt ? parsed.lastResultAt : null,
+    lastConversationEndAt:
+      typeof parsed.lastConversationEndAt === 'string' && parsed.lastConversationEndAt
+        ? parsed.lastConversationEndAt
+        : null,
+    agentWorkStartedAt: null,
+  }
+}
+
+function emptyPhaseFocus(): Record<ExperimentFocusPanel, number> {
+  return {
+    chat: 0,
+    todo: 0,
+    session: 0,
+    task: 0,
+    trajectory: 0,
+    skill: 0,
+    tooltip: 0,
+  }
+}
+
+function emptySolvePhaseFocusMs(): SolvePhaseFocusMs {
+  return {
+    early: emptyPhaseFocus(),
+    mid: emptyPhaseFocus(),
+    late: emptyPhaseFocus(),
+  }
+}
+
+function isFocusPanel(value: unknown): value is ExperimentFocusPanel {
+  return typeof value === 'string' && (EXPERIMENT_FOCUS_PANELS as string[]).includes(value)
+}
+
+function vibetraceShareFromMs(byPanel: Record<ExperimentFocusPanel, number>): number | null {
+  let total = 0
+  let vibe = 0
+  for (const panel of EXPERIMENT_FOCUS_PANELS) {
+    const ms = byPanel[panel] || 0
+    total += ms
+    if (VIBETRACE_FOCUS_PANELS.includes(panel)) vibe += ms
+  }
+  return total > 0 ? vibe / total : null
+}
+
+function buildTimelineDerived(
+  events: ExperimentEvent[],
+  startedAt: string,
+  durationMs: number,
+  counters: ExperimentCounters,
+  snapHints?: {
+    firstUserTurnAt?: string | null
+    lastResultAt?: string | null
+    lastConversationEndAt?: string | null
+  },
+) {
+  const systemFocusMs = totalFocusMs(counters)
+  const agentWorkMs = Math.max(0, counters.agentWorkMs || 0)
+  const startedMs = Date.parse(startedAt)
+  const sorted = [...events].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts))
+
+  let firstUserTurnAt =
+    snapHints?.firstUserTurnAt ||
+    sorted.find((e) => e.event === 'chat.turn' || e.event === 'agent.turn_start')?.ts ||
+    null
+  const firstUserTurnMs =
+    firstUserTurnAt && Number.isFinite(startedMs)
+      ? Math.max(0, Date.parse(firstUserTurnAt) - startedMs)
+      : null
+
+  // Prefer explicit agent.turn_end; fall back to snapshot hint.
+  const turnEnds = sorted.filter((e) => e.event === 'agent.turn_end').map((e) => e.ts)
+  let lastConversationEndAt: string | null =
+    snapHints?.lastConversationEndAt ||
+    (turnEnds.length > 0 ? turnEnds[turnEnds.length - 1]! : null)
+
+  // If we have paired start/end in the log, also sum durations as a cross-check fallback
+  // when counter was not persisted (legacy exports).
+  let agentWorkFromEvents = 0
+  const starts = sorted.filter((e) => e.event === 'agent.turn_start')
+  for (const start of starts) {
+    const t0 = Date.parse(start.ts)
+    const end = sorted.find(
+      (e) => e.event === 'agent.turn_end' && Date.parse(e.ts) >= t0,
+    )
+    if (!end) continue
+    const ms = Number(end.props?.ms)
+    agentWorkFromEvents += Number.isFinite(ms)
+      ? Math.max(0, ms)
+      : Math.max(0, Date.parse(end.ts) - t0)
+  }
+  const resolvedAgentWorkMs = agentWorkMs > 0 ? agentWorkMs : agentWorkFromEvents
+
+  const conversationSpanMs =
+    firstUserTurnAt && lastConversationEndAt
+      ? Math.max(0, Date.parse(lastConversationEndAt) - Date.parse(firstUserTurnAt))
+      : null
+
+  let solveEndAt: string | null = snapHints?.lastResultAt || null
+  if (firstUserTurnAt) {
+    const t0 = Date.parse(firstUserTurnAt)
+    const gens = sorted
+      .filter((e) => e.event === 'subtask.generated')
+      .map((e) => e.ts)
+      .filter((ts) => Date.parse(ts) >= t0)
+    if (gens.length > 0) solveEndAt = gens[gens.length - 1]!
+  } else {
+    const gens = sorted.filter((e) => e.event === 'subtask.generated')
+    if (gens.length > 0) solveEndAt = gens[gens.length - 1]!.ts
+  }
+
+  const solveDurationMs =
+    firstUserTurnAt && solveEndAt
+      ? Math.max(0, Date.parse(solveEndAt) - Date.parse(firstUserTurnAt))
+      : null
+
+  const interactiveTs = sorted
+    .filter((e) => INTERACTIVE_EVENTS.has(e.event))
+    .map((e) => Date.parse(e.ts))
+    .filter((t) => Number.isFinite(t))
+  let activeSpanMs: number | null = null
+  let idleCappedActiveMs: number | null = null
+  if (interactiveTs.length >= 2) {
+    activeSpanMs = Math.max(0, interactiveTs[interactiveTs.length - 1]! - interactiveTs[0]!)
+    let capped = 0
+    for (let i = 1; i < interactiveTs.length; i++) {
+      capped += Math.min(IDLE_GAP_CAP_MS, interactiveTs[i]! - interactiveTs[i - 1]!)
+    }
+    idleCappedActiveMs = capped
+  } else if (interactiveTs.length === 1) {
+    activeSpanMs = 0
+    idleCappedActiveMs = 0
+  }
+
+  // Conversation window for panel-phase analysis: prefer last conversation end.
+  const windowEndAt = lastConversationEndAt || solveEndAt
+  const solvePhaseFocusMs = emptySolvePhaseFocusMs()
+  let focusDuringSolveMs: number | null = null
+  let focusDuringSolveShares: PanelFocusShares | null = null
+  let vibetraceFocusShareDuringSolve: number | null = null
+  let solvePhaseVibetraceShare: Record<'early' | 'mid' | 'late', number | null> | null = null
+
+  if (firstUserTurnAt && windowEndAt) {
+    const win0 = Date.parse(firstUserTurnAt)
+    const win1 = Date.parse(windowEndAt)
+    const span = Math.max(1, win1 - win0)
+    const during = emptyPhaseFocus()
+    for (const e of sorted) {
+      if (e.event !== 'panel.focus') continue
+      const t = Date.parse(e.ts)
+      if (!Number.isFinite(t) || t < win0 || t > win1) continue
+      const panelRaw = e.props?.panel
+      const panel: ExperimentFocusPanel = isFocusPanel(panelRaw)
+        ? panelRaw
+        : panelRaw === 'chat'
+          ? 'chat'
+          : 'trajectory'
+      const ms = Math.max(0, Number(e.props?.ms) || 0)
+      during[panel] += ms
+      const frac = (t - win0) / span
+      const phase: 'early' | 'mid' | 'late' = frac < 1 / 3 ? 'early' : frac < 2 / 3 ? 'mid' : 'late'
+      solvePhaseFocusMs[phase][panel] += ms
+    }
+    focusDuringSolveMs = EXPERIMENT_FOCUS_PANELS.reduce((s, p) => s + during[p], 0)
+    if (focusDuringSolveMs > 0) {
+      focusDuringSolveShares = {} as PanelFocusShares
+      for (const p of EXPERIMENT_FOCUS_PANELS) {
+        focusDuringSolveShares[p] = during[p] / focusDuringSolveMs
+      }
+      vibetraceFocusShareDuringSolve = vibetraceShareFromMs(during)
+      solvePhaseVibetraceShare = {
+        early: vibetraceShareFromMs(solvePhaseFocusMs.early),
+        mid: vibetraceShareFromMs(solvePhaseFocusMs.mid),
+        late: vibetraceShareFromMs(solvePhaseFocusMs.late),
+      }
+    } else {
+      focusDuringSolveMs = 0
+      focusDuringSolveShares = {
+        chat: null,
+        todo: null,
+        session: null,
+        task: null,
+        trajectory: null,
+        skill: null,
+        tooltip: null,
+      }
+    }
+  }
+
+  return {
+    systemFocusMs,
+    systemFocusWallShare: durationMs > 0 ? systemFocusMs / durationMs : null,
+    firstUserTurnAt,
+    firstUserTurnMs,
+    lastConversationEndAt,
+    conversationSpanMs,
+    agentWorkMs: resolvedAgentWorkMs,
+    agentWorkShareOfConversation:
+      conversationSpanMs && conversationSpanMs > 0
+        ? resolvedAgentWorkMs / conversationSpanMs
+        : null,
+    solveEndAt,
+    solveDurationMs,
+    activeSpanMs,
+    idleCappedActiveMs,
+    focusDuringSolveMs,
+    focusDuringSolveShares,
+    vibetraceFocusShareDuringSolve,
+    solvePhaseFocusMs: focusDuringSolveMs && focusDuringSolveMs > 0 ? solvePhaseFocusMs : null,
+    solvePhaseVibetraceShare,
   }
 }
 
@@ -166,12 +410,32 @@ function buildFirstInteractionDerived(
   }
 }
 
+function ratioOrNull(part: number, total: number): number | null {
+  return total > 0 ? part / total : null
+}
+
+function buildPanelFocusShares(c: ExperimentCounters): PanelFocusShares {
+  const focusTotal = totalFocusMs(c)
+  const shares = {} as PanelFocusShares
+  for (const panel of EXPERIMENT_FOCUS_PANELS) {
+    const key = FOCUS_PANEL_COUNTER_KEY[panel]
+    shares[panel] = ratioOrNull(c[key] as number, focusTotal)
+  }
+  return shares
+}
+
 function buildDerived(
   c: ExperimentCounters,
   startedAt: string,
   first: FirstInteractionAt,
+  events: ExperimentEvent[],
+  durationMs: number,
+  snapHints?: {
+    firstUserTurnAt?: string | null
+    lastResultAt?: string | null
+    lastConversationEndAt?: string | null
+  },
 ) {
-  const focusTotal = c.chatPanelFocusMs + c.trajectoryPanelFocusMs
   const scrollTotal = c.chatPanelScrolls + c.trajectoryPanelScrolls
   const rightOps =
     c.trajectoryPanelClicks +
@@ -183,13 +447,22 @@ function buildDerived(
   const interactionTotal = leftOps + rightOps
   const firstDerived = buildFirstInteractionDerived(startedAt, first)
   const generated = c.subtaskPanelsGenerated
+  const panelFocusShares = buildPanelFocusShares(c)
+  const timeline = buildTimelineDerived(events, startedAt, durationMs, c, snapHints)
   return {
-    chatFocusRatio: focusTotal > 0 ? c.chatPanelFocusMs / focusTotal : null,
-    trajectoryFocusRatio: focusTotal > 0 ? c.trajectoryPanelFocusMs / focusTotal : null,
-    chatScrollShare: scrollTotal > 0 ? c.chatPanelScrolls / scrollTotal : null,
-    trajectoryInteractionShare: interactionTotal > 0 ? rightOps / interactionTotal : null,
+    chatFocusRatio: panelFocusShares.chat,
+    todoFocusRatio: panelFocusShares.todo,
+    sessionFocusRatio: panelFocusShares.session,
+    taskBarFocusRatio: panelFocusShares.task,
+    trajectoryFocusRatio: panelFocusShares.trajectory,
+    skillFocusRatio: panelFocusShares.skill,
+    tooltipFocusRatio: panelFocusShares.tooltip,
+    panelFocusShares,
+    chatScrollShare: ratioOrNull(c.chatPanelScrolls, scrollTotal),
+    trajectoryInteractionShare: ratioOrNull(rightOps, interactionTotal),
     ...firstDerived,
     panelViewCoverage: generated > 0 ? c.trajectoriesViewed / generated : null,
+    ...timeline,
   }
 }
 
@@ -197,6 +470,8 @@ function snapToReport(snap: ExperimentSnapshot, notes?: string): ExperimentRepor
   const endedAt = nowIso()
   const startedMs = Date.parse(snap.startedAt)
   const endedMs = Date.parse(endedAt)
+  const durationMs =
+    Number.isFinite(startedMs) && Number.isFinite(endedMs) ? Math.max(0, endedMs - startedMs) : 0
   return {
     schemaVersion: 'experiment.report.v1',
     participantId: snap.participantId,
@@ -204,11 +479,22 @@ function snapToReport(snap: ExperimentSnapshot, notes?: string): ExperimentRepor
     directory: snap.directory,
     startedAt: snap.startedAt,
     endedAt,
-    durationMs: Number.isFinite(startedMs) && Number.isFinite(endedMs) ? Math.max(0, endedMs - startedMs) : 0,
+    durationMs,
     sessionIds: [...snap.sessionIds],
     counters: { ...snap.counters },
     firstInteractionAt: { ...snap.firstInteractionAt },
-    derived: buildDerived(snap.counters, snap.startedAt, snap.firstInteractionAt),
+    derived: buildDerived(
+      snap.counters,
+      snap.startedAt,
+      snap.firstInteractionAt,
+      snap.events,
+      durationMs,
+      {
+        firstUserTurnAt: snap.firstUserTurnAt,
+        lastResultAt: snap.lastResultAt,
+        lastConversationEndAt: snap.lastConversationEndAt,
+      },
+    ),
     events: [...snap.events],
     notes: notes?.trim() || undefined,
   }
@@ -312,6 +598,7 @@ class ExperimentTelemetry {
     for (const snap of this.byDirectory.values()) {
       if (!snap.active) continue
       this.flushFocusFor(snap)
+      this.flushAgentWorkFor(snap, { checkpoint: true })
       reports.push(snapToReport(snap, notes))
     }
     this.emit()
@@ -344,6 +631,10 @@ class ExperimentTelemetry {
       events: [],
       focusStartedAt: null,
       focusPanel: null,
+      firstUserTurnAt: null,
+      lastResultAt: null,
+      lastConversationEndAt: null,
+      agentWorkStartedAt: null,
     }
     this.byDirectory.set(key, snap)
     this.trackOn(snap, 'experiment.start', undefined, { participantId, directory: normalized })
@@ -386,6 +677,7 @@ class ExperimentTelemetry {
     if (!snap?.active) return null
     if (key === this.currentKey) this.flushFocus()
     else this.flushFocusFor(snap)
+    this.flushAgentWorkFor(snap, { experimentEnd: true })
     this.trackOn(snap, 'experiment.end', undefined, { notes: notes || undefined })
     const report = snapToReport(snap, notes)
     this.byDirectory.delete(key)
@@ -401,6 +693,7 @@ class ExperimentTelemetry {
     for (const [key, snap] of [...this.byDirectory.entries()]) {
       if (!snap.active) continue
       this.flushFocusFor(snap)
+      this.flushAgentWorkFor(snap, { experimentEnd: true })
       this.trackOn(snap, 'experiment.end', undefined, { notes: notes || undefined })
       reports.push(snapToReport(snap, notes))
       this.byDirectory.delete(key)
@@ -482,10 +775,43 @@ class ExperimentTelemetry {
   /** User sent a message (counts as one conversation turn start). */
   onConversationTurn(sessionId: string) {
     if (!this.isActive()) return
+    const snap = this.getSnapshot()
     this.bump('conversationTurns')
     this.noteSession(sessionId)
     this.markFirst('chat', 'chat.turn')
+    if (snap && !snap.firstUserTurnAt) snap.firstUserTurnAt = nowIso()
     this.track('chat.turn', sessionId)
+  }
+
+  /** Agent started working on a user turn (composer sent / wait began). */
+  onAgentTurnStart(sessionId?: string) {
+    if (!this.isActive()) return
+    const snap = this.getSnapshot()
+    if (!snap) return
+    // Nested start: close previous open interval first.
+    if (snap.agentWorkStartedAt != null) this.onAgentTurnEnd(sessionId, { nested: true })
+    const at = nowIso()
+    if (!snap.firstUserTurnAt) snap.firstUserTurnAt = at
+    snap.agentWorkStartedAt = Date.now()
+    this.noteSession(sessionId)
+    this.track('agent.turn_start', sessionId)
+  }
+
+  /**
+   * Agent finished a turn (assistant reply observed, or user aborted).
+   * Accumulates into `counters.agentWorkMs` — primary “agent working time”.
+   */
+  onAgentTurnEnd(sessionId?: string, props?: Record<string, unknown>) {
+    if (!this.isActive()) return
+    const snap = this.getSnapshot()
+    if (!snap || snap.agentWorkStartedAt == null) return
+    const ms = Math.max(0, Date.now() - snap.agentWorkStartedAt)
+    snap.counters.agentWorkMs = (snap.counters.agentWorkMs || 0) + ms
+    snap.agentWorkStartedAt = null
+    const at = nowIso()
+    snap.lastConversationEndAt = at
+    this.noteSession(sessionId)
+    this.track('agent.turn_end', sessionId, { ms, ...(props || {}) })
   }
 
   /** Debounced scroll burst. */
@@ -581,8 +907,15 @@ class ExperimentTelemetry {
     if (!this.isActive()) return
     this.onTaskTabSeen(taskTabId, sessionId)
     this.bump('trajectoryPanelClicks')
+    this.markFirst('task', 'task_tab.select')
     this.markFirst('trajectory', 'task_tab.select')
     this.track('task_tab.select', sessionId, { taskTabId })
+  }
+
+  /** Sidebar session list click / selection. */
+  onSessionPanelInteract(_sessionId?: string) {
+    if (!this.isActive()) return
+    this.markFirst('session', 'session.select')
   }
 
   onSkillDistill(sessionId?: string, skillName?: string) {
@@ -618,10 +951,12 @@ class ExperimentTelemetry {
     }
     if (added === 0) return
     snap.counters.subtaskPanelsGenerated = snap.seenSubtaskIds.length
+    const at = nowIso()
+    if (snap.firstUserTurnAt) snap.lastResultAt = at
     this.track('subtask.generated', sessionId, { added, total: snap.seenSubtaskIds.length })
   }
 
-  enterPanelFocus(panel: 'chat' | 'trajectory') {
+  enterPanelFocus(panel: ExperimentFocusPanel) {
     if (!this.isActive()) return
     this.flushFocus()
     const snap = this.getSnapshot()
@@ -630,10 +965,25 @@ class ExperimentTelemetry {
     snap.focusStartedAt = Date.now()
   }
 
-  leavePanelFocus(panel: 'chat' | 'trajectory') {
+  /**
+   * Stop timing `panel` if it is current. Optionally resume another panel
+   * (used when leaving a nested region like Todo / Skill / Task tabs).
+   */
+  leavePanelFocus(panel: ExperimentFocusPanel, resume?: ExperimentFocusPanel) {
     if (!this.isActive()) return
     const snap = this.getSnapshot()
     if (snap?.focusPanel === panel) this.flushFocus()
+    if (resume) this.enterPanelFocus(resume)
+  }
+
+  private flushAgentWorkFor(snap: ExperimentSnapshot, props?: Record<string, unknown>) {
+    if (snap.agentWorkStartedAt == null) return
+    const ms = Math.max(0, Date.now() - snap.agentWorkStartedAt)
+    snap.counters.agentWorkMs = (snap.counters.agentWorkMs || 0) + ms
+    snap.agentWorkStartedAt = null
+    const at = nowIso()
+    snap.lastConversationEndAt = at
+    this.trackOn(snap, 'agent.turn_end', undefined, { ms, ...(props || {}) })
   }
 
   private flushFocus() {
@@ -648,11 +998,8 @@ class ExperimentTelemetry {
       return
     }
     const ms = Math.max(0, Date.now() - snap.focusStartedAt)
-    if (snap.focusPanel === 'chat') {
-      snap.counters.chatPanelFocusMs = (snap.counters.chatPanelFocusMs || 0) + ms
-    } else {
-      snap.counters.trajectoryPanelFocusMs = (snap.counters.trajectoryPanelFocusMs || 0) + ms
-    }
+    const key = FOCUS_PANEL_COUNTER_KEY[snap.focusPanel]
+    snap.counters[key] = ((snap.counters[key] as number) || 0) + ms
     this.trackOn(snap, 'panel.focus', undefined, { panel: snap.focusPanel, ms })
     snap.focusPanel = null
     snap.focusStartedAt = null

@@ -26,26 +26,49 @@
     "forksCompleted": 1,
     "skillPanelClicks": 4,
     "subtaskPanelsGenerated": 12,
-    "chatPanelFocusMs": 820000,
-    "trajectoryPanelFocusMs": 610000
+    "chatPanelFocusMs": 606140,
+    "todoPanelFocusMs": 170962,
+    "sessionPanelFocusMs": 6435,
+    "taskBarFocusMs": 48800,
+    "trajectoryPanelFocusMs": 561200,
+    "skillPanelFocusMs": 28600,
+    "tooltipPanelFocusMs": 7865
   },
   "firstInteractionAt": {
     "chat": "2026-07-28T02:12:40.001Z",
     "trajectory": "2026-07-28T02:15:23.010Z",
     "todo": "2026-07-28T02:15:22.440Z",
-    "skill": "2026-07-28T02:35:00.000Z"
+    "skill": "2026-07-28T02:35:00.000Z",
+    "session": "2026-07-28T02:11:20.000Z",
+    "task": "2026-07-28T02:15:24.200Z"
   },
   "derived": {
-    "chatFocusRatio": 0.5734,
-    "trajectoryFocusRatio": 0.4266,
+    "chatFocusRatio": 0.4239,
+    "todoFocusRatio": 0.1196,
+    "sessionFocusRatio": 0.0045,
+    "taskBarFocusRatio": 0.0341,
+    "trajectoryFocusRatio": 0.3924,
+    "skillFocusRatio": 0.02,
+    "tooltipFocusRatio": 0.0055,
+    "panelFocusShares": {
+      "chat": 0.4239,
+      "todo": 0.1196,
+      "session": 0.0045,
+      "task": 0.0341,
+      "trajectory": 0.3924,
+      "skill": 0.02,
+      "tooltip": 0.0055
+    },
     "chatScrollShare": 0.6111,
     "trajectoryInteractionShare": 0.8036,
-    "firstInteractionOrder": ["chat", "todo", "trajectory", "skill"],
+    "firstInteractionOrder": ["session", "chat", "todo", "trajectory", "task", "skill"],
     "firstInteractionMs": {
       "chat": 160001,
       "trajectory": 323010,
       "todo": 322440,
-      "skill": 1500000
+      "skill": 1500000,
+      "session": 80000,
+      "task": 324200
     },
     "panelViewCoverage": 0.6667
   },

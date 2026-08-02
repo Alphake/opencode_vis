@@ -1020,6 +1020,116 @@ def build_turn_trace(
     }
 
 
+def build_subtask_panel_trace(
+    messages: list[dict[str, Any]],
+    subtask_id: str,
+    session: dict[str, Any] | None = None,
+    directory: str | None = None,
+    fetch_messages: Callable[[str, str | None], list[dict[str, Any]]] | None = None,
+    now_ms: int | None = None,
+) -> dict[str, Any] | None:
+    """Build a single-panel trace.v1 for one sealed subtask (no assistant stop required)."""
+    subtask_id = str(subtask_id or "").strip()
+    if not subtask_id or not messages:
+        return None
+    if fetch_messages is None:
+        fetch_messages = lambda _sid, _dir: []
+    now_ms = now_ms or _now_ms()
+
+    grouped = group_assistant_subtasks(messages)
+    target: dict[str, Any] | None = None
+    target_index = -1
+    for i, st in enumerate(grouped):
+        if str(st.get("subtask_id") or "") == subtask_id:
+            target = st
+            target_index = i
+            break
+    if target is None:
+        return None
+
+    assistant_indices = [idx for idx in _list(target.get("assistantMessageIndices")) if isinstance(idx, int)]
+    user_indices = [idx for idx in _list(target.get("userMessageIndices")) if isinstance(idx, int)]
+    if not assistant_indices:
+        return None
+    last_assistant_idx = max(assistant_indices)
+    if last_assistant_idx < 0 or last_assistant_idx >= len(messages):
+        return None
+    end_message = messages[last_assistant_idx]
+    end_info = _info(end_message)
+    end_id = str(end_info.get("id") or "").strip()
+    if not end_id:
+        return None
+
+    start_index = min(user_indices) if user_indices else min(assistant_indices)
+    for i in range(min(assistant_indices), -1, -1):
+        if _info(messages[i]).get("role") == "user":
+            start_index = i
+            break
+    user_message = messages[start_index] if 0 <= start_index < len(messages) else None
+
+    indices = sorted({*user_indices, *assistant_indices})
+    segment_messages = [messages[i] for i in indices if 0 <= i < len(messages)]
+    child_messages_by_session_id = fetch_child_messages_for_turn(segment_messages, directory, fetch_messages)
+    descriptors = _collect_task_descriptors_with_nested_children(segment_messages, child_messages_by_session_id)
+    segment_child_messages = _child_messages_for_descriptors(descriptors, child_messages_by_session_id)
+    metrics = _subtask_metrics(target, messages, target_index, segment_child_messages, now_ms)
+
+    end_time = _record(end_info.get("time"))
+    created = end_time.get("created")
+    completed = end_time.get("completed")
+    model = _record(end_info.get("model"))
+    sess = session or {}
+    duration = (
+        completed - created
+        if isinstance(created, (int, float)) and isinstance(completed, (int, float)) and completed >= created
+        else None
+    )
+    metrics_messages = [*segment_messages, *segment_child_messages] if segment_child_messages else segment_messages
+    turn = {
+        "userInput": _user_text(user_message) if user_message else "",
+        "startUserMessageId": str(_info(user_message).get("id") or "") if user_message else "",
+        "endAssistantMessageId": end_id,
+        "startIndex": start_index,
+        "endIndex": last_assistant_idx,
+        "finish": _get_message_finish(end_message) or "panel-sealed",
+        "created": created,
+        "completed": completed,
+        "durationMs": duration,
+        "modelID": model.get("modelID"),
+        "providerID": model.get("providerID"),
+        "tokens": trace_tokens_from_messages(metrics_messages),
+        "cost": cost_from_messages(metrics_messages),
+    }
+    turn = {k: v for k, v in turn.items() if v is not None}
+    return {
+        "schemaVersion": "trace.v1",
+        "generatedAt": _iso_now_ms(now_ms),
+        "session": {
+            "id": sess.get("id") or end_info.get("sessionID") or "",
+            **({"title": sess.get("title")} if sess.get("title") else {}),
+            **({"directory": sess.get("directory") or directory} if (sess.get("directory") or directory) else {}),
+        },
+        "turn": turn,
+        "subtasks": [
+            {
+                "index": 0,
+                "subtaskId": target.get("subtask_id"),
+                "title": metrics["title"],
+                "phase": target.get("phase"),
+                "todos": target.get("todos") or [],
+                "metrics": {
+                    "durationMs": metrics["durationMs"],
+                    "tokensTotal": metrics["tokensTotal"],
+                    "tokenBreakdown": metrics["tokenBreakdown"],
+                    "llmCallCount": metrics["llmCallCount"],
+                    "cost": metrics["cost"],
+                },
+                "actions": _build_merged_subtask_actions(segment_messages, child_messages_by_session_id, now_ms),
+            }
+        ],
+    }
+
+
 def build_turns_for_message_window(
     messages: list[dict[str, Any]],
     primary_end_assistant_message_id: str,

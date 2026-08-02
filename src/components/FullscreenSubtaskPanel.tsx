@@ -33,6 +33,7 @@ interface Props {
   onSelectTaskTab?: (id: string) => void
   sessionId?: string
   errorDiagnosisBySubtaskId?: Record<string, MemoryWorkerErrorDiagnosis>
+  onPanelSealed?: (subtaskId: string) => void
   onPanelBecameVisible?: (subtaskId: string) => void
   pendingPermission?: OcPendingPermissionRequest | null
   permissionTraces?: OcPermissionTraceEvent[]
@@ -62,6 +63,7 @@ export default function FullscreenSubtaskPanel({
   onSelectTaskTab,
   sessionId,
   errorDiagnosisBySubtaskId,
+  onPanelSealed,
   onPanelBecameVisible,
   pendingPermission = null,
   permissionTraces = [],
@@ -208,6 +210,7 @@ export default function FullscreenSubtaskPanel({
             onSelectTaskTab={onSelectTaskTab}
             sessionId={sessionId}
             errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
+            onPanelSealed={onPanelSealed}
             onPanelBecameVisible={onPanelBecameVisible}
             pendingPermission={pendingPermission}
             permissionTraces={permissionTraces}

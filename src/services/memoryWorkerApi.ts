@@ -77,6 +77,10 @@ export interface MemoryWorkerErrorDiagnosisBatch {
   items: MemoryWorkerErrorDiagnosis[]
   reason?: string
   error?: string
+  /** True when worker reused an existing summary for this panel (sessionId + subtaskId). */
+  cached?: boolean
+  sessionId?: string
+  subtaskId?: string
 }
 
 export interface MemoryWorkerTaskSegment {
@@ -329,6 +333,30 @@ export async function fetchPanelAnalysisForSession(
     throw new Error(`memory-worker /panel-analysis failed: ${res.status} ${text}`)
   }
   return parseMemoryWorkerJson<MemoryWorkerErrorDiagnosisBatch>(text, '/panel-analysis')
+}
+
+/** Analyze one sealed panel independently of ingest / skill digest. */
+export async function requestPanelAnalysis(params: {
+  sessionId: string
+  subtaskId: string
+  directory?: string
+  parentSessionID?: string
+}): Promise<MemoryWorkerErrorDiagnosisBatch> {
+  const res = await fetch(`${BASE}/panel-analysis`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: params.sessionId,
+      subtaskId: params.subtaskId,
+      ...(params.directory?.trim() ? { directory: params.directory.trim() } : {}),
+      ...(params.parentSessionID?.trim() ? { parentSessionID: params.parentSessionID.trim() } : {}),
+    }),
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`memory-worker POST /panel-analysis failed: ${res.status} ${text}`)
+  }
+  return parseMemoryWorkerJson<MemoryWorkerErrorDiagnosisBatch>(text, 'POST /panel-analysis')
 }
 
 export async function fetchTaskSegmentsForSession(

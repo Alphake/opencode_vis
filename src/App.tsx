@@ -30,6 +30,7 @@ import {
   directoryKey,
   sameDirectory,
 } from './utils/sessionFolders'
+import { resolveVibeTraceDefaultModelRef } from './config/opencodeDefaults'
 import type {
   MappedAction,
   OcMessage,
@@ -93,7 +94,7 @@ import {
   releaseTraceIngestClaim,
   tryClaimTraceIngest,
 } from './utils/traceIngestClaim'
-import { fetchPanelAnalysisForSession, fetchTaskSegmentsForSession, inheritForkTaskState, ingestTraceReference, notifyTaskSwitchPrompt, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult } from './services/memoryWorkerApi'
+import { fetchPanelAnalysisForSession, fetchTaskSegmentsForSession, inheritForkTaskState, ingestTraceReference, notifyTaskSwitchPrompt, requestPanelAnalysis, type MemoryWorkerErrorDiagnosis, type MemoryWorkerIngestResult } from './services/memoryWorkerApi'
 import { mergePanelAnalysisItemsIntoBucket } from './utils/panelAnalysisStorage'
 import { buildFlowEndSummary } from './utils/flowEndSummary'
 import { buildSubtaskCardMetrics } from './utils/subtaskMetrics'
@@ -451,6 +452,10 @@ function App() {
   const processedTraceTurnKeysRef = useRef<Set<string>>(new Set())
   /** Debounced ingest callback has started (do not release claim on effect cleanup) */
   const traceIngestDebounceStartedRef = useRef<Set<string>>(new Set())
+  /** Panel analysis in-flight / claimed: sessionId:subtaskId */
+  const panelAnalysisRequestedRef = useRef<Set<string>>(new Set())
+  const panelAnalysisBySessionIdRef = useRef(panelAnalysisBySessionId)
+  panelAnalysisBySessionIdRef.current = panelAnalysisBySessionId
 
   const pendingForkRef = useRef(pendingFork)
   pendingForkRef.current = pendingFork
@@ -886,10 +891,7 @@ function App() {
     [sessions, selectedSessionId],
   )
 
-  const envBootstrapModel = useMemo(() => {
-    const v = import.meta.env.VITE_OPENCODE_DEFAULT_MODEL
-    return typeof v === 'string' && v.trim() ? v.trim() : null
-  }, [])
+  const envBootstrapModel = useMemo(() => resolveVibeTraceDefaultModelRef(), [])
 
   const composerModelOptionsForUi = useMemo(() => {
     const t = composerModelRef.trim()
@@ -906,7 +908,19 @@ function App() {
     setComposerModelsError(null)
     void getComposerModelOptions(activeSessionDirectory)
       .then(({ options }) => {
-        if (!cancelled) setComposerModelOptions(options)
+        if (cancelled) return
+        setComposerModelOptions(options)
+        // First visit / cleared selection: pick VibeTrace default (not OpenCode user config).
+        setComposerModelRef((prev) => {
+          if (prev.trim()) return prev
+          const next = resolveVibeTraceDefaultModelRef()
+          try {
+            window.localStorage.setItem(STORAGE_KEYS.composerModelRef, next)
+          } catch {
+            /* ignore */
+          }
+          return next
+        })
       })
       .catch((e: unknown) => {
         if (!cancelled) setComposerModelsError(e instanceof Error ? e.message : String(e))
@@ -1954,6 +1968,97 @@ function App() {
     [selectedSessionId],
   )
 
+  const handlePanelSealed = useCallback(
+    (subtaskId: string) => {
+      const sid = selectedSessionIdRef.current
+      if (!sid || !subtaskId) return
+      const claimKey = `${sid}:${subtaskId}`
+      // Durable front-end mark: one attempt per panel for this page lifetime.
+      if (panelAnalysisRequestedRef.current.has(claimKey)) {
+        console.info('[VibeTrace][panel-analysis] skip — already claimed', { sessionId: sid, subtaskId })
+        return
+      }
+      const existing = panelAnalysisBySessionIdRef.current[sid]?.[subtaskId]
+      // Already summarized (or in flight / previously failed) — do not re-run.
+      if (existing?.status === 'ok' || existing?.status === 'running' || existing?.status === 'failed') {
+        panelAnalysisRequestedRef.current.add(claimKey)
+        console.info('[VibeTrace][panel-analysis] skip — already marked', {
+          sessionId: sid,
+          subtaskId,
+          status: existing.status,
+        })
+        return
+      }
+      panelAnalysisRequestedRef.current.add(claimKey)
+
+      const session = sessionsRef.current.find((s) => s.id === sid)
+      const directory = session?.directory
+      mergePanelAnalysisItems(sid, [
+        {
+          status: 'running',
+          sessionId: sid,
+          subtaskId,
+        },
+      ])
+      console.info('[VibeTrace][panel-analysis] request on panel seal', { sessionId: sid, subtaskId })
+
+      void requestPanelAnalysis({
+        sessionId: sid,
+        subtaskId,
+        directory,
+        parentSessionID: sid,
+      })
+        .then((batch) => {
+          if (selectedSessionIdRef.current !== sid) return
+          const items = batch.items ?? []
+          if (items.length > 0) {
+            mergePanelAnalysisItems(sid, items)
+            console.info('[VibeTrace][panel-analysis] received', {
+              sessionId: sid,
+              subtaskId,
+              count: items.length,
+              cached: batch.cached === true || items.some((item) => item.cached),
+              status: items.map((item) => item.status),
+            })
+          } else if (!batch.ok) {
+            mergePanelAnalysisItems(sid, [
+              {
+                status: 'failed',
+                sessionId: sid,
+                subtaskId,
+                error: batch.error || batch.reason || 'panel analysis returned no items',
+              },
+            ])
+          }
+          const stillRunning = items.some((item) => item.status === 'running')
+          if (stillRunning) {
+            for (const delayMs of [2500, 8000]) {
+              window.setTimeout(() => {
+                void fetchPanelAnalysisForSession(sid)
+                  .then((refresh) => {
+                    if (refresh.items?.length) mergePanelAnalysisItems(sid, refresh.items)
+                  })
+                  .catch((err) => console.warn('[VibeTrace][panel-analysis refresh failed]', err))
+              }, delayMs)
+            }
+          }
+        })
+        .catch((err) => {
+          // Keep claimKey — do not auto-loop retries for the same panel.
+          console.warn('[VibeTrace][panel-analysis] failed', { sessionId: sid, subtaskId, err })
+          mergePanelAnalysisItems(sid, [
+            {
+              status: 'failed',
+              sessionId: sid,
+              subtaskId,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          ])
+        })
+    },
+    [mergePanelAnalysisItems],
+  )
+
   useEffect(() => {
     if (!experimentTelemetry.isActive()) return
     if (linkedSubtaskIndex === null) return
@@ -2226,6 +2331,7 @@ function App() {
     void (async () => {
       try {
         experimentTelemetry.onConversationTurn(sid)
+        experimentTelemetry.onAgentTurnStart(sid)
         void notifyTaskSwitchPrompt({
           sessionId: sid,
           userPrompt: rawUserPrompt,
@@ -2247,10 +2353,20 @@ function App() {
         // Show stop immediately — POST /message often blocks for the whole agent turn.
         setWaitingForAssistantReply(true)
         try {
-          await sendMessage(sid, text, dir, { imageParts: images, model: composerModelRef.trim() || undefined })
-          if (abortGenerationRef.current !== gen || selectedSessionIdRef.current !== sid) return
+          await sendMessage(sid, text, dir, {
+            imageParts: images,
+            model: composerModelRef.trim() || resolveVibeTraceDefaultModelRef(),
+          })
+          if (abortGenerationRef.current !== gen || selectedSessionIdRef.current !== sid) {
+            // Abort handler already closed the turn; otherwise close as superseded.
+            experimentTelemetry.onAgentTurnEnd(sid, { superseded: true })
+            return
+          }
           const msgs = await getMessages(sid, 'after POST /message completes', dir)
-          if (abortGenerationRef.current !== gen || selectedSessionIdRef.current !== sid) return
+          if (abortGenerationRef.current !== gen || selectedSessionIdRef.current !== sid) {
+            experimentTelemetry.onAgentTurnEnd(sid, { superseded: true })
+            return
+          }
           setMessages(msgs)
           const last = msgs[msgs.length - 1]
           if (last?.info.role === 'user') {
@@ -2263,11 +2379,13 @@ function App() {
           }
         } finally {
           if (abortGenerationRef.current === gen) {
+            experimentTelemetry.onAgentTurnEnd(sid)
             setWaitingForAssistantReply(false)
           }
         }
       } catch (e) {
         window.alert(`Send failed: ${e instanceof Error ? e.message : String(e)}`)
+        experimentTelemetry.onAgentTurnEnd(sid, { error: true })
         setWaitingForAssistantReply(false)
       }
     })()
@@ -2278,6 +2396,7 @@ function App() {
     const sid = selectedSessionId
     const dir = sessions.find(s => s.id === sid)?.directory
     abortGenerationRef.current += 1
+    experimentTelemetry.onAgentTurnEnd(sid, { aborted: true })
     setWaitingForAssistantReply(false)
     // Clear local permission/question prompts — abort cancels the turn that asked for them.
     setPendingPermissionQueues((prev) => {
@@ -2626,10 +2745,11 @@ function App() {
                   }, 1800)
                 })
                 .catch((err) => console.warn('[VibeTrace][fork task-switch prompt failed]', err))
-              await sendMessage(forked.id, guidedUserText, forked.directory, {
-                model: composerModelRef.trim() || undefined,
-              })
               experimentTelemetry.onConversationTurn(forked.id)
+              experimentTelemetry.onAgentTurnStart(forked.id)
+              await sendMessage(forked.id, guidedUserText, forked.directory, {
+                model: composerModelRef.trim() || resolveVibeTraceDefaultModelRef(),
+              })
               const msgsAfterSend = await getMessages(
                 forked.id,
                 'after fork first user message',
@@ -2651,9 +2771,12 @@ function App() {
                   )
                 } finally {
                   if (abortGenerationRef.current === gen) {
+                    experimentTelemetry.onAgentTurnEnd(forked.id)
                     setWaitingForAssistantReply(false)
                   }
                 }
+              } else {
+                experimentTelemetry.onAgentTurnEnd(forked.id)
               }
             } catch (err) {
               window.alert(
@@ -2724,6 +2847,7 @@ function App() {
         }}
       >
         <div
+          data-exp-focus="chat-column"
           style={{
             flex: '1 1 auto',
             minWidth: MESSAGE_PANEL_MIN_WIDTH,
@@ -2821,6 +2945,7 @@ function App() {
         </div>
 
         <div
+          data-exp-focus="trajectory-column"
           style={{
             width: subtaskPanelWidth,
             flex: `0 0 ${subtaskPanelWidth}px`,
@@ -3000,6 +3125,7 @@ function App() {
               activeTaskTabId={activeTaskSegmentId}
               sessionId={selectedSessionId}
               errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
+              onPanelSealed={handlePanelSealed}
               onPanelBecameVisible={handlePanelBecameVisible}
               pendingPermission={
                 headPendingPermission(selectedSessionId)
@@ -3060,6 +3186,7 @@ function App() {
           activeTaskTabId={activeTaskSegmentId}
           sessionId={selectedSessionId}
           errorDiagnosisBySubtaskId={errorDiagnosisBySubtaskId}
+          onPanelSealed={handlePanelSealed}
           onPanelBecameVisible={handlePanelBecameVisible}
           pendingPermission={
             headPendingPermission(selectedSessionId)

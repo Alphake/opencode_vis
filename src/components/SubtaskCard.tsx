@@ -6,7 +6,8 @@ import type {
   OcPermissionTraceEvent,
   OcSessionCompactionEvent,
 } from '../types/opencode'
-import { messageHasAgentStepFinishStop, type AssistantSubtask } from '../utils/subtaskGrouping'
+import { type AssistantSubtask } from '../utils/subtaskGrouping'
+import { isSubtaskPanelSealed } from '../utils/panelSeal'
 import { buildSubtaskCardMetrics, formatDurationMs, formatSubtaskCostDisplay } from '../utils/subtaskMetrics'
 import { buildFlowEndSummary } from '../utils/flowEndSummary'
 import {
@@ -29,6 +30,7 @@ import {
   type ActionTypePaletteId,
 } from '../styles/actionTypePalettes'
 import { getMessages } from '../services/opencodeApi'
+import { experimentTelemetry } from '../experiment/telemetry'
 import { actionKey } from '../utils/actionKey'
 import type { MemoryWorkerErrorDiagnosis } from '../services/memoryWorkerApi'
 
@@ -162,6 +164,8 @@ interface SubtaskCardProps {
   actionTypePaletteId: ActionTypePaletteId
   /** Auto-generated root-cause analysis for failed traces; absent keeps the original end tooltip unchanged. */
   errorDiagnosis?: MemoryWorkerErrorDiagnosis
+  /** Fired once when this panel's trajectory becomes sealed (golden end node eligible). */
+  onPanelSealed?: (subtaskId: string) => void
   /** Shows the title-row comment affordance while collecting skill feedback. */
   feedbackMode?: boolean
   isFeedbackSelected?: boolean
@@ -249,6 +253,7 @@ export default function SubtaskCard({
   onColorByChange,
   actionTypePaletteId,
   errorDiagnosis,
+  onPanelSealed,
   feedbackMode = false,
   isFeedbackSelected = false,
   hasFeedbackComment = false,
@@ -642,6 +647,8 @@ export default function SubtaskCard({
       if (prev === open) return prev
       return open
     })
+    if (open) experimentTelemetry.enterPanelFocus('tooltip')
+    else experimentTelemetry.leavePanelFocus('tooltip', 'trajectory')
   }, [])
 
   const wasFlowTooltipOpenRef = useRef(false)
@@ -664,28 +671,17 @@ export default function SubtaskCard({
    */
   const showFlowEndNode = useMemo(() => {
     if (flowActions.length === 0 || hasActiveRunningAction) return false
+    return isSubtaskPanelSealed(subtask, messages)
+  }, [flowActions.length, hasActiveRunningAction, messages, subtask])
 
-    const assistantIndices = subtask.assistantMessageIndices
-    if (assistantIndices.length === 0) return false
-    const lastIdx = assistantIndices[assistantIndices.length - 1]!
-    const lastMsg = messages[lastIdx]
-    if (!lastMsg || lastMsg.info.role !== 'assistant') return false
-
-    if (messageHasAgentStepFinishStop(lastMsg)) return true
-    if (lastMsg.info.finish?.trim().toLowerCase() === 'stop') return true
-
-    const spanEnd = Math.max(lastIdx, ...(subtask.userMessageIndices ?? []))
-    for (let i = spanEnd + 1; i < messages.length; i++) {
-      if (messages[i]) return true
-    }
-    return false
-  }, [
-    flowActions.length,
-    hasActiveRunningAction,
-    messages,
-    subtask.assistantMessageIndices,
-    subtask.userMessageIndices,
-  ])
+  /** Once notified for this subtaskId, never re-fire — even if the end node flickers. */
+  const panelSealedNotifiedForIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!showFlowEndNode) return
+    if (panelSealedNotifiedForIdRef.current === subtask.subtask_id) return
+    panelSealedNotifiedForIdRef.current = subtask.subtask_id
+    onPanelSealed?.(subtask.subtask_id)
+  }, [showFlowEndNode, onPanelSealed, subtask.subtask_id])
 
   /**
    * Stabilize `flowEndSummary` identity — inline object literals each render fooled ActionFlowVisualization’s first

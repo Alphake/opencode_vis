@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import type { OcSession } from '../types/opencode'
 import { folderDisplayName } from '../utils/sessionFolders'
 import ExperimentBar from '../experiment/ExperimentBar'
+import { experimentTelemetry } from '../experiment/telemetry'
 
 interface SidebarProps {
   /** Sessions in the selected folder (sorted, filtered). */
@@ -213,6 +214,8 @@ export default function Sidebar({
 
       {/* Session list */}
       <div
+        onPointerEnter={() => experimentTelemetry.enterPanelFocus('session')}
+        onPointerLeave={() => experimentTelemetry.leavePanelFocus('session')}
         style={{
           width: sessionListWidth,
           height: '100%',
@@ -338,7 +341,10 @@ export default function Sidebar({
               >
                 <button
                   type="button"
-                  onClick={() => onSelectSession(session.id)}
+                  onClick={() => {
+                    experimentTelemetry.onSessionPanelInteract(session.id)
+                    onSelectSession(session.id)
+                  }}
                   style={{
                     flex: 1,
                     minWidth: 0,

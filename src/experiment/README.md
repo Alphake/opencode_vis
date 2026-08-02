@@ -77,8 +77,13 @@
 | `forksCompleted` | Fork 次数 | fork API 成功后 +1 |
 | `skillPanelClicks` | Skill Panel 点击次数 | 打开某个 skill 详情 |
 | `subtaskPanelsGenerated` | **生成了**多少 panel / trace | 实验期间观察到的 subtask id **去重** |
-| `chatPanelFocusMs` | 鼠标在中间栏停留总毫秒 | `pointerenter` / `pointerleave` 累计 |
-| `trajectoryPanelFocusMs` | 鼠标在右侧栏停留总毫秒 | 同上 |
+| `chatPanelFocusMs` | 鼠标在中间对话/composer 区停留毫秒（不含 Todo） | `pointerenter` / `pointerleave` |
+| `todoPanelFocusMs` | Todo 面板停留毫秒 | 同上（离开后 resume chat） |
+| `sessionPanelFocusMs` | 左侧 session 列表停留毫秒 | 同上 |
+| `taskBarFocusMs` | 右侧 Task tab 栏停留毫秒 | 同上（离开后 resume trajectory） |
+| `trajectoryPanelFocusMs` | 右侧轨迹区停留毫秒（含 Action type legend） | 同上 |
+| `skillPanelFocusMs` | Skill Panel 停留毫秒 | 同上（离开后 resume trajectory） |
+| `tooltipPanelFocusMs` | Action / flow-end tooltip 打开期间毫秒 | tooltip open/close |
 
 ### 派生字段（`derived`）
 
@@ -86,8 +91,9 @@
 
 | 字段 | 含义 |
 |------|------|
-| `chatFocusRatio` | 中间栏焦点时间 / (中间+右侧) |
-| `trajectoryFocusRatio` | 右侧栏焦点时间占比 |
+| `chatFocusRatio` 等 | 各面板焦点 / **全部焦点面板合计**（见 `panelFocusShares`） |
+| `panelFocusShares` | `{chat,todo,session,task,trajectory,skill,tooltip}` 占比 |
+| `trajectoryFocusRatio` | 右侧轨迹区焦点时间占比 |
 | `chatScrollShare` | 中间滚动次数 / 总滚动次数 |
 | `trajectoryInteractionShare` | 右侧相关操作 / (左侧操作+右侧操作) 的粗占比 |
 | `firstInteractionOrder` | 各区域按「首次交互」时间排序（未碰过的区域不出现） |
@@ -97,6 +103,21 @@
 焦点/滚动拿不到「绝对真实注意力」，只是可复现的代理指标；论文里建议写明定义。
 
 **Panel 覆盖率**：对比 `subtaskPanelsGenerated`（生成数）与 `trajectoriesViewed`（查看数，去重）。也可直接看 `derived.panelViewCoverage`。
+
+### 对话时间线 / Agent 工作时间（主指标）
+
+| 字段 | 含义 |
+|------|------|
+| `firstUserTurnAt` / `firstUserTurnMs` | **第一个对话输入**时间 |
+| `lastConversationEndAt` | **最后一个对话结束**（末次 `agent.turn_end`） |
+| `conversationSpanMs` | 首输 → 末次对话结束（含用户思考间隔） |
+| **`agentWorkMs`** | **真正的 agent 工作时间**：每次「发送→助手回复完成/中止」累加（主指标） |
+| `agentWorkShareOfConversation` | agentWorkMs / conversationSpanMs |
+| `systemFocusMs` | 各面板指针停留合计（UI 使用，不是 agent 工作） |
+| `solveEndAt` / `solveDurationMs` | 次要：轨迹 `subtask.generated` 窗口 |
+| `focusDuringSolveMs` 等 | 对话窗口（优先 conversation span）内的面板焦点阶段 |
+
+事件：`agent.turn_start` / `agent.turn_end`（`props.ms` = 本轮工作毫秒）。
 
 ### 首次交互（`firstInteractionAt`）
 
