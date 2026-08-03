@@ -946,7 +946,7 @@ function App() {
 
   /** Locally cached pre-fork panel snapshot for diffing (not sent to the model) */
   const forkPanelSnapshotBundle = useMemo(
-    () => getForkPanelSnapshotBundle(selectedSessionId),
+    () => (selectedSessionId ? getForkPanelSnapshotBundle(selectedSessionId) : null),
     [selectedSessionId],
   )
 

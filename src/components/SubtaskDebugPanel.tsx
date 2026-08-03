@@ -1386,6 +1386,7 @@ export default function SubtaskDebugPanel({
       >
         <div
           ref={listScrollRef}
+          className="hide-scrollbar"
           onScroll={() => {
             updateStickTrajectoryFromScroll()
             experimentTelemetry.onScroll('trajectory', sessionId)

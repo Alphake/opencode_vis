@@ -11,9 +11,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 _DEFAULT: dict[str, Any] = {
     "prompts": {"root": str(PACKAGE_ROOT / "prompts")},
     "opencode": {
+        # Same free default as frontend / memory_worker MW_DEFAULT_MODEL_REF.
         "model": os.environ.get("MW_SKILL_EVOLVE_MODEL")
+        or os.environ.get("MW_OPENCODE_MODEL")
         or os.environ.get("OPENCODE_MODEL")
-        or "relay/deepseek-v4-flash",
+        or "opencode/big-pickle",
         "variant": None,
         "timeout_sec": 300,
     },

@@ -108,6 +108,12 @@ MW_OPENCODE_HTTP_TIMEOUT_SEC = 60
 MW_OPENCODE_MESSAGE_TIMEOUT_SEC = 180
 MW_ANALYZER_WAIT_PER_ATTEMPT_SEC = 180
 
+# Same free default as frontend `VIBETRACE_DEFAULT_MODEL_REF` (`src/config/opencodeDefaults.ts`).
+# Every worker → OpenCode message MUST send an explicit model; never fall back to user config.
+MW_DEFAULT_MODEL_REF = (
+    (os.environ.get("MW_OPENCODE_MODEL") or "").strip() or "opencode/big-pickle"
+)
+
 
 
 def parse_worker_port() -> int:
@@ -4330,8 +4336,31 @@ def opencode_get_messages(session_id: str, directory: str | None = None) -> list
     return data if isinstance(data, list) else []
 
 
-def opencode_send_message(session_id: str, text: str, directory: str | None = None) -> None:
-    body = {"parts": [{"type": "text", "text": text}]}
+def parse_model_ref_to_body(ref: str) -> dict[str, str]:
+    """Parse `providerID/modelID` into OpenCode message body.model shape."""
+    t = (ref or "").strip()
+    i = t.find("/")
+    if i <= 0 or i >= len(t) - 1:
+        raise ValueError(f"Invalid model ref (expected providerID/modelID): {ref!r}")
+    provider_id = t[:i].strip()
+    model_id = t[i + 1 :].strip()
+    if not provider_id or not model_id:
+        raise ValueError(f"Invalid model ref (expected providerID/modelID): {ref!r}")
+    return {"providerID": provider_id, "modelID": model_id}
+
+
+def opencode_send_message(
+    session_id: str,
+    text: str,
+    directory: str | None = None,
+    *,
+    model: str | None = None,
+) -> None:
+    model_ref = (model or "").strip() or MW_DEFAULT_MODEL_REF
+    body = {
+        "parts": [{"type": "text", "text": text}],
+        "model": parse_model_ref_to_body(model_ref),
+    }
     status, raw = opencode_request(
         "POST",
         f"/session/{session_id}/message",
@@ -4361,6 +4390,7 @@ def opencode_generate_text(
     directory: str | None = None,
     parent_session_id: str | None = None,
     *,
+    model: str | None = None,
     retry_with_new_session: bool = False,
     max_attempts: int | None = None,
     # Deprecated aliases kept so older call sites / hot-reload don't break mid-edit.
@@ -4370,6 +4400,7 @@ def opencode_generate_text(
     del retry_prompt  # new-session retries always resend the original prompt
     if retry_in_session_on_timeout is not None:
         retry_with_new_session = bool(retry_in_session_on_timeout)
+    model_ref = (model or "").strip() or MW_DEFAULT_MODEL_REF
     attempts_limit = (
         max_attempts
         if max_attempts is not None
@@ -4404,6 +4435,7 @@ def opencode_generate_text(
                 "parentSessionID": parent_session_id or "",
                 "attempt": attempt,
                 "maxAttempts": attempts_limit,
+                "model": model_ref,
                 "messageTimeoutSec": MW_OPENCODE_MESSAGE_TIMEOUT_SEC,
                 "waitStopTimeoutSec": MW_ANALYZER_WAIT_PER_ATTEMPT_SEC,
             },
@@ -4411,13 +4443,23 @@ def opencode_generate_text(
         append_log(
             log_file,
             f"{phase}.attempt.start",
-            {"attempt": attempt, "maxAttempts": attempts_limit, "isRetry": attempt > 1, "sessionID": session_id},
+            {
+                "attempt": attempt,
+                "maxAttempts": attempts_limit,
+                "isRetry": attempt > 1,
+                "sessionID": session_id,
+                "model": model_ref,
+            },
         )
 
         try:
             before_ids = _assistant_message_ids(opencode_get_messages(session_id, directory=directory))
-            opencode_send_message(session_id, prompt, directory=directory)
-            append_log(log_file, f"{phase}.message.send.ok", {"sessionID": session_id, "attempt": attempt})
+            opencode_send_message(session_id, prompt, directory=directory, model=model_ref)
+            append_log(
+                log_file,
+                f"{phase}.message.send.ok",
+                {"sessionID": session_id, "attempt": attempt, "model": model_ref},
+            )
             assistant = wait_assistant_stop_message(session_id, before_ids, directory=directory)
             append_log(log_file, f"{phase}.wait.stop.ok", {"sessionID": session_id, "attempt": attempt})
             break
@@ -4433,6 +4475,7 @@ def opencode_generate_text(
                     "maxAttempts": attempts_limit,
                     "error": str(e),
                     "willRetryWithNewSession": can_retry,
+                    "model": model_ref,
                     "waitStopTimeoutSec": MW_ANALYZER_WAIT_PER_ATTEMPT_SEC,
                     "messageTimeoutSec": MW_OPENCODE_MESSAGE_TIMEOUT_SEC,
                 },
@@ -5182,8 +5225,8 @@ def _run_skill_evolve_pipeline(
         variant: str | None,
         label: str,
     ) -> str:
-        # model/variant currently follow OpenCode session defaults; label drives log filenames.
-        del model, variant, timeout_sec
+        # variant/timeout_sec unused on HTTP path; model must be explicit (never OpenCode user config).
+        del variant, timeout_sec
         llm_out = opencode_generate_text(
             prompt,
             run_dir,
@@ -5191,6 +5234,7 @@ def _run_skill_evolve_pipeline(
             label,
             directory=effective_directory,
             parent_session_id=parent_session_id,
+            model=(model or "").strip() or MW_DEFAULT_MODEL_REF,
             retry_with_new_session=True,
             max_attempts=MW_ANALYZER_SESSION_ATTEMPTS,
         )
@@ -5727,6 +5771,7 @@ def main() -> None:
     print(f"[memory-worker] MW_OPENCODE_MESSAGE_TIMEOUT_SEC={MW_OPENCODE_MESSAGE_TIMEOUT_SEC}")
     print(f"[memory-worker] MW_ANALYZER_WAIT_PER_ATTEMPT_SEC={MW_ANALYZER_WAIT_PER_ATTEMPT_SEC}")
     print(f"[memory-worker] MW_ANALYZER_SESSION_ATTEMPTS={MW_ANALYZER_SESSION_ATTEMPTS}")
+    print(f"[memory-worker] MW_DEFAULT_MODEL_REF={MW_DEFAULT_MODEL_REF}")
     print(f"[memory-worker] MW_WRITER_MODE={cfg.writer_mode}")
     print(f"[memory-worker] MW_SESSION_STRATEGY={cfg.session_strategy}")
     auth_on = bool(opencode_basic_auth_header())
