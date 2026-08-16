@@ -103,7 +103,8 @@ import {
   filterTaskTabsForFork,
   mergeTaskSegmentTabs,
   reconcileTaskTabsWithMessages,
-  resolveTaskSegmentMessageRange,
+  filterSubtasksForTaskSegmentRange,
+  resolveVisibleTaskSegmentRange,
   sortTaskSegmentTabsByMessages,
   taskSegmentFromWorker,
   taskSegmentTabsFromWorkerBatch,
@@ -111,8 +112,11 @@ import {
 } from './utils/taskSegmentStorage'
 import {
   collectInternalSessionIdsFromIngest,
+  collectInternalSessionIdsFromPanelAnalysis,
+  isMemoryWorkerInternalSession,
   registerMemoryWorkerInternalSessionIds,
   shouldHideSessionFromHistory,
+  shouldSkipPanelAnalysisForSession,
   shouldSkipTraceIngestForSession,
 } from './utils/memoryWorkerSessions'
 import { scheduleMwInternalSessionRefresh } from './utils/mwInternalSessionRefresh'
@@ -504,6 +508,9 @@ function App() {
       )
       setKnownDirectories(nextKnown)
       setSessions(merged)
+      registerMemoryWorkerInternalSessionIds(
+        merged.filter((s) => isMemoryWorkerInternalSession(s)).map((s) => s.id),
+      )
       setApiConnected(true)
       return merged
     },
@@ -1866,22 +1873,38 @@ function App() {
 
   const visibleSubtasksForTaskSegment = useMemo(() => {
     if (!activeTaskSegment) return visibleSubtasks
-    const activeSegmentIndex = taskSegmentsForActiveSession.findIndex((tab) => tab.id === activeTaskSegment.id)
-    const priorTabs = activeSegmentIndex > 0 ? taskSegmentsForActiveSession.slice(0, activeSegmentIndex) : []
+    const range = resolveVisibleTaskSegmentRange(
+      activeTaskSegment,
+      taskSegmentsForActiveSession,
+      messages,
+    )
+    // Never blank the rail when the active tab window is unresolved (new pending tab
+    // after task-switch / fork, or stale message ids). Prefer a resolved prior window;
+    // otherwise show the full live trajectory.
+    if (!range) return visibleSubtasks
+
+    const filtered = filterSubtasksForTaskSegmentRange(visibleSubtasks, range)
+    if (filtered.length > 0 || visibleSubtasks.length === 0) return filtered
+
+    const activeSegmentIndex = taskSegmentsForActiveSession.findIndex(
+      (tab) => tab.id === activeTaskSegment.id,
+    )
     const isLatestTab =
       activeSegmentIndex >= 0 && activeSegmentIndex === taskSegmentsForActiveSession.length - 1
-    const range = resolveTaskSegmentMessageRange(activeTaskSegment, messages, priorTabs, {
-      // While task-switch is deciding, keep showing new turns on the latest tab;
-      // when a new pending tab appears, applyMemoryWorker moves focus there.
-      extendToLiveEnd: isLatestTab,
-    })
-    if (!range) return []
-    const { startIndex, endIndex } = range
-    return visibleSubtasks.filter(({ subtask }) => {
-      const assistantIndices = subtask.assistantMessageIndices ?? []
-      if (assistantIndices.length === 0) return false
-      return assistantIndices.every((idx) => idx >= startIndex && idx <= endIndex)
-    })
+    if (!isLatestTab) return filtered
+
+    // Latest tab resolved but still empty (boundary ahead of live messages) — keep
+    // showing whatever the previous tab owned instead of "No subtasks".
+    if (activeSegmentIndex > 0) {
+      const priorTabs = taskSegmentsForActiveSession.slice(0, activeSegmentIndex)
+      const prior = priorTabs[priorTabs.length - 1]!
+      const priorRange = resolveVisibleTaskSegmentRange(prior, priorTabs, messages)
+      if (priorRange) {
+        const priorFiltered = filterSubtasksForTaskSegmentRange(visibleSubtasks, priorRange)
+        if (priorFiltered.length > 0) return priorFiltered
+      }
+    }
+    return visibleSubtasks
   }, [activeTaskSegment, messages, taskSegmentsForActiveSession, visibleSubtasks])
 
   /** Execution-phase cards: highlight Todo rows via linked ids */
@@ -1972,6 +1995,15 @@ function App() {
     (subtaskId: string) => {
       const sid = selectedSessionIdRef.current
       if (!sid || !subtaskId) return
+      const session = sessionsRef.current.find((s) => s.id === sid)
+      if (shouldSkipPanelAnalysisForSession(sid, session)) {
+        console.info('[VibeTrace][panel-analysis] skip — mw-internal session', {
+          sessionId: sid,
+          subtaskId,
+          title: session?.title,
+        })
+        return
+      }
       const claimKey = `${sid}:${subtaskId}`
       // Durable front-end mark: one attempt per panel for this page lifetime.
       if (panelAnalysisRequestedRef.current.has(claimKey)) {
@@ -1991,7 +2023,6 @@ function App() {
       }
       panelAnalysisRequestedRef.current.add(claimKey)
 
-      const session = sessionsRef.current.find((s) => s.id === sid)
       const directory = session?.directory
       mergePanelAnalysisItems(sid, [
         {
@@ -2011,6 +2042,10 @@ function App() {
         .then((batch) => {
           if (selectedSessionIdRef.current !== sid) return
           const items = batch.items ?? []
+          registerMemoryWorkerInternalSessionIds(collectInternalSessionIdsFromPanelAnalysis(items))
+          if (items.some((item) => item.diagnosisSessionID)) {
+            scheduleMwInternalSessionRefresh(refreshSessions)
+          }
           if (items.length > 0) {
             mergePanelAnalysisItems(sid, items)
             console.info('[VibeTrace][panel-analysis] received', {
@@ -2036,7 +2071,12 @@ function App() {
               window.setTimeout(() => {
                 void fetchPanelAnalysisForSession(sid)
                   .then((refresh) => {
-                    if (refresh.items?.length) mergePanelAnalysisItems(sid, refresh.items)
+                    if (refresh.items?.length) {
+                      registerMemoryWorkerInternalSessionIds(
+                        collectInternalSessionIdsFromPanelAnalysis(refresh.items),
+                      )
+                      mergePanelAnalysisItems(sid, refresh.items)
+                    }
                   })
                   .catch((err) => console.warn('[VibeTrace][panel-analysis refresh failed]', err))
               }, delayMs)
@@ -2056,7 +2096,7 @@ function App() {
           ])
         })
     },
-    [mergePanelAnalysisItems],
+    [mergePanelAnalysisItems, refreshSessions],
   )
 
   useEffect(() => {

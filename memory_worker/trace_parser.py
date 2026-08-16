@@ -868,15 +868,19 @@ def _derive_subtask_title(st: dict[str, Any], messages: list[dict[str, Any]], di
     newly = _list(st.get("todosNewlyCompleted"))
     if newly:
         content = str(_record(newly[0]).get("content") or "")
-        head = content[:36] + "…" if len(content) > 36 else content
+        # Keep a generous first-todo snippet; the card UI truncates/expands for display.
+        head = content[:120].rstrip() + "…" if len(content) > 120 else content
         more = f" +{len(newly) - 1} more" if len(newly) > 1 else ""
         return f"Done: {head}{more}"
     for idx in _list(st.get("assistantMessageIndices")):
         if isinstance(idx, int) and idx < len(messages):
             for part in _parts(messages[idx]):
                 if part.get("type") == "text" and str(part.get("text") or "").strip():
-                    line = str(part["text"]).strip().split("\n")[0][:44]
-                    return line + "…" if len(line) >= 44 else line
+                    # Prefer the full first line (capped) so expand-to-wrap can show the real title.
+                    line = str(part["text"]).strip().split("\n")[0]
+                    if len(line) > 200:
+                        return line[:200].rstrip() + "…"
+                    return line
     return f"Subtask {display_index + 1}"
 
 

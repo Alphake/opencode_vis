@@ -297,7 +297,9 @@ export function deriveSubtaskTitle(
   }
   if (st.todosNewlyCompleted.length > 0) {
     const first = st.todosNewlyCompleted[0]!
-    const head = first.content.length > 36 ? `${first.content.slice(0, 36)}…` : first.content
+    // Keep a generous first-todo snippet; the card UI truncates/expands for display.
+    const head =
+      first.content.length > 120 ? `${first.content.slice(0, 120).trimEnd()}…` : first.content
     const more =
       st.todosNewlyCompleted.length > 1 ? ` +${st.todosNewlyCompleted.length - 1} more` : ''
     return `Done: ${head}${more}`
@@ -308,8 +310,10 @@ export function deriveSubtaskTitle(
     if (msg) {
       for (const p of msg.parts) {
         if (p.type === 'text' && p.text?.trim()) {
-          const line = p.text.trim().split(/\n/)[0]!.slice(0, 44)
-          return line.length >= 44 ? `${line}…` : line
+          // Prefer the full first line (capped) so expand-to-wrap can show the real title.
+          const line = p.text.trim().split(/\n/)[0]!
+          if (line.length > 200) return `${line.slice(0, 200).trimEnd()}…`
+          return line
         }
       }
     }

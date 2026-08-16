@@ -2795,6 +2795,51 @@ def _fallback_panel_analysis_from_raw(raw_text: str, has_error: bool) -> dict[st
     }
 
 
+def opencode_get_session(session_id: str, directory: str | None = None) -> dict[str, Any] | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+    try:
+        status, text = opencode_request("GET", f"/session/{session_id}", directory=directory)
+    except Exception:
+        return None
+    if status != 200 or not str(text or "").strip():
+        return None
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _is_known_panel_analysis_analyzer_session(session_id: str) -> bool:
+    """True if this session was created as a panel-analysis LLM session (loop risk)."""
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return False
+    index = _load_error_diagnosis_index()
+    diagnoses = index.get("diagnoses") if isinstance(index.get("diagnoses"), dict) else {}
+    for entry in diagnoses.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("diagnosisSessionID") or "").strip() == session_id:
+            return True
+    return False
+
+
+def is_mw_internal_session(session_id: str, directory: str | None = None) -> bool:
+    """Skip panel-analysis / diagnosis for memory-worker internal analyzer sessions."""
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return False
+    if _is_known_panel_analysis_analyzer_session(session_id):
+        return True
+    session = opencode_get_session(session_id, directory=directory)
+    title = str((session or {}).get("title") or "").strip()
+    prefix = (MW_SESSION_TITLE_PREFIX or "").strip()
+    return bool(prefix and title.startswith(prefix))
+
+
 def run_error_diagnosis_for_trace(
     trace: dict[str, Any],
     directory_override: str | None = None,
@@ -2807,6 +2852,20 @@ def run_error_diagnosis_for_trace(
     end_msg_id = str(turn.get("endAssistantMessageId") or trace_primary_end_message_id(trace) or "").strip()
     trace_dir = str((session.get("directory") or "")).strip()
     effective_directory = directory_override or trace_dir or OPENCODE_DIRECTORY
+
+    if session_id and is_mw_internal_session(session_id, directory=effective_directory):
+        print(
+            "[memory-worker] error-diagnosis.skip mw-internal "
+            f"sessionId={session_id}"
+        )
+        return {
+            "ok": True,
+            "count": 0,
+            "items": [],
+            "skipped": True,
+            "reason": "mw_internal_session",
+            "sessionId": session_id,
+        }
 
     subtasks = primary.get("subtasks")
     if not isinstance(subtasks, list):
@@ -3074,6 +3133,21 @@ def run_panel_analysis_for_subtask(
     subtask_id = str(subtask_id or "").strip()
     if not session_id or not subtask_id:
         return {"ok": False, "error": "sessionId and subtaskId are required", "count": 0, "items": []}
+
+    if is_mw_internal_session(session_id, directory=directory_override):
+        print(
+            "[memory-worker] panel-analysis.skip mw-internal "
+            f"sessionId={session_id} subtaskId={subtask_id}"
+        )
+        return {
+            "ok": True,
+            "count": 0,
+            "items": [],
+            "skipped": True,
+            "reason": "mw_internal_session",
+            "sessionId": session_id,
+            "subtaskId": subtask_id,
+        }
 
     # Durable mark: one successful summary per panel (sessionId + subtaskId).
     existing = find_panel_analysis_for_subtask(session_id, subtask_id)

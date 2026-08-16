@@ -427,8 +427,12 @@ export default function SubtaskCard({
   const [actionsDurationOn, setActionsDurationOn] = useState(false)
   const [filterMode, setFilterMode] = useState<FilterMode>('duration')
   const [snapshotBusy, setSnapshotBusy] = useState(false)
+  /** Single-line ellipsis by default; click expands to wrapped full title. */
+  const [titleExpanded, setTitleExpanded] = useState(false)
+  const [titleOverflows, setTitleOverflows] = useState(false)
   /** DOM anchor only — use outer wrapper for fork/scroll */
   const cardRef = useRef<HTMLDivElement | null>(null)
+  const titleRef = useRef<HTMLHeadingElement | null>(null)
   const [childBranchActions, setChildBranchActions] = useState<(MappedAction & { row: number })[]>([])
   /** Raw child-session messages merged into Changes (write/edit paths) */
   const [childBranchMessages, setChildBranchMessages] = useState<OcMessage[]>([])
@@ -441,6 +445,28 @@ export default function SubtaskCard({
       }),
     [subtask, messages, displayIndex, nowTick, childBranchMessages],
   )
+
+  useEffect(() => {
+    setTitleExpanded(false)
+  }, [m.title, subtask.subtask_id])
+
+  useEffect(() => {
+    const el = titleRef.current
+    if (!el) return
+
+    const measure = () => {
+      if (titleExpanded) {
+        setTitleOverflows(true)
+        return
+      }
+      setTitleOverflows(el.scrollWidth > el.clientWidth + 1)
+    }
+
+    measure()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    ro?.observe(el)
+    return () => ro?.disconnect()
+  }, [m.title, titleExpanded])
 
   /** Leading user indices + assistants in global timeline order */
   const segmentMessages = useMemo((): OcMessage[] => {
@@ -954,6 +980,23 @@ export default function SubtaskCard({
             </label>
           ) : null}
           <h3
+            ref={titleRef}
+            title={titleOverflows && !titleExpanded ? 'Click to show full title' : undefined}
+            onClick={(e) => {
+              if (!titleOverflows && !titleExpanded) return
+              e.stopPropagation()
+              setTitleExpanded((v) => !v)
+            }}
+            onKeyDown={(e) => {
+              if (!titleOverflows && !titleExpanded) return
+              if (e.key !== 'Enter' && e.key !== ' ') return
+              e.preventDefault()
+              e.stopPropagation()
+              setTitleExpanded((v) => !v)
+            }}
+            role={titleOverflows || titleExpanded ? 'button' : undefined}
+            tabIndex={titleOverflows || titleExpanded ? 0 : undefined}
+            aria-expanded={titleOverflows || titleExpanded ? titleExpanded : undefined}
             style={{
               margin: 0,
               fontWeight: 600,
@@ -961,10 +1004,12 @@ export default function SubtaskCard({
               lineHeight: '18px',
               color: '#2B2B2B',
               minWidth: 0,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
+              overflow: titleExpanded ? 'visible' : 'hidden',
+              textOverflow: titleExpanded ? 'clip' : 'ellipsis',
+              whiteSpace: titleExpanded ? 'normal' : 'nowrap',
+              wordBreak: titleExpanded ? 'break-word' : undefined,
               flex: 1,
+              cursor: titleOverflows || titleExpanded ? 'pointer' : 'default',
             }}
           >
             {m.title}

@@ -64,6 +64,14 @@ export function shouldSkipTraceIngestForSession(
   return isMemoryWorkerPipelineSession(sessionId, session)
 }
 
+/** mw-internal analyzer traces must not run panel-analysis (avoids endless nested diagnosis). */
+export function shouldSkipPanelAnalysisForSession(
+  sessionId: string,
+  session: Pick<OcSession, 'title'> | null | undefined,
+): boolean {
+  return isMemoryWorkerPipelineSession(sessionId, session)
+}
+
 export function registerMemoryWorkerInternalSessionIds(ids: Iterable<string>): void {
   let changed = false
   for (const id of ids) {
@@ -75,17 +83,31 @@ export function registerMemoryWorkerInternalSessionIds(ids: Iterable<string>): v
   if (changed) persistBlocklist()
 }
 
+function collectDiagnosisSessionIds(
+  items: Array<{ diagnosisSessionID?: unknown } | null | undefined> | undefined,
+): string[] {
+  const ids: string[] = []
+  for (const item of items ?? []) {
+    if (!item || typeof item !== 'object') continue
+    const sid = typeof item.diagnosisSessionID === 'string' ? item.diagnosisSessionID.trim() : ''
+    if (sid) ids.push(sid)
+  }
+  return ids
+}
+
+export function collectInternalSessionIdsFromPanelAnalysis(
+  items: Array<{ diagnosisSessionID?: unknown } | null | undefined> | undefined,
+): string[] {
+  return collectDiagnosisSessionIds(items)
+}
+
 export function collectInternalSessionIdsFromIngest(result: MemoryWorkerIngestResult): string[] {
   const ids: string[] = []
   const analyzerId = typeof result.analyzerSessionID === 'string' ? result.analyzerSessionID.trim() : ''
   if (analyzerId) ids.push(analyzerId)
   const writerId = typeof result.writerSessionID === 'string' ? result.writerSessionID.trim() : ''
   if (writerId) ids.push(writerId)
-  const diagnosisItems = result.errorDiagnosis?.items ?? []
-  for (const item of diagnosisItems) {
-    const sid = typeof item.diagnosisSessionID === 'string' ? item.diagnosisSessionID.trim() : ''
-    if (sid) ids.push(sid)
-  }
+  ids.push(...collectDiagnosisSessionIds(result.errorDiagnosis?.items))
   const writerResults = result.writerResults
   if (Array.isArray(writerResults)) {
     for (const item of writerResults) {
